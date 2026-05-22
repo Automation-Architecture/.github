@@ -1,0 +1,51 @@
+name: Request Copilot Code Review
+
+# Formally requests Copilot as a reviewer on every PR. This triggers GitHub's
+# dynamic `copilot-pull-request-reviewer` status check — required by the AAA
+# branch-protection ruleset (16125109) for merge.
+#
+# Uses the GraphQL `requestReviews` mutation with `botIds` because Copilot is
+# a Bot, not a User, and `gh pr edit --add-reviewer Copilot` /
+# `requestReviewsByLogin` cannot resolve it (silent fail with GraphQL error
+# "Could not resolve user with login 'copilot'"). See 2026-05-21 debug session.
+#
+# `synchronize` is REQUIRED (verified 2026-05-22 via PR #7): the org-level
+# Copilot Automatic Code Review policy only requests Copilot once per PR
+# (on open/ready_for_review). It does NOT re-review on subsequent pushes.
+# This workflow's `requestReviews` mutation on `synchronize` is what triggers
+# Copilot to re-review each push. Without it, Copilot reviews exactly once
+# per PR and never sees later commits — worse than the status quo.
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review, synchronize]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  request-copilot-review:
+    # Skip fork PRs: the `pull_request` event gives forks a read-only
+    # `GITHUB_TOKEN`, so `requestReviews` would 403 and fail this job.
+    # The org is private and PRs come from same-repo branches; this
+    # guard makes the workflow a no-op for any future fork contribution
+    # rather than blocking it with a hard failure.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request Copilot reviewer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NODE: ${{ github.event.pull_request.node_id }}
+        run: |
+          # Copilot reviewer bot — stable globally (verified 2026-05-21).
+          BOT_NODE="BOT_kgDOCnlnWA"
+          if ! gh api graphql -f query='
+            mutation ($pr: ID!, $botId: ID!) {
+              requestReviews(input: {pullRequestId: $pr, botIds: [$botId], union: true}) {
+                pullRequest { number }
+              }
+            }' -F pr="$PR_NODE" -F botId="$BOT_NODE"; then
+            echo "::error::Could not add Copilot reviewer — check that Copilot Code Review is enabled at https://github.com/organizations/Automation-Architecture/settings/copilot/policies, that BOT_NODE is still correct, and that the workflow has pull-requests:write."
+            exit 1
+          fi
