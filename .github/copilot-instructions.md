@@ -28,20 +28,22 @@ Automation Architecture (AAA) ships AI-driven automation systems for clients: in
 
 4. **AAA-specific rules**
    - **Tech docs contain no financial content.** Flag pricing, payment status, contract terms, billing details, or proposal acceptance in any committed file (READMEs, CLAUDE.md, specs, dashboards). Finance lives only in the operator's private deliverables folder.
-   - **Jira tickets referenced in PR bodies/commits** should include User Story + Description + Acceptance Criteria; flag PRs that ship work for a ticket missing any of the three (low priority — comment, don't block).
+   - **Jira context in PR bodies.** If the PR body or commits include User Story / Description / Acceptance Criteria sections (e.g. copied from Jira), flag missing pieces among the three. Do not flag PRs that simply reference a ticket key without pasting its content — you can't read the ticket, so absence isn't a finding (low priority — comment, don't block).
    - **`.env*` files** should hold only required variables with placeholder values — flag optional/commented extras.
    - **Conventional Commits**: PR title should match `<type>(<scope>)?: <subject>` with subject ≤ 50 chars. Scope is optional. Include it when the change is bounded to one area (e.g. `feat(auth): ...`); omit it for cross-cutting or repo-wide changes (e.g. `docs: ...`, `chore: ...`). Flag noncompliance (low priority).
 
 ## Docs-only PRs
 
-For PRs where every changed path matches `**/*.md` or `docs/**`, do a single high-level pass: flag broken links, typos, and stale references (e.g. references to renamed files, removed commands, or deprecated env vars). Do not review prose style, tone, or structure. If any non-docs path is in the diff, treat the PR as a normal code review.
+For PRs where every changed path matches `**/*.md` or `docs/**`, do a single high-level pass: flag broken links, typos, and stale references (e.g. references to renamed files, removed commands, or deprecated env vars). Do not review prose style, tone, or structure. **Priority 1 security checks still apply** — if a doc change accidentally includes credentials, tokens, internal URLs, or secrets in code examples, flag it. If any non-docs path is in the diff, treat the PR as a normal code review.
 
-## Skip these (style / correctness review only — security still applies)
+## Skip these for style / correctness only
 
-Do not comment on style, naming, structure, or correctness for files matching the patterns below. The Priority 1 security rules above (hardcoded credentials, exposed secrets, malicious dependency substitution) **still apply to every file in the diff**, including those listed here — a leaked token in a lockfile or a swapped-out dependency in `package-lock.json` is exactly the kind of finding worth flagging.
+> **Security always applies.** The Priority 1 rules (hardcoded credentials, exposed secrets, malicious dependency substitution, leaked tokens) are evaluated on **every file in the diff**, including everything listed below. A leaked token in `package-lock.json` or a swapped dependency line is exactly the kind of finding worth flagging. The "skip" only applies to style, naming, structure, and correctness-of-logic review.
+
+Paths to skip for style / correctness review:
 
 - Lockfiles: `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `Gemfile.lock`.
-- Generated SDK / types / migrations output: `**/generated/**`, `**/*.generated.{ts,js}`, `app/src/types/supabase.ts`, `**/__generated__/**`.
+- Generated SDK / types / migrations output: `**/generated/**`, `**/*.generated.ts`, `**/*.generated.js`, `app/src/types/supabase.ts`, `**/__generated__/**`.
 - Build / dist artefacts: `**/dist/**`, `**/build/**`, `**/.next/**`, `**/.turbo/**`, `**/.vercel/**`, `**/coverage/**`, `**/node_modules/**`, `**/.venv/**`, `**/__pycache__/**`.
 - Snapshot tests: `**/__snapshots__/**`, `**/*.snap`.
 - Vendor / third-party copies: `**/vendor/**`, `**/third_party/**`.
