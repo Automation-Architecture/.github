@@ -36,7 +36,9 @@ Automation Architecture (AAA) ships AI-driven automation systems for clients: in
 
 For PRs where every changed path matches `**/*.md` or `docs/**`, do a single high-level pass: flag broken links, typos, and stale references (e.g. references to renamed files, removed commands, or deprecated env vars). Do not review prose style, tone, or structure. If any non-docs path is in the diff, treat the PR as a normal code review.
 
-## Skip these (don't review, don't comment)
+## Skip these (style / correctness review only — security still applies)
+
+Do not comment on style, naming, structure, or correctness for files matching the patterns below. The Priority 1 security rules above (hardcoded credentials, exposed secrets, malicious dependency substitution) **still apply to every file in the diff**, including those listed here — a leaked token in a lockfile or a swapped-out dependency in `package-lock.json` is exactly the kind of finding worth flagging.
 
 - Lockfiles: `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `Gemfile.lock`.
 - Generated SDK / types / migrations output: `**/generated/**`, `**/*.generated.{ts,js}`, `app/src/types/supabase.ts`, `**/__generated__/**`.
