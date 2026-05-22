@@ -1,0 +1,67 @@
+# Copilot Code Review Instructions — Automation-Architecture
+
+> Org-wide defaults read by GitHub Copilot for every PR review in this org.
+> Per-repo `.github/copilot-instructions.md` can extend or override this file.
+> Last updated: 2026-05-22.
+
+## What this org builds
+
+Automation Architecture (AAA) ships AI-driven automation systems for clients: internal tooling (FastAPI, Next.js, Postgres on Railway / Supabase / Vercel), client dashboards, n8n workflows, Apify scrapers, Claude Code agent skills, and integration glue (Jira, Slack, Fireflies, Stripe, GitHub Apps). Most repos are small (≤ 5 engineers), high-velocity, and serve either a paying client or internal ops.
+
+## Review focus — in priority order
+
+1. **Security & secrets**
+   - Flag any hardcoded credential, API key, token, password, PEM, webhook URL, OAuth client secret, or database URL. Secrets MUST come from environment variables or a secret manager. No exceptions.
+   - Flag `.env*` files that contain real values (not placeholders) being committed.
+   - Flag any logging statement that emits a secret, token, or PII.
+   - For Postgres / Supabase: flag missing Row Level Security on new tables holding user or client data.
+   - For Next.js: flag secrets used in client components / `NEXT_PUBLIC_*` env vars.
+
+2. **Correctness over style**
+   - Prioritise bugs, race conditions, missing error handling at system boundaries, broken auth, missing input validation on user-facing endpoints.
+   - For migrations (Alembic / Supabase): flag destructive operations without explicit comment justifying them, missing downgrade paths, or schema changes that break the running app.
+   - For React / Next.js App Router: flag effects with missing dependencies, Server/Client boundary violations, accidental waterfall fetches in Server Components.
+
+3. **No silent skipping**
+   - Flag `# noqa`, `// eslint-disable`, `# type: ignore`, `@ts-expect-error`, `# pragma: no cover`, or test skips without an inline justification.
+   - Flag `--no-verify`, `--force`, `--no-gpg-sign` in committed scripts/workflows.
+
+4. **AAA-specific rules**
+   - **Tech docs contain no financial content.** Flag pricing, payment status, contract terms, billing details, or proposal acceptance in any committed file (READMEs, CLAUDE.md, specs, dashboards). Finance lives only in the operator's private deliverables folder.
+   - **Jira tickets referenced in PR bodies/commits** should include User Story + Description + Acceptance Criteria; flag PRs that ship work for a ticket missing any of the three (low priority — comment, don't block).
+   - **`.env*` files** should hold only required variables with placeholder values — flag optional/commented extras.
+   - **Conventional Commits**: PR title should match `<type>(<scope>): <subject>` with subject ≤ 50 chars. Flag noncompliance (low priority).
+
+## Skip these (don't review, don't comment)
+
+- Lockfiles: `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `poetry.lock`, `uv.lock`, `Cargo.lock`, `Gemfile.lock`.
+- Generated SDK / types / migrations output: `**/generated/**`, `**/*.generated.{ts,js}`, `app/src/types/supabase.ts`, `**/__generated__/**`.
+- Build / dist artefacts: `**/dist/**`, `**/build/**`, `**/.next/**`, `**/.turbo/**`, `**/.vercel/**`, `**/coverage/**`, `**/node_modules/**`, `**/.venv/**`, `**/__pycache__/**`.
+- Snapshot tests: `**/__snapshots__/**`, `**/*.snap`.
+- Docs-only PRs (paths matching `**/*.md`, `docs/**`) — review only if the diff includes code; for pure documentation copy-edits, a single high-level pass is enough.
+- Vendor / third-party copies: `**/vendor/**`, `**/third_party/**`.
+
+## Tone
+
+- Be concise. One line per finding when possible: location, problem, suggested fix.
+- Drop "consider", "you might want to", "it would be nice if" — just state the finding.
+- Don't repeat what other reviewers (CodeRabbit, human) have already said.
+- Don't recommend wholesale rewrites — propose minimal diffs.
+- Praise is fine but optional — don't pad reviews with it.
+
+## Common project stacks (so you know what's idiomatic)
+
+- **Python**: FastAPI + SQLAlchemy + Alembic, pydantic v2, uv for env mgmt, pytest. Targets Python 3.11+. Type hints expected on public functions.
+- **TypeScript / Next.js**: App Router (Next.js 14+ / 15+ / 16), shadcn/ui, Tailwind, React Server Components by default, Server Actions for mutations. Strict TS.
+- **Infra**: Railway (FastAPI + Postgres), Vercel (Next.js), Supabase (Postgres + auth + RLS), Cloudflare for DNS, GitHub Actions for CI.
+- **Agent / AI**: Anthropic SDK (Claude), prompt caching expected on every multi-turn prompt; Vercel AI SDK for streaming; n8n for workflow orchestration.
+
+## What "approved" means in this org
+
+A PR is mergeable when:
+1. CodeRabbit status check is green (or no actionable findings).
+2. `copilot-pull-request-reviewer` status check is green (you).
+3. CI passes.
+4. The author has addressed all actionable findings or explicitly resolved them.
+
+Repo admins can bypass via admin-merge, but only when reviewer findings have been triaged.
