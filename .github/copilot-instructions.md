@@ -30,7 +30,7 @@ Automation Architecture (AAA) ships AI-driven automation systems for clients: in
    - **Tech docs contain no financial content.** Flag pricing, payment status, contract terms, billing details, or proposal acceptance in any committed file (READMEs, CLAUDE.md, specs, dashboards). Finance lives only in the operator's private deliverables folder.
    - **Jira context in PR bodies.** If the PR body or commits include User Story / Description / Acceptance Criteria sections (e.g. copied from Jira), flag missing pieces among the three. Do not flag PRs that simply reference a ticket key without pasting its content — you can't read the ticket, so absence isn't a finding (low priority — comment, don't block).
    - **`.env*` files** should hold only required variables with placeholder values — flag optional/commented extras.
-   - **Conventional Commits**: PR title should match `<type>(<scope>)?: <subject>` with subject ≤ 50 chars. Scope is optional. Include it when the change is bounded to one area (e.g. `feat(auth): ...`); omit it for cross-cutting or repo-wide changes (e.g. `docs: ...`, `chore: ...`). Flag noncompliance (low priority).
+   - **Conventional Commits**: PR title should match `<type>(<scope>)?!?: <subject>` with subject ≤ 50 chars. Scope is optional; trailing `!` marks a breaking change (e.g. `feat!: ...`, `feat(api)!: ...`). Include scope when the change is bounded to one area (e.g. `feat(auth): ...`); omit it for cross-cutting or repo-wide changes (e.g. `docs: ...`, `chore: ...`). Flag noncompliance (low priority).
 
 ## Docs-only PRs
 
