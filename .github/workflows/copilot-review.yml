@@ -34,10 +34,12 @@ jobs:
         run: |
           # Copilot reviewer bot — stable globally (verified 2026-05-21).
           BOT_NODE="BOT_kgDOCnlnWA"
-          gh api graphql -f query='
+          if ! gh api graphql -f query='
             mutation ($pr: ID!, $botId: ID!) {
               requestReviews(input: {pullRequestId: $pr, botIds: [$botId], union: true}) {
                 pullRequest { number }
               }
-            }' -F pr="$PR_NODE" -F botId="$BOT_NODE" \
-          || echo "::warning::Could not add Copilot reviewer — ensure Copilot Code Review is enabled at https://github.com/organizations/Automation-Architecture/settings/copilot/policies"
+            }' -F pr="$PR_NODE" -F botId="$BOT_NODE"; then
+            echo "::error::Could not add Copilot reviewer — check that Copilot Code Review is enabled at https://github.com/organizations/Automation-Architecture/settings/copilot/policies, that BOT_NODE is still correct, and that the workflow has pull-requests:write."
+            exit 1
+          fi
