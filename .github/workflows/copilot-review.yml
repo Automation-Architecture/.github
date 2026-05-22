@@ -25,6 +25,12 @@ permissions:
 
 jobs:
   request-copilot-review:
+    # Skip fork PRs: the `pull_request` event gives forks a read-only
+    # `GITHUB_TOKEN`, so `requestReviews` would 403 and fail this job.
+    # The org is private and PRs come from same-repo branches; this
+    # guard makes the workflow a no-op for any future fork contribution
+    # rather than blocking it with a hard failure.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - name: Request Copilot reviewer
