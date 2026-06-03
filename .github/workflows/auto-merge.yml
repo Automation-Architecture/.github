@@ -39,8 +39,6 @@ concurrency:
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    # Skip fork repos (org is private; guard is belt-and-suspenders).
-    if: github.event.repository.fork == false
     steps:
       - name: Evaluate and merge
         env:
@@ -52,10 +50,15 @@ jobs:
           # ── Resolve SHA and PR number ────────────────────────────────────
           if [ "${{ github.event_name }}" = "check_suite" ]; then
             SHA="${{ github.event.check_suite.head_sha }}"
-            PR_NUMBER=$(gh api "/repos/$REPO/pulls?state=open&per_page=100" \
+            # Paginate: repos with >100 open PRs would otherwise silently miss the match.
+            PR_NUMBER=$(gh api "/repos/$REPO/pulls?state=open" --paginate \
               --jq ".[] | select(.head.sha == \"$SHA\") | .number" | head -1)
           else
-            # pull_request_review
+            # pull_request_review: skip PRs from forks — GITHUB_TOKEN is read-only there.
+            if [ "${{ github.event.pull_request.head.repo.full_name }}" != "$REPO" ]; then
+              echo "Fork PR — skipping."
+              exit 0
+            fi
             SHA="${{ github.event.pull_request.head.sha }}"
             PR_NUMBER="${{ github.event.pull_request.number }}"
           fi
@@ -66,17 +69,24 @@ jobs:
           fi
           echo "PR #$PR_NUMBER  HEAD $SHA"
 
-          # ── Gate 1: all check-runs completed with no failures ─────────────
-          CHECK_RUNS=$(gh api "/repos/$REPO/commits/$SHA/check-runs?per_page=100" \
-            --jq '.check_runs')
+          # ── Gate 1: at least one check-run, all completed, none failed ────
+          # Paginate: repos with many workflows can exceed 100 check-runs per SHA.
+          CHECK_RUNS=$(gh api "/repos/$REPO/commits/$SHA/check-runs" --paginate \
+            --jq '[.check_runs[]]')
 
+          TOTAL=$(echo "$CHECK_RUNS"   | jq 'length')
           PENDING=$(echo "$CHECK_RUNS" | jq '[.[] | select(.status != "completed")] | length')
           FAILED=$(echo "$CHECK_RUNS"  | jq '[.[] | select(
             .conclusion == "failure" or
             .conclusion == "timed_out" or
-            .conclusion == "cancelled"
+            .conclusion == "cancelled" or
+            .conclusion == "action_required"
           )] | length')
 
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No check-runs found for $SHA — not merging (no CI evidence)."
+            exit 0
+          fi
           if [ "$PENDING" -gt 0 ]; then
             echo "$PENDING check(s) still pending — not merging yet."
             exit 0
@@ -90,7 +100,8 @@ jobs:
           # /pulls/N/comments identity: "Copilot" (not "copilot-pull-request-reviewer[bot]")
           # Filter on original_commit_id so resolved-but-line-valid comments
           # that GitHub re-attaches forward via commit_id don't mask open findings.
-          COPILOT_COMMENTS=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/comments?per_page=100" \
+          # Paginate: large PRs can have >100 review comments.
+          COPILOT_COMMENTS=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/comments" --paginate \
             --jq "[.[] | select(
               .original_commit_id == \"$SHA\" and
               .user.login == \"Copilot\"
