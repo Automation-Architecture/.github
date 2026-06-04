@@ -112,6 +112,8 @@ jobs:
           fi
 
           echo "run=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
           echo "$COUNT finding(s) on HEAD — attempt $((FIX_COMMITS + 1))/3."
 
       # ── Checkout the PR branch ─────────────────────────────────────────────
@@ -133,9 +135,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SHA="${{ github.event.pull_request.head.sha }}"
+          SHA="${{ steps.gate.outputs.sha }}"
           REPO="${{ github.repository }}"
-          PR="${{ github.event.pull_request.number }}"
+          PR="${{ steps.gate.outputs.pr }}"
 
           # Fetch findings with file + line + comment body.
           # --jq emits a bare stream of formatted strings; jq -rs slurps and joins.
@@ -182,7 +184,7 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add .
             COUNT="${{ steps.gate.outputs.findings }}"
-            PR="${{ github.event.pull_request.number }}"
+            PR="${{ steps.gate.outputs.pr }}"
             git commit -m "fix(copilot): auto-fix ${COUNT} finding(s) on PR #${PR}"
             git push
             echo "Fixes pushed. copilot-review.yml will trigger re-review via synchronize."
