@@ -45,7 +45,7 @@ jobs:
           ORG: Automation-Architecture
         run: |
           python3 << 'PYEOF'
-          import base64, json, os, subprocess, time, urllib.parse, urllib.request
+          import base64, json, os, subprocess, time, urllib.parse
 
           ORG = os.environ["ORG"]
           GH_TOKEN = os.environ["GH_TOKEN"]
@@ -83,41 +83,29 @@ jobs:
               except json.JSONDecodeError:
                   return []
 
-          def _api_get(path, params=None):
-              """Direct GitHub REST API call using AAA_ORG_TOKEN via urllib."""
-              url = "https://api.github.com" + path
-              if params:
-                  url += "?" + urllib.parse.urlencode(params)
-              req = urllib.request.Request(url, headers={
-                  "Authorization": f"Bearer {GH_TOKEN}",
-                  "Accept": "application/vnd.github+json",
-                  "X-GitHub-Api-Version": "2022-11-28",
-                  "User-Agent": "aaa-rollout-monitor",
-              })
-              resp = urllib.request.urlopen(req, timeout=30)
-              return json.loads(resp.read())
-
           def find_open_prs(branch):
-              """Find open PRs via GitHub Search API (urllib, not gh CLI).
+              """Find open PRs using gh api /search/issues.
 
-              gh search prs returns 0 results silently inside GH Actions due to
-              CLI auth context issues; direct urllib is more reliable.
+              Uses the same gh() wrapper as all other API calls so the GH_TOKEN
+              env var is passed consistently — avoids the urllib 401 failure and
+              the silent-empty-result issue with gh search prs.
               """
-              results, page = [], 1
-              while True:
-                  q = f"org:{ORG} is:pr is:open head:{branch}"
-                  data = _api_get("/search/issues", {"q": q, "per_page": 100, "page": page})
-                  items = data.get("items", [])
-                  for item in items:
-                      # Extract owner/repo from html_url: https://github.com/owner/repo/pull/N
-                      parts = item["html_url"].rstrip("/").split("/")
-                      results.append({
-                          "number": item["number"],
-                          "repository": {"nameWithOwner": f"{parts[-4]}/{parts[-3]}"},
-                      })
-                  if len(items) < 100:
-                      break
-                  page += 1
+              q = urllib.parse.quote(f"org:{ORG} is:pr is:open head:{branch}")
+              r = gh("api", f"/search/issues?q={q}&per_page=100", check=False)
+              if r.returncode != 0:
+                  print(f"  ⚠ search failed ({r.stderr.strip()[:60]})")
+                  return []
+              try:
+                  items = json.loads(r.stdout).get("items", [])
+              except (json.JSONDecodeError, AttributeError):
+                  return []
+              results = []
+              for item in items:
+                  parts = item["html_url"].rstrip("/").split("/")
+                  results.append({
+                      "number": item["number"],
+                      "repository": {"nameWithOwner": f"{parts[-4]}/{parts[-3]}"},
+                  })
               return results
 
           def get_pr_sha(repo_full, pr_num):
