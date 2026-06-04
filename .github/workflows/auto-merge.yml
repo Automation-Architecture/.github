@@ -56,10 +56,10 @@ jobs:
           # ── Resolve SHA and PR number ────────────────────────────────────
           if [ "${{ github.event_name }}" = "check_suite" ]; then
             SHA="${{ github.event.check_suite.head_sha }}"
-            # Paginate: repos with >100 open PRs would otherwise silently miss the match.
-            PR_NUMBER=$(gh api "/repos/$REPO/pulls?state=open" --paginate \
-              --jq ".[] | select(.head.sha == \"$SHA\" and .head.repo.full_name == \"$REPO\") | .number" \
-              | head -1)
+            # Use the payload's pull_requests array: it contains only same-repo PRs
+            # (GitHub excludes fork PRs from check_suite.pull_requests), so no fork
+            # guard is needed here and no extra API call is required.
+            PR_NUMBER="${{ github.event.check_suite.pull_requests[0].number }}"
           else
             # pull_request_review: skip PRs from forks — GITHUB_TOKEN is read-only there.
             if [ "${{ github.event.pull_request.head.repo.full_name }}" != "$REPO" ]; then

@@ -153,6 +153,12 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: |
           if [ -n "$(git status --porcelain)" ]; then
+            # Safety: abort if the LLM touched any workflow files — an automated
+            # commit to .github/workflows/** is a high-risk escalation vector.
+            if git status --porcelain | grep -q '\.github/workflows/'; then
+              echo "::warning::auto-fix touched .github/workflows/ — skipping commit. Manual review required."
+              exit 0
+            fi
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add .
