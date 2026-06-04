@@ -45,7 +45,7 @@ jobs:
           ORG: Automation-Architecture
         run: |
           python3 << 'PYEOF'
-          import base64, json, os, subprocess, time
+          import base64, json, os, subprocess, time, urllib.parse, urllib.request
 
           ORG = os.environ["ORG"]
           GH_TOKEN = os.environ["GH_TOKEN"]
@@ -83,13 +83,42 @@ jobs:
               except json.JSONDecodeError:
                   return []
 
+          def _api_get(path, params=None):
+              """Direct GitHub REST API call using AAA_ORG_TOKEN via urllib."""
+              url = "https://api.github.com" + path
+              if params:
+                  url += "?" + urllib.parse.urlencode(params)
+              req = urllib.request.Request(url, headers={
+                  "Authorization": f"Bearer {GH_TOKEN}",
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "aaa-rollout-monitor",
+              })
+              resp = urllib.request.urlopen(req, timeout=30)
+              return json.loads(resp.read())
+
           def find_open_prs(branch):
-              r = subprocess.run(
-                  ["gh", "search", "prs", "--owner", ORG, "--state", "open",
-                   "--head", branch, "--json", "number,repository", "--limit", "200"],
-                  capture_output=True, text=True, env={**os.environ, "GH_TOKEN": GH_TOKEN}
-              )
-              return json.loads(r.stdout or "[]") if r.returncode == 0 else []
+              """Find open PRs via GitHub Search API (urllib, not gh CLI).
+
+              gh search prs returns 0 results silently inside GH Actions due to
+              CLI auth context issues; direct urllib is more reliable.
+              """
+              results, page = [], 1
+              while True:
+                  q = f"org:{ORG} is:pr is:open head:{branch}"
+                  data = _api_get("/search/issues", {"q": q, "per_page": 100, "page": page})
+                  items = data.get("items", [])
+                  for item in items:
+                      # Extract owner/repo from html_url: https://github.com/owner/repo/pull/N
+                      parts = item["html_url"].rstrip("/").split("/")
+                      results.append({
+                          "number": item["number"],
+                          "repository": {"nameWithOwner": f"{parts[-4]}/{parts[-3]}"},
+                      })
+                  if len(items) < 100:
+                      break
+                  page += 1
+              return results
 
           def get_pr_sha(repo_full, pr_num):
               r = gh("api", f"/repos/{repo_full}/pulls/{pr_num}", "--jq", ".head.sha", check=False)
