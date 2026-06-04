@@ -140,13 +140,15 @@ jobs:
           PR="${{ steps.gate.outputs.pr }}"
 
           # Fetch findings with file + line + comment body.
-          # --jq emits a bare stream of formatted strings; jq -rs slurps and joins.
+          # jq -Rrs reads the stream as raw text (not JSON), so empty input
+          # returns "" cleanly — avoids "Invalid numeric literal" from jq -rs
+          # when gh api emits nothing (no matching comments).
           FINDINGS=$(gh api "/repos/$REPO/pulls/$PR/comments" --paginate \
             --jq ".[] | select(
               .original_commit_id == \"$SHA\" and
               .user.login == \"Copilot\"
             ) | \"[\" + .path + \":\" + ((.original_line // .line) | tostring) + \"]\\n\" + .body" \
-            | jq -rs 'join("\n\n---\n\n")')
+            | jq -Rrs '.')
 
           # Write prompt to file — avoids shell quoting issues with long text.
           printf '%s\n' "Fix every Copilot code review finding listed below. Each finding is prefixed [file:line]." > /tmp/findings-prompt.txt
