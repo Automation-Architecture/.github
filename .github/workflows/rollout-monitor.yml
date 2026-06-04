@@ -1,0 +1,233 @@
+name: Rollout PR Monitor
+
+# Runs hourly. For each open rollout PR (branches matching the patterns below),
+# the monitor does two things:
+#
+#   1. PATCH — if the workflow file in the PR branch differs from the canonical
+#      version in this repo's main, push an update. This handles the bootstrap
+#      problem where findings-fixer.yml can't run until it's on main, and
+#      ensures all rollout PRs always carry the current canonical content.
+#
+#   2. MERGE — if CI is clean and Copilot inline findings on HEAD SHA = 0,
+#      admin-merge (squash + delete-branch) the PR.
+#
+# Skips PRs whose CI has hard failures (those need human attention).
+#
+# PREREQUISITE:
+#   AAA_ORG_TOKEN must be set as an org-level Actions secret.
+#   A classic PAT with repo + workflow scope on the Automation-Architecture org.
+#   gh secret set AAA_ORG_TOKEN --org Automation-Architecture
+#   (Store in 1Password under aaa-APIs; item name: aaa-org-token)
+#   Until set, each step will fail with 401 and the monitor is a no-op.
+#
+# Rollout patterns and their canonical source files (in this repo's main):
+#   feat/auto-merge-workflow     → .github/workflows/auto-merge.yml
+#   feat/findings-fixer-workflow → .github/workflows/findings-fixer.yml
+#   feat/dashboard-sync-workflow → .github/workflows/dashboard-sync.yml
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour
+  workflow_dispatch:        # manual trigger for testing / on-demand drain
+
+permissions:
+  contents: read  # only needs read on this repo; writes go via AAA_ORG_TOKEN
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4   # for reading canonical workflow files
+
+      - name: Monitor and drain rollout PRs
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ORG: Automation-Architecture
+        run: |
+          python3 << 'PYEOF'
+          import base64, json, os, subprocess, time
+
+          ORG = os.environ["ORG"]
+          GH_TOKEN = os.environ["GH_TOKEN"]
+
+          # Rollout patterns → canonical file path in this repo
+          PATTERNS = {
+              "feat/auto-merge-workflow":     ".github/workflows/auto-merge.yml",
+              "feat/findings-fixer-workflow": ".github/workflows/findings-fixer.yml",
+              "feat/dashboard-sync-workflow": ".github/workflows/dashboard-sync.yml",
+          }
+
+          _FAILING = frozenset({"failure", "timed_out", "cancelled", "action_required"})
+          _PENDING  = frozenset({"in_progress", "queued", "waiting", "requested"})
+
+          def gh(*args, check=True):
+              r = subprocess.run(["gh"] + list(args), capture_output=True, text=True,
+                                 env={**os.environ, "GH_TOKEN": GH_TOKEN})
+              if check and r.returncode != 0:
+                  raise RuntimeError(r.stderr.strip()[:120])
+              return r
+
+          def gh_json(*args):
+              r = gh("api", "--paginate", *args)
+              raw = r.stdout.strip()
+              if not raw:
+                  return []
+              try:
+                  obj = json.loads(raw)
+                  if isinstance(obj, list):
+                      flat = []
+                      for item in obj:
+                          (flat.extend(item) if isinstance(item, list) else flat.append(item))
+                      return flat
+                  return obj
+              except json.JSONDecodeError:
+                  return []
+
+          def find_open_prs(branch):
+              r = subprocess.run(
+                  ["gh", "search", "prs", "--owner", ORG, "--state", "open",
+                   "--head", branch, "--json", "number,repository", "--limit", "200"],
+                  capture_output=True, text=True, env={**os.environ, "GH_TOKEN": GH_TOKEN}
+              )
+              return json.loads(r.stdout or "[]") if r.returncode == 0 else []
+
+          def get_pr_sha(repo_full, pr_num):
+              r = gh("api", f"/repos/{repo_full}/pulls/{pr_num}", "--jq", ".head.sha", check=False)
+              return r.stdout.strip() if r.returncode == 0 else ""
+
+          def check_runs_state(repo_full, sha):
+              try:
+                  runs = gh_json(f"/repos/{repo_full}/commits/{sha}/check-runs", "--jq", ".check_runs[]")
+              except RuntimeError:
+                  return "error"
+              if not runs:
+                  return "no-ci"
+              if any(r.get("conclusion") in _FAILING for r in runs):
+                  return "failed"
+              if any(r.get("status") in _PENDING for r in runs):
+                  return "pending"
+              return "clean"
+
+          def copilot_count(repo_full, pr_num, sha):
+              try:
+                  comments = gh_json(
+                      f"/repos/{repo_full}/pulls/{pr_num}/comments",
+                      "--jq", f'.[] | select(.original_commit_id == "{sha}" and .user.login == "Copilot")',
+                  )
+                  return len(comments) if isinstance(comments, list) else (1 if comments else 0)
+              except RuntimeError:
+                  return -1
+
+          def get_file_content_on_branch(repo_full, branch, path):
+              r = gh("api",
+                     f"/repos/{repo_full}/contents/{path}",
+                     "-F", f"ref={branch}",
+                     check=False)
+              if r.returncode != 0:
+                  return None, None
+              data = json.loads(r.stdout)
+              return base64.b64decode(data["content"].replace("\n","")).decode(), data["sha"]
+
+          def patch_file(repo_full, branch, path, content, file_sha):
+              content_b64 = base64.b64encode(content.encode()).decode()
+              r = gh("api", f"/repos/{repo_full}/contents/{path}",
+                     "-X", "PUT",
+                     "-f", f"message=fix(workflows): sync {path.split('/')[-1]} with canonical",
+                     "-f", f"content={content_b64}",
+                     "-f", f"sha={file_sha}",
+                     "-f", f"branch={branch}",
+                     check=False)
+              return r.returncode == 0
+
+          def merge_pr(repo_full, pr_num):
+              r = gh("pr", "merge", str(pr_num),
+                     "--admin", "--squash", "--delete-branch",
+                     "--repo", repo_full, check=False)
+              if r.returncode != 0:
+                  # Fall back to --auto if admin bypass fails
+                  r2 = gh("pr", "merge", str(pr_num),
+                          "--auto", "--squash", "--delete-branch",
+                          "--repo", repo_full, check=False)
+                  return r2.returncode == 0, (r2.stdout + r2.stderr).strip()[:80]
+              return True, "merged"
+
+          # Load canonical file contents from this checkout
+          canonical = {}
+          for branch, path in PATTERNS.items():
+              try:
+                  with open(path) as f:
+                      canonical[branch] = f.read()
+              except OSError:
+                  print(f"  ⚠ canonical {path} not found — skipping {branch}")
+
+          totals = {"merged": 0, "patched": 0, "pending": 0, "failed": 0, "error": 0}
+
+          for branch, path in PATTERNS.items():
+              if branch not in canonical:
+                  continue
+              canon_content = canonical[branch]
+              print(f"\n── {branch} ──")
+              prs = find_open_prs(branch)
+              if not prs:
+                  print("  (no open PRs)")
+                  continue
+              print(f"  {len(prs)} open PR(s)")
+
+              for pr in prs:
+                  pr_num = pr["number"]
+                  repo_full = pr["repository"]["nameWithOwner"]
+                  label = f"{repo_full.split('/')[1]:<40} #{pr_num:<5}"
+
+                  sha = get_pr_sha(repo_full, pr_num)
+                  if not sha:
+                      print(f"  ? {label} could not fetch HEAD SHA")
+                      totals["error"] += 1
+                      continue
+
+                  # 1. PATCH: sync file to canonical if it drifted
+                  current_content, file_sha = get_file_content_on_branch(repo_full, branch, path)
+                  if current_content is not None and current_content.strip() != canon_content.strip():
+                      ok = patch_file(repo_full, branch, path, canon_content, file_sha)
+                      if ok:
+                          print(f"  ↑ {label} PATCHED (canonical drift → pushed fix, re-review pending)")
+                          totals["patched"] += 1
+                          continue  # Wait for Copilot to re-review the new push
+                      else:
+                          print(f"  ! {label} patch failed")
+
+                  # 2. MERGE: only when CI clean + 0 Copilot findings
+                  ci = check_runs_state(repo_full, sha)
+                  if ci == "failed":
+                      print(f"  ✗ {label} CI-FAILED — skip")
+                      totals["failed"] += 1
+                      continue
+                  if ci in ("pending", "no-ci"):
+                      print(f"  ⧖ {label} {ci.upper()} — wait")
+                      totals["pending"] += 1
+                      continue
+
+                  n = copilot_count(repo_full, pr_num, sha)
+                  if n < 0:
+                      print(f"  ! {label} findings fetch error — skip")
+                      totals["error"] += 1
+                      continue
+                  if n > 0:
+                      print(f"  – {label} {n} finding(s) — wait for re-review")
+                      totals["pending"] += 1
+                      continue
+
+                  ok, detail = merge_pr(repo_full, pr_num)
+                  if ok:
+                      print(f"  ✓ {label} MERGED")
+                      totals["merged"] += 1
+                  else:
+                      print(f"  ! {label} merge failed: {detail}")
+                      totals["error"] += 1
+
+                  time.sleep(0.5)  # light pacing
+
+          print(f"\n{'='*60}")
+          print(f"Summary: {totals['merged']} merged, {totals['patched']} patched, "
+                f"{totals['pending']} pending, {totals['failed']} CI-failed, "
+                f"{totals['error']} errors")
+          PYEOF
