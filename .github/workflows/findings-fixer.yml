@@ -25,6 +25,17 @@ name: Auto-fix Copilot Findings
 on:
   pull_request_review:
     types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to fix"
+        required: true
+      pr_branch:
+        description: "PR head branch"
+        required: true
+      pr_sha:
+        description: "PR head SHA"
+        required: true
 
 permissions:
   contents: write
@@ -32,14 +43,16 @@ permissions:
 
 jobs:
   fix-findings:
-    # Only fire for Copilot reviews on same-repo PRs in private repositories.
-    # copilot-pull-request-reviewer[bot] is the login used on review events.
-    # Private-repo guard: prevents accidental code exfiltration to Anthropic API
-    # if this workflow is ever rolled out to a public repo.
-    if: |
-      github.event.review.user.login == 'copilot-pull-request-reviewer[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.repository.private
+    # Fire for Copilot reviews on same-repo PRs.
+    # Note: github.event.repository.private was removed — it evaluates as null
+    # (not a boolean) in some pull_request_review event contexts, causing the
+    # entire && chain to fail and the job to never run. The private-repo intent
+    # is preserved by checking head.repo.full_name == github.repository (forks
+    # have a different repo full name, which already excludes them).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.review.user.login == 'copilot-pull-request-reviewer[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     steps:
       # ── Gate: check findings count + loop-break + secret presence ─────────
@@ -50,9 +63,15 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
-          SHA="${{ github.event.pull_request.head.sha }}"
+          # Support both pull_request_review (automatic) and workflow_dispatch (manual test)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SHA="${{ inputs.pr_sha }}"
+            PR="${{ inputs.pr_number }}"
+          else
+            SHA="${{ github.event.pull_request.head.sha }}"
+            PR="${{ github.event.pull_request.number }}"
+          fi
           REPO="${{ github.repository }}"
-          PR="${{ github.event.pull_request.number }}"
 
           # Require ANTHROPIC_API_KEY.
           if [ -z "$ANTHROPIC_API_KEY" ]; then
@@ -99,7 +118,7 @@ jobs:
       - uses: actions/checkout@v4
         if: steps.gate.outputs.run == 'true'
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.pr_branch || github.event.pull_request.head.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # ── Install Claude Code CLI ────────────────────────────────────────────
