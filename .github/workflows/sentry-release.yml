@@ -1,0 +1,59 @@
+name: Sentry Release on Merge
+
+# Creates a Sentry release + production deploy record on every merged PR,
+# tagged with the merge SHA and linked to the commit — so a new production
+# error is auto-attributed to the exact PR. This is the post-merge guardrail
+# half of the cloud autonomy pipeline (see aaa-runbooks
+# spec/cloud-pr-automation-platform.md and spec/sentry-pipeline-integration.md).
+#
+# Activates ONLY where the repo-level Actions variable SENTRY_PROJECT is set
+# (= that repo's Sentry project slug). No-ops cleanly everywhere else, so it is
+# safe to roll out org-wide alongside auto-merge.yml / findings-fixer.yml.
+#
+# Prereqs:
+#   - SENTRY_TOKEN org secret (visibility: all)
+#   - repo Actions variable SENTRY_PROJECT set to the Sentry project slug
+#     (gh variable set SENTRY_PROJECT --repo <owner/repo> --body <slug>)
+#
+# Rollout: copy to .github/workflows/ in every active repo (same pattern as
+# auto-merge.yml). Dormant until SENTRY_PROJECT is set on that repo.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: read
+
+jobs:
+  sentry-release:
+    if: github.event.pull_request.merged == true && vars.SENTRY_PROJECT != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Sentry release + deploy
+        env:
+          SENTRY_TOKEN: ${{ secrets.SENTRY_TOKEN }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+          ORG: automation-architect
+          SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          REPO: ${{ github.repository }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SENTRY_TOKEN:-}" ]; then
+            echo "::warning::SENTRY_TOKEN org secret not set — skipping Sentry release."
+            exit 0
+          fi
+          # Create the release (idempotent — Sentry returns the existing one on repeat).
+          # jq builds the JSON body so PR/repo values can never break out of the payload.
+          curl -sf -X POST -H "Authorization: Bearer $SENTRY_TOKEN" -H "Content-Type: application/json" \
+            "https://sentry.io/api/0/organizations/$ORG/releases/" \
+            -d "$(jq -nc --arg v "$SHA" --arg p "$SENTRY_PROJECT" --arg r "$REPO" \
+                  '{version:$v, projects:[$p], refs:[{repository:$r, commit:$v}]}')" \
+            > /dev/null
+          # Record the production deploy against that release.
+          curl -sf -X POST -H "Authorization: Bearer $SENTRY_TOKEN" -H "Content-Type: application/json" \
+            "https://sentry.io/api/0/organizations/$ORG/releases/$SHA/deploys/" \
+            -d "$(jq -nc --arg u "$PR_URL" '{environment:"production", url:$u}')" \
+            > /dev/null
+          echo "Sentry release $SHA created for $SENTRY_PROJECT"
