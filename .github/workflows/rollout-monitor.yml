@@ -21,9 +21,10 @@ name: Rollout PR Monitor
 #   Until set, each step will fail with 401 and the monitor is a no-op.
 #
 # Rollout patterns and their canonical source files (in this repo's main):
-#   feat/auto-merge-workflow     → .github/workflows/auto-merge.yml
-#   feat/findings-fixer-workflow → .github/workflows/findings-fixer.yml
-#   feat/dashboard-sync-workflow → .github/workflows/dashboard-sync.yml
+#   feat/auto-merge-workflow        → .github/workflows/auto-merge.yml
+#   feat/findings-fixer-workflow    → .github/workflows/findings-fixer.yml
+#   feat/dashboard-sync-workflow    → .github/workflows/dashboard-sync.yml
+#   feat/sentry-release-workflow    → .github/workflows/sentry-release.yml
 
 on:
   schedule:
@@ -55,6 +56,7 @@ jobs:
               "feat/auto-merge-workflow":     ".github/workflows/auto-merge.yml",
               "feat/findings-fixer-workflow": ".github/workflows/findings-fixer.yml",
               "feat/dashboard-sync-workflow": ".github/workflows/dashboard-sync.yml",
+              "feat/sentry-release-workflow": ".github/workflows/sentry-release.yml",
           }
 
           _FAILING = frozenset({"failure", "timed_out", "cancelled", "action_required"})
