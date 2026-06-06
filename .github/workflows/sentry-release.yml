@@ -10,13 +10,16 @@ name: Sentry Release on Merge
 # (= that repo's Sentry project slug). No-ops cleanly everywhere else, so it is
 # safe to roll out org-wide alongside auto-merge.yml / findings-fixer.yml.
 #
+# Idempotent / belt-and-suspenders: apps that use the @sentry/nextjs build
+# plugin already create the release at build time, so this workflow's POST can
+# legitimately get an "already exists" (4xx) back. That is NOT a failure — it is
+# only treated as an error on 5xx / network failure. For repos WITHOUT a
+# build-time release step, this workflow is the one that creates the release.
+#
 # Prereqs:
 #   - SENTRY_TOKEN org secret (visibility: all)
 #   - repo Actions variable SENTRY_PROJECT set to the Sentry project slug
 #     (gh variable set SENTRY_PROJECT --repo <owner/repo> --body <slug>)
-#
-# Rollout: copy to .github/workflows/ in every active repo (same pattern as
-# auto-merge.yml). Dormant until SENTRY_PROJECT is set on that repo.
 
 on:
   pull_request:
@@ -39,21 +42,34 @@ jobs:
           REPO: ${{ github.repository }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          set -euo pipefail
+          set -uo pipefail   # deliberately NOT -e: a 4xx (already-exists) is tolerated below
           if [ -z "${SENTRY_TOKEN:-}" ]; then
             echo "::warning::SENTRY_TOKEN org secret not set — skipping Sentry release."
             exit 0
           fi
-          # Create the release (idempotent — Sentry returns the existing one on repeat).
-          # jq builds the JSON body so PR/repo values can never break out of the payload.
-          curl -sf -X POST -H "Authorization: Bearer $SENTRY_TOKEN" -H "Content-Type: application/json" \
-            "https://sentry.io/api/0/organizations/$ORG/releases/" \
-            -d "$(jq -nc --arg v "$SHA" --arg p "$SENTRY_PROJECT" --arg r "$REPO" \
-                  '{version:$v, projects:[$p], refs:[{repository:$r, commit:$v}]}')" \
-            > /dev/null
+
+          # POST <url> <json-body> → echoes the HTTP code; hard-fails only on 5xx/network.
+          # jq builds the body so PR/repo values can never break out of the payload.
+          post() {
+            local code
+            code=$(curl -s -o /tmp/sentry-resp -w '%{http_code}' -X POST \
+              -H "Authorization: Bearer $SENTRY_TOKEN" -H "Content-Type: application/json" \
+              "$1" -d "$2" || echo 000)
+            echo "  $1 -> HTTP $code"
+            if [ "$code" -ge 500 ] || [ "$code" = "000" ]; then
+              echo "::error::Sentry API hard failure (HTTP $code)"; cat /tmp/sentry-resp || true
+              return 1
+            fi
+            return 0
+          }
+
+          # Create the release (4xx "already exists" is fine — see header).
+          post "https://sentry.io/api/0/organizations/$ORG/releases/" \
+            "$(jq -nc --arg v "$SHA" --arg p "$SENTRY_PROJECT" --arg r "$REPO" \
+                 '{version:$v, projects:[$p], refs:[{repository:$r, commit:$v}]}')" || exit 1
+
           # Record the production deploy against that release.
-          curl -sf -X POST -H "Authorization: Bearer $SENTRY_TOKEN" -H "Content-Type: application/json" \
-            "https://sentry.io/api/0/organizations/$ORG/releases/$SHA/deploys/" \
-            -d "$(jq -nc --arg u "$PR_URL" '{environment:"production", url:$u}')" \
-            > /dev/null
-          echo "Sentry release $SHA created for $SENTRY_PROJECT"
+          post "https://sentry.io/api/0/organizations/$ORG/releases/$SHA/deploys/" \
+            "$(jq -nc --arg u "$PR_URL" '{environment:"production", url:$u}')" || exit 1
+
+          echo "Sentry release $SHA recorded for $SENTRY_PROJECT"
