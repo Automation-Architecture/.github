@@ -2,24 +2,23 @@ name: Sentry Release on Merge
 
 # Creates a Sentry release + production deploy record on every merged PR,
 # tagged with the merge SHA and linked to the commit — so a new production
-# error is auto-attributed to the exact PR. This is the post-merge guardrail
-# half of the cloud autonomy pipeline (see aaa-runbooks
-# spec/cloud-pr-automation-platform.md and spec/sentry-pipeline-integration.md).
+# error is auto-attributed to the exact PR. Post-merge guardrail half of the
+# cloud autonomy pipeline (see aaa-runbooks spec/cloud-pr-automation-platform.md
+# and spec/sentry-pipeline-integration.md).
 #
 # Activates ONLY where the repo-level Actions variable SENTRY_PROJECT is set
 # (= that repo's Sentry project slug). No-ops cleanly everywhere else, so it is
 # safe to roll out org-wide alongside auto-merge.yml / findings-fixer.yml.
 #
-# Idempotent / belt-and-suspenders: apps that use the @sentry/nextjs build
-# plugin already create the release at build time, so this workflow's POST can
-# legitimately get an "already exists" (4xx) back. That is NOT a failure — it is
-# only treated as an error on 5xx / network failure. For repos WITHOUT a
-# build-time release step, this workflow is the one that creates the release.
+# Error handling: the @sentry/nextjs build plugin may create the release first
+# during the Vercel deploy, so a duplicate POST can come back "already exists" —
+# that ONE case is tolerated. Every other non-2xx (401/403 bad token, 404 wrong
+# org, 429 rate-limit, 5xx, network) FAILS the job loudly, so a broken guardrail
+# is visible rather than silently skipped.
 #
 # Prereqs:
 #   - SENTRY_TOKEN org secret (visibility: all)
-#   - repo Actions variable SENTRY_PROJECT set to the Sentry project slug
-#     (gh variable set SENTRY_PROJECT --repo <owner/repo> --body <slug>)
+#   - repo Actions variable SENTRY_PROJECT = the Sentry project slug
 
 on:
   pull_request:
@@ -42,34 +41,45 @@ jobs:
           REPO: ${{ github.repository }}
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
-          set -uo pipefail   # deliberately NOT -e: a 4xx (already-exists) is tolerated below
+          set -euo pipefail
           if [ -z "${SENTRY_TOKEN:-}" ]; then
             echo "::warning::SENTRY_TOKEN org secret not set — skipping Sentry release."
             exit 0
           fi
 
-          # POST <url> <json-body> → echoes the HTTP code; hard-fails only on 5xx/network.
-          # jq builds the body so PR/repo values can never break out of the payload.
+          # POST <url> <json-body>. Tolerates ONLY the idempotent "already exists"
+          # case (409 / body match); fails loudly on every other non-2xx so a
+          # misconfigured token/org/rate-limit can't silently no-op the guardrail.
           post() {
             local code
             code=$(curl -s -o /tmp/sentry-resp -w '%{http_code}' -X POST \
               -H "Authorization: Bearer $SENTRY_TOKEN" -H "Content-Type: application/json" \
               "$1" -d "$2" || echo 000)
             echo "  $1 -> HTTP $code"
-            if [ "$code" -ge 500 ] || [ "$code" = "000" ]; then
-              echo "::error::Sentry API hard failure (HTTP $code)"; cat /tmp/sentry-resp || true
-              return 1
-            fi
-            return 0
+            case "$code" in
+              2*) return 0 ;;
+              409) echo "  (release already exists — tolerated)"; return 0 ;;
+              4*)
+                if grep -qiE 'already exists|already reported' /tmp/sentry-resp 2>/dev/null; then
+                  echo "  (release already exists — tolerated)"; return 0
+                fi
+                echo "::error::Sentry API client error HTTP $code — check SENTRY_TOKEN / org slug / rate limit"
+                cat /tmp/sentry-resp 2>/dev/null || true
+                return 1 ;;
+              *)
+                echo "::error::Sentry API failure HTTP $code"
+                cat /tmp/sentry-resp 2>/dev/null || true
+                return 1 ;;
+            esac
           }
 
-          # Create the release (4xx "already exists" is fine — see header).
-          post "https://sentry.io/api/0/organizations/$ORG/releases/" \
-            "$(jq -nc --arg v "$SHA" --arg p "$SENTRY_PROJECT" --arg r "$REPO" \
-                 '{version:$v, projects:[$p], refs:[{repository:$r, commit:$v}]}')" || exit 1
+          # Build bodies first — a jq failure fails the step (set -e) before any POST,
+          # rather than sending an empty/invalid body. jq also makes the values
+          # injection-safe.
+          rel_body=$(jq -nc --arg v "$SHA" --arg p "$SENTRY_PROJECT" --arg r "$REPO" \
+            '{version:$v, projects:[$p], refs:[{repository:$r, commit:$v}]}')
+          dep_body=$(jq -nc --arg u "$PR_URL" '{environment:"production", url:$u}')
 
-          # Record the production deploy against that release.
-          post "https://sentry.io/api/0/organizations/$ORG/releases/$SHA/deploys/" \
-            "$(jq -nc --arg u "$PR_URL" '{environment:"production", url:$u}')" || exit 1
-
+          post "https://sentry.io/api/0/organizations/$ORG/releases/" "$rel_body"
+          post "https://sentry.io/api/0/organizations/$ORG/releases/$SHA/deploys/" "$dep_body"
           echo "Sentry release $SHA recorded for $SENTRY_PROJECT"
