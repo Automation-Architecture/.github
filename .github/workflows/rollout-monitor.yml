@@ -155,14 +155,24 @@ jobs:
                   return -1
 
           def get_file_content_on_branch(repo_full, branch, path):
+              # → (status, content, sha) with status in {"ok","missing","error"}.
+              # Distinguish a genuine 404 (file absent → safe to create) from any
+              # other API failure (rate limit / perms / 5xx → do NOT treat as
+              # missing, or we'd create spurious files / mask the real error).
               r = gh("api",
                      f"/repos/{repo_full}/contents/{path}",
                      "-F", f"ref={branch}",
                      check=False)
-              if r.returncode != 0:
-                  return None, None
-              data = json.loads(r.stdout)
-              return base64.b64decode(data["content"].replace("\n","")).decode(), data["sha"]
+              if r.returncode == 0:
+                  try:
+                      data = json.loads(r.stdout)
+                      return "ok", base64.b64decode(data["content"].replace("\n","")).decode(), data["sha"]
+                  except (ValueError, KeyError):
+                      return "error", None, None
+              err = (r.stderr or "").lower()
+              if "not found" in err or "404" in err:
+                  return "missing", None, None
+              return "error", None, None
 
           def patch_file(repo_full, branch, path, content, file_sha):
               # file_sha None ⇒ the file is absent on the branch ⇒ create it
@@ -231,13 +241,22 @@ jobs:
                   if key in seen:
                       continue
 
+                  label = f"{repo_full.split('/')[1]:<40} #{pr_num:<5}"
+
                   # GitHub head: search is fuzzy — confirm the PR's real head ref
-                  # matches THIS pattern before claiming it. Do NOT mark it seen
-                  # otherwise, or the correct pattern would later skip it.
-                  if get_pr_branch(repo_full, pr_num) != branch:
+                  # matches THIS pattern before claiming it.
+                  real_branch = get_pr_branch(repo_full, pr_num)
+                  if not real_branch:
+                      # API error fetching the ref — surface it, don't silently
+                      # skip (and don't mark seen: let a later pass retry).
+                      print(f"  ? {label} head-ref fetch failed (API error) — skip, will retry")
+                      totals["error"] += 1
+                      continue
+                  if real_branch != branch:
+                      # genuinely a different pattern's PR — leave it unseen so
+                      # the correct pattern processes it.
                       continue
                   seen.add(key)
-                  label = f"{repo_full.split('/')[1]:<40} #{pr_num:<5}"
 
                   sha = get_pr_sha(repo_full, pr_num)
                   if not sha:
@@ -253,9 +272,16 @@ jobs:
                   pushed_any = False
                   write_failed = False
                   for path, canon_content in files.items():
-                      current_content, file_sha = get_file_content_on_branch(repo_full, branch, path)
-                      if current_content is None:
-                          # file absent on the branch — incomplete rollout; create it
+                      status, current_content, file_sha = get_file_content_on_branch(repo_full, branch, path)
+                      if status == "error":
+                          # transient/permission error reading the file — never
+                          # guess; skip this PR and let the next run retry.
+                          print(f"  ! {label} could not read {path.split('/')[-1]} (API error) — skip, will retry")
+                          write_failed = True
+                          break
+                      if status == "missing":
+                          # genuine 404 — file absent on the branch (incomplete
+                          # rollout); create it from canonical.
                           if patch_file(repo_full, branch, path, canon_content, None):
                               print(f"  + {label} ADDED {path.split('/')[-1]} (was missing on branch)")
                               totals["patched"] += 1
