@@ -3,7 +3,7 @@ name: Rollout PR Monitor
 # Runs hourly. For each open rollout PR (branches matching the patterns below),
 # the monitor does two things:
 #
-#   1. PATCH — if the workflow file in the PR branch differs from the canonical
+#   1. PATCH — if any workflow file in the PR branch differs from the canonical
 #      version in this repo's main, push an update. This handles the bootstrap
 #      problem where findings-fixer.yml can't run until it's on main, and
 #      ensures all rollout PRs always carry the current canonical content.
@@ -13,6 +13,11 @@ name: Rollout PR Monitor
 #
 # Skips PRs whose CI has hard failures (those need human attention).
 #
+# A single rollout branch may carry MORE THAN ONE canonical file (e.g. the
+# bundled auto-merge + findings-fixer rollout). PATTERNS therefore maps a
+# branch name to a LIST of canonical file paths; the PATCH step syncs every
+# listed file before the PR is eligible to merge.
+#
 # PREREQUISITE:
 #   AAA_ORG_TOKEN must be set as an org-level Actions secret.
 #   A classic PAT with repo + workflow scope on the Automation-Architecture org.
@@ -20,11 +25,12 @@ name: Rollout PR Monitor
 #   (Store in 1Password under aaa-APIs; item name: aaa-org-token)
 #   Until set, each step will fail with 401 and the monitor is a no-op.
 #
-# Rollout patterns and their canonical source files (in this repo's main):
-#   feat/auto-merge-workflow        → .github/workflows/auto-merge.yml
-#   feat/findings-fixer-workflow    → .github/workflows/findings-fixer.yml
-#   feat/dashboard-sync-workflow    → .github/workflows/dashboard-sync.yml
-#   feat/sentry-release-workflow    → .github/workflows/sentry-release.yml
+# Rollout branches and their canonical source file(s) (in this repo's main):
+#   feat/add-auto-merge-workflow  → auto-merge.yml + findings-fixer.yml (bundled)
+#   feat/auto-merge-workflow      → auto-merge.yml      (legacy single-file)
+#   feat/findings-fixer-workflow  → findings-fixer.yml  (legacy single-file)
+#   feat/dashboard-sync-workflow  → dashboard-sync.yml
+#   feat/sentry-release-workflow  → sentry-release.yml
 
 on:
   schedule:
@@ -51,12 +57,19 @@ jobs:
           ORG = os.environ["ORG"]
           GH_TOKEN = os.environ["GH_TOKEN"]
 
-          # Rollout patterns → canonical file path in this repo
+          # Rollout branch → list of canonical file paths in this repo.
+          # The bundled branch (both files on one branch) is listed FIRST so a
+          # PR is processed under it before any single-file pattern; the `seen`
+          # set below prevents double-processing if GitHub head: search matches
+          # a PR under more than one pattern.
+          AM = ".github/workflows/auto-merge.yml"
+          FF = ".github/workflows/findings-fixer.yml"
           PATTERNS = {
-              "feat/auto-merge-workflow":     ".github/workflows/auto-merge.yml",
-              "feat/findings-fixer-workflow": ".github/workflows/findings-fixer.yml",
-              "feat/dashboard-sync-workflow": ".github/workflows/dashboard-sync.yml",
-              "feat/sentry-release-workflow": ".github/workflows/sentry-release.yml",
+              "feat/add-auto-merge-workflow": [AM, FF],
+              "feat/auto-merge-workflow":     [AM],
+              "feat/findings-fixer-workflow": [FF],
+              "feat/dashboard-sync-workflow": [".github/workflows/dashboard-sync.yml"],
+              "feat/sentry-release-workflow": [".github/workflows/sentry-release.yml"],
           }
 
           _FAILING = frozenset({"failure", "timed_out", "cancelled", "action_required"})
@@ -112,6 +125,10 @@ jobs:
 
           def get_pr_sha(repo_full, pr_num):
               r = gh("api", f"/repos/{repo_full}/pulls/{pr_num}", "--jq", ".head.sha", check=False)
+              return r.stdout.strip() if r.returncode == 0 else ""
+
+          def get_pr_branch(repo_full, pr_num):
+              r = gh("api", f"/repos/{repo_full}/pulls/{pr_num}", "--jq", ".head.ref", check=False)
               return r.stdout.strip() if r.returncode == 0 else ""
 
           def check_runs_state(repo_full, sha):
@@ -170,21 +187,26 @@ jobs:
                   return r2.returncode == 0, (r2.stdout + r2.stderr).strip()[:80]
               return True, "merged"
 
-          # Load canonical file contents from this checkout
+          # Load canonical file contents from this checkout, per branch.
           canonical = {}
-          for branch, path in PATTERNS.items():
-              try:
-                  with open(path) as f:
-                      canonical[branch] = f.read()
-              except OSError:
-                  print(f"  ⚠ canonical {path} not found — skipping {branch}")
+          for branch, paths in PATTERNS.items():
+              files = {}
+              for path in paths:
+                  try:
+                      with open(path) as f:
+                          files[path] = f.read()
+                  except OSError:
+                      print(f"  ⚠ canonical {path} not found — skipping for {branch}")
+              if files:
+                  canonical[branch] = files
 
           totals = {"merged": 0, "patched": 0, "pending": 0, "failed": 0, "error": 0}
+          seen = set()  # (repo_full, pr_num) — process each PR once across patterns
 
-          for branch, path in PATTERNS.items():
+          for branch, paths in PATTERNS.items():
               if branch not in canonical:
                   continue
-              canon_content = canonical[branch]
+              files = canonical[branch]
               print(f"\n── {branch} ──")
               prs = find_open_prs(branch)
               if not prs:
@@ -195,6 +217,10 @@ jobs:
               for pr in prs:
                   pr_num = pr["number"]
                   repo_full = pr["repository"]["nameWithOwner"]
+                  key = (repo_full, pr_num)
+                  if key in seen:
+                      continue
+                  seen.add(key)
                   label = f"{repo_full.split('/')[1]:<40} #{pr_num:<5}"
 
                   sha = get_pr_sha(repo_full, pr_num)
@@ -203,16 +229,24 @@ jobs:
                       totals["error"] += 1
                       continue
 
-                  # 1. PATCH: sync file to canonical if it drifted
-                  current_content, file_sha = get_file_content_on_branch(repo_full, branch, path)
-                  if current_content is not None and current_content.strip() != canon_content.strip():
-                      ok = patch_file(repo_full, branch, path, canon_content, file_sha)
-                      if ok:
-                          print(f"  ↑ {label} PATCHED (canonical drift → pushed fix, re-review pending)")
-                          totals["patched"] += 1
-                          continue  # Wait for Copilot to re-review the new push
-                      else:
-                          print(f"  ! {label} patch failed")
+                  # GitHub head: search can be fuzzy; confirm the PR's real head
+                  # ref matches this pattern before acting on it.
+                  if get_pr_branch(repo_full, pr_num) != branch:
+                      continue
+
+                  # 1. PATCH: sync every file on this branch to canonical if drifted.
+                  patched_any = False
+                  for path, canon_content in files.items():
+                      current_content, file_sha = get_file_content_on_branch(repo_full, branch, path)
+                      if current_content is not None and current_content.strip() != canon_content.strip():
+                          if patch_file(repo_full, branch, path, canon_content, file_sha):
+                              print(f"  ↑ {label} PATCHED {path.split('/')[-1]} (canonical drift → pushed)")
+                              totals["patched"] += 1
+                              patched_any = True
+                          else:
+                              print(f"  ! {label} patch failed for {path.split('/')[-1]}")
+                  if patched_any:
+                      continue  # wait for Copilot to re-review the new push(es)
 
                   # 2. MERGE: only when CI clean + 0 Copilot findings
                   ci = check_runs_state(repo_full, sha)
