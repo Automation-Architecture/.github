@@ -165,14 +165,18 @@ jobs:
               return base64.b64decode(data["content"].replace("\n","")).decode(), data["sha"]
 
           def patch_file(repo_full, branch, path, content, file_sha):
+              # file_sha None ⇒ the file is absent on the branch ⇒ create it
+              # (PUT without sha). Otherwise update in place.
               content_b64 = base64.b64encode(content.encode()).decode()
-              r = gh("api", f"/repos/{repo_full}/contents/{path}",
-                     "-X", "PUT",
-                     "-f", f"message=fix(workflows): sync {path.split('/')[-1]} with canonical",
-                     "-f", f"content={content_b64}",
-                     "-f", f"sha={file_sha}",
-                     "-f", f"branch={branch}",
-                     check=False)
+              verb = "sync" if file_sha else "add"
+              args = ["api", f"/repos/{repo_full}/contents/{path}",
+                      "-X", "PUT",
+                      "-f", f"message=fix(workflows): {verb} {path.split('/')[-1]} from canonical",
+                      "-f", f"content={content_b64}",
+                      "-f", f"branch={branch}"]
+              if file_sha:
+                  args += ["-f", f"sha={file_sha}"]
+              r = gh(*args, check=False)
               return r.returncode == 0
 
           def merge_pr(repo_full, pr_num):
@@ -188,22 +192,28 @@ jobs:
               return True, "merged"
 
           # Load canonical file contents from this checkout, per branch.
+          # If ANY listed file is missing locally, skip the WHOLE branch — a
+          # partial set would let a PR merge without all its files synced
+          # (treat a missing canonical file as a configuration error).
           canonical = {}
-          for branch, paths in PATTERNS.items():
+          for branch in PATTERNS:
               files = {}
-              for path in paths:
+              complete = True
+              for path in PATTERNS[branch]:
                   try:
                       with open(path) as f:
                           files[path] = f.read()
                   except OSError:
-                      print(f"  ⚠ canonical {path} not found — skipping for {branch}")
-              if files:
+                      print(f"  ⚠ canonical {path} not found — skipping ENTIRE branch {branch} (config error)")
+                      complete = False
+                      break
+              if complete and files:
                   canonical[branch] = files
 
           totals = {"merged": 0, "patched": 0, "pending": 0, "failed": 0, "error": 0}
           seen = set()  # (repo_full, pr_num) — process each PR once across patterns
 
-          for branch, paths in PATTERNS.items():
+          for branch in PATTERNS:
               if branch not in canonical:
                   continue
               files = canonical[branch]
@@ -220,6 +230,12 @@ jobs:
                   key = (repo_full, pr_num)
                   if key in seen:
                       continue
+
+                  # GitHub head: search is fuzzy — confirm the PR's real head ref
+                  # matches THIS pattern before claiming it. Do NOT mark it seen
+                  # otherwise, or the correct pattern would later skip it.
+                  if get_pr_branch(repo_full, pr_num) != branch:
+                      continue
                   seen.add(key)
                   label = f"{repo_full.split('/')[1]:<40} #{pr_num:<5}"
 
@@ -229,23 +245,36 @@ jobs:
                       totals["error"] += 1
                       continue
 
-                  # GitHub head: search can be fuzzy; confirm the PR's real head
-                  # ref matches this pattern before acting on it.
-                  if get_pr_branch(repo_full, pr_num) != branch:
-                      continue
-
-                  # 1. PATCH: sync every file on this branch to canonical if drifted.
-                  patched_any = False
+                  # 1. PATCH: ensure every listed file exists on the branch AND
+                  #    matches canonical. Missing file → create it; drifted →
+                  #    update it. If we pushed anything, or any write failed,
+                  #    do NOT merge this round (an incomplete/failed rollout
+                  #    must never merge).
+                  pushed_any = False
+                  write_failed = False
                   for path, canon_content in files.items():
                       current_content, file_sha = get_file_content_on_branch(repo_full, branch, path)
-                      if current_content is not None and current_content.strip() != canon_content.strip():
+                      if current_content is None:
+                          # file absent on the branch — incomplete rollout; create it
+                          if patch_file(repo_full, branch, path, canon_content, None):
+                              print(f"  + {label} ADDED {path.split('/')[-1]} (was missing on branch)")
+                              totals["patched"] += 1
+                              pushed_any = True
+                          else:
+                              print(f"  ! {label} create failed for {path.split('/')[-1]}")
+                              write_failed = True
+                      elif current_content.strip() != canon_content.strip():
                           if patch_file(repo_full, branch, path, canon_content, file_sha):
                               print(f"  ↑ {label} PATCHED {path.split('/')[-1]} (canonical drift → pushed)")
                               totals["patched"] += 1
-                              patched_any = True
+                              pushed_any = True
                           else:
                               print(f"  ! {label} patch failed for {path.split('/')[-1]}")
-                  if patched_any:
+                              write_failed = True
+                  if write_failed:
+                      totals["error"] += 1
+                      continue  # never merge an incompletely-synced rollout
+                  if pushed_any:
                       continue  # wait for Copilot to re-review the new push(es)
 
                   # 2. MERGE: only when CI clean + 0 Copilot findings
