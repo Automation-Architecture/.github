@@ -159,9 +159,12 @@ jobs:
               # Distinguish a genuine 404 (file absent → safe to create) from any
               # other API failure (rate limit / perms / 5xx → do NOT treat as
               # missing, or we'd create spurious files / mask the real error).
+              # -X GET is REQUIRED: gh api defaults to POST when any -f/-F field
+              # is present, which would POST to the contents endpoint and 404.
               r = gh("api",
+                     "-X", "GET",
                      f"/repos/{repo_full}/contents/{path}",
-                     "-F", f"ref={branch}",
+                     "-f", f"ref={branch}",
                      check=False)
               if r.returncode == 0:
                   try:
