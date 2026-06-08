@@ -190,7 +190,12 @@ jobs:
               if file_sha:
                   args += ["-f", f"sha={file_sha}"]
               r = gh(*args, check=False)
-              return r.returncode == 0
+              if r.returncode == 0:
+                  return True, ""
+              # Surface the API error so a failed write is self-diagnosing
+              # (e.g. a token missing `workflow` scope returns a clear 403 here).
+              detail = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:160]
+              return False, detail
 
           def merge_pr(repo_full, pr_num):
               r = gh("pr", "merge", str(pr_num),
@@ -285,20 +290,22 @@ jobs:
                       if status == "missing":
                           # genuine 404 — file absent on the branch (incomplete
                           # rollout); create it from canonical.
-                          if patch_file(repo_full, branch, path, canon_content, None):
+                          ok, err = patch_file(repo_full, branch, path, canon_content, None)
+                          if ok:
                               print(f"  + {label} ADDED {path.split('/')[-1]} (was missing on branch)")
                               totals["patched"] += 1
                               pushed_any = True
                           else:
-                              print(f"  ! {label} create failed for {path.split('/')[-1]}")
+                              print(f"  ! {label} create failed for {path.split('/')[-1]}: {err}")
                               write_failed = True
                       elif current_content.strip() != canon_content.strip():
-                          if patch_file(repo_full, branch, path, canon_content, file_sha):
+                          ok, err = patch_file(repo_full, branch, path, canon_content, file_sha)
+                          if ok:
                               print(f"  ↑ {label} PATCHED {path.split('/')[-1]} (canonical drift → pushed)")
                               totals["patched"] += 1
                               pushed_any = True
                           else:
-                              print(f"  ! {label} patch failed for {path.split('/')[-1]}")
+                              print(f"  ! {label} patch failed for {path.split('/')[-1]}: {err}")
                               write_failed = True
                   if write_failed:
                       totals["error"] += 1
