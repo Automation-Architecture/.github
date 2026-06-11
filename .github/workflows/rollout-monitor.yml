@@ -112,7 +112,11 @@ jobs:
                       try:
                           out.append(json.loads(line))
                       except json.JSONDecodeError:
-                          continue
+                          # Fail CLOSED: a truncated/garbled line must not be
+                          # silently dropped — that could undercount checks or
+                          # Copilot findings to 0 and allow an unintended merge.
+                          # Both callers catch RuntimeError and skip the PR.
+                          raise RuntimeError(f"gh_json: unparseable output line: {line[:80]}")
                   return out
 
           def find_open_prs(branch):
@@ -373,7 +377,10 @@ jobs:
                       print(f"  ✗ {label} CI-FAILED — skip")
                       totals["failed"] += 1
                       continue
-                  if ci in ("pending", "no-ci"):
+                  if ci != "clean":
+                      # pending / no-ci / error — only a definitive "clean"
+                      # is allowed to merge; anything else waits (fail closed,
+                      # so a check-fetch error can never green-light a merge).
                       print(f"  ⧖ {label} {ci.upper()} — wait")
                       totals["pending"] += 1
                       continue
