@@ -110,13 +110,17 @@ jobs:
                       if not line:
                           continue
                       try:
-                          out.append(json.loads(line))
+                          parsed = json.loads(line)
                       except json.JSONDecodeError:
                           # Fail CLOSED: a truncated/garbled line must not be
                           # silently dropped — that could undercount checks or
                           # Copilot findings to 0 and allow an unintended merge.
                           # Both callers catch RuntimeError and skip the PR.
-                          raise RuntimeError(f"gh_json: unparseable output line: {line[:80]}")
+                          raise RuntimeError(
+                              f"gh_json: unparseable line from {args[0]!r}: {line[:80]!r}")
+                      # preserve the flat-list guarantee even if a line is itself
+                      # a JSON array (else a nested list reaches callers → .get crash)
+                      out.extend(parsed) if isinstance(parsed, list) else out.append(parsed)
                   return out
 
           def find_open_prs(branch):
