@@ -177,6 +177,23 @@ jobs:
                   return "missing", None, None
               return "error", None, None
 
+          # A burst of content-write commits (≈2 per PR × dozens of PRs) trips
+          # GitHub's secondary rate limit, which surfaces as transient 401 /
+          # 403 / 429. These are retryable; a real config error (missing
+          # `workflow` scope, 404, 422 bad request) is not — don't waste retries.
+          _WRITE_PACING_SEC = 0.6
+          _TRANSIENT_SIGNS = (
+              "rate limit", "secondary rate", "requires authentication",
+              "401", "429", "abuse", "timeout", "timed out", "502", "503", "504",
+          )
+
+          def _is_transient(detail):
+              d = detail.lower()
+              # a 403 specifically about the workflow scope is permanent, not a limit
+              if "without `workflow`" in d or "workflow scope" in d:
+                  return False
+              return any(s in d for s in _TRANSIENT_SIGNS)
+
           def patch_file(repo_full, branch, path, content, file_sha):
               # file_sha None ⇒ the file is absent on the branch ⇒ create it
               # (PUT without sha). Otherwise update in place.
@@ -189,12 +206,21 @@ jobs:
                       "-f", f"branch={branch}"]
               if file_sha:
                   args += ["-f", f"sha={file_sha}"]
-              r = gh(*args, check=False)
-              if r.returncode == 0:
-                  return True, ""
-              # Surface the API error so a failed write is self-diagnosing
-              # (e.g. a token missing `workflow` scope returns a clear 403 here).
-              detail = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:160]
+              detail = ""
+              delay = 2
+              for attempt in range(4):  # up to 4 tries: ~2s, 4s, 8s backoff
+                  time.sleep(_WRITE_PACING_SEC)  # pace writes to stay under the limit
+                  r = gh(*args, check=False)
+                  if r.returncode == 0:
+                      return True, ""
+                  # Surface the API error so a failed write is self-diagnosing
+                  # (e.g. a token missing `workflow` scope returns a clear 403).
+                  detail = (r.stderr or r.stdout or "").strip().replace("\n", " ")[:160]
+                  if attempt < 3 and _is_transient(detail):
+                      time.sleep(delay)
+                      delay *= 2
+                      continue
+                  break
               return False, detail
 
           def merge_pr(repo_full, pr_num):
