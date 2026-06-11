@@ -8,8 +8,9 @@ name: Rollout PR Monitor
 #      problem where findings-fixer.yml can't run until it's on main, and
 #      ensures all rollout PRs always carry the current canonical content.
 #
-#   2. MERGE — if CI is clean and Copilot inline findings on HEAD SHA = 0,
-#      admin-merge (squash + delete-branch) the PR.
+#   2. MERGE — if non-review CI is clean, admin-merge (squash + delete-branch).
+#      Review checks (Copilot, CodeRabbit) are NOT gates — org policy is no
+#      required review, and Copilot is fully removed.
 #
 # Skips PRs whose CI has hard failures (those need human attention).
 #
@@ -156,28 +157,30 @@ jobs:
               r = gh("api", f"/repos/{repo_full}/pulls/{pr_num}", "--jq", ".head.ref", check=False)
               return r.stdout.strip() if r.returncode == 0 else ""
 
+          # Review checks are NOT merge gates (org policy: no required review —
+          # Copilot fully removed, CodeRabbit not required). Ignore them when
+          # judging CI so a stale/failed/ pending review check can't block a
+          # rollout merge. Matched case-insensitively as a substring of the name.
+          _IGNORE_CHECKS = ("copilot", "coderabbit")
+
+          def _is_review_check(run):
+              name = (run.get("name") or "").lower()
+              return any(tok in name for tok in _IGNORE_CHECKS)
+
           def check_runs_state(repo_full, sha):
               try:
                   runs = gh_json(f"/repos/{repo_full}/commits/{sha}/check-runs", "--jq", ".check_runs[]")
               except RuntimeError:
                   return "error"
+              # drop review checks — they don't gate merges
+              runs = [r for r in runs if not _is_review_check(r)]
               if not runs:
-                  return "no-ci"
+                  return "clean"  # only review checks (or none) → nothing real to wait on
               if any(r.get("conclusion") in _FAILING for r in runs):
                   return "failed"
               if any(r.get("status") in _PENDING for r in runs):
                   return "pending"
               return "clean"
-
-          def copilot_count(repo_full, pr_num, sha):
-              try:
-                  comments = gh_json(
-                      f"/repos/{repo_full}/pulls/{pr_num}/comments",
-                      "--jq", f'.[] | select(.original_commit_id == "{sha}" and .user.login == "Copilot")',
-                  )
-                  return len(comments) if isinstance(comments, list) else (1 if comments else 0)
-              except RuntimeError:
-                  return -1
 
           def get_file_content_on_branch(repo_full, branch, path):
               # → (status, content, sha) with status in {"ok","missing","error"}.
@@ -373,9 +376,9 @@ jobs:
                       totals["error"] += 1
                       continue  # never merge an incompletely-synced rollout
                   if pushed_any:
-                      continue  # wait for Copilot to re-review the new push(es)
+                      continue  # wait for checks to re-run on the new push(es)
 
-                  # 2. MERGE: only when CI clean + 0 Copilot findings
+                  # 2. MERGE: when non-review CI is clean (review checks don't gate)
                   ci = check_runs_state(repo_full, sha)
                   if ci == "failed":
                       print(f"  ✗ {label} CI-FAILED — skip")
@@ -389,15 +392,9 @@ jobs:
                       totals["pending"] += 1
                       continue
 
-                  n = copilot_count(repo_full, pr_num, sha)
-                  if n < 0:
-                      print(f"  ! {label} findings fetch error — skip")
-                      totals["error"] += 1
-                      continue
-                  if n > 0:
-                      print(f"  – {label} {n} finding(s) — wait for re-review")
-                      totals["pending"] += 1
-                      continue
+                  # No Copilot-findings gate: org policy is no required review,
+                  # and Copilot is fully removed (workflow + auto-review ruleset
+                  # disabled), so inline findings never block a rollout merge.
 
                   ok, detail = merge_pr(repo_full, pr_num)
                   if ok:
