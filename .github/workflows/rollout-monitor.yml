@@ -182,21 +182,31 @@ jobs:
           # 403 / 429. These are retryable; a real config error (missing
           # `workflow` scope, 404, 422 bad request) is not — don't waste retries.
           _WRITE_PACING_SEC = 0.6
-          _TRANSIENT_SIGNS = (
-              "rate limit", "secondary rate", "requires authentication",
-              "401", "429", "abuse", "timeout", "timed out", "502", "503", "504",
-          )
+          _RATELIMIT_SIGNS = ("rate limit", "secondary rate", "abuse", "429")
+          _SERVER_SIGNS = ("500", "502", "503", "504", "timeout", "timed out")
+          _AUTH_SIGNS = ("401", "requires authentication")
+          _any_write_ok = False  # flips True after the first successful write this run
 
           def _is_transient(detail):
               d = detail.lower()
-              # a 403 specifically about the workflow scope is permanent, not a limit
+              # a 403 specifically about the workflow scope is a permanent config error
               if "without `workflow`" in d or "workflow scope" in d:
                   return False
-              return any(s in d for s in _TRANSIENT_SIGNS)
+              # explicit rate-limit / abuse / server errors are always retryable
+              if any(s in d for s in _RATELIMIT_SIGNS) or any(s in d for s in _SERVER_SIGNS):
+                  return True
+              # A bare auth error is only retryable if a write has ALREADY succeeded
+              # this run — then the token is valid and the 401 is rate-limiting in
+              # disguise. If nothing has ever succeeded, it's a real auth misconfig
+              # (bad/empty/under-scoped token) → fail fast, don't mask it with retries.
+              if any(s in d for s in _AUTH_SIGNS):
+                  return _any_write_ok
+              return False
 
           def patch_file(repo_full, branch, path, content, file_sha):
               # file_sha None ⇒ the file is absent on the branch ⇒ create it
               # (PUT without sha). Otherwise update in place.
+              global _any_write_ok
               content_b64 = base64.b64encode(content.encode()).decode()
               verb = "sync" if file_sha else "add"
               args = ["api", f"/repos/{repo_full}/contents/{path}",
@@ -212,6 +222,7 @@ jobs:
                   time.sleep(_WRITE_PACING_SEC)  # pace writes to stay under the limit
                   r = gh(*args, check=False)
                   if r.returncode == 0:
+                      _any_write_ok = True
                       return True, ""
                   # Surface the API error so a failed write is self-diagnosing
                   # (e.g. a token missing `workflow` scope returns a clear 403).
