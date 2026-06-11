@@ -83,6 +83,14 @@ jobs:
               return r
 
           def gh_json(*args):
+              # ALWAYS returns a flat list. Callers iterate the result and call
+              # .get() on each element, so a single object or newline-delimited
+              # JSON (what `--jq '.x[]'` + `--paginate` emit) must not slip
+              # through as a bare dict or get dropped. Three shapes to handle:
+              #   - a JSON array      → flatten one level
+              #   - a single object   → wrap as [obj]   (was iterated as dict keys → crash)
+              #   - JSON-lines (>1 obj, one per line) → parse each line
+              #     (was JSONDecodeError → silently [], undercounting checks/findings)
               r = gh("api", "--paginate", *args)
               raw = r.stdout.strip()
               if not raw:
@@ -94,9 +102,18 @@ jobs:
                       for item in obj:
                           (flat.extend(item) if isinstance(item, list) else flat.append(item))
                       return flat
-                  return obj
+                  return [obj]
               except json.JSONDecodeError:
-                  return []
+                  out = []
+                  for line in raw.splitlines():
+                      line = line.strip()
+                      if not line:
+                          continue
+                      try:
+                          out.append(json.loads(line))
+                      except json.JSONDecodeError:
+                          continue
+                  return out
 
           def find_open_prs(branch):
               """Find open PRs using gh api /search/issues.
