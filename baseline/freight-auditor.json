@@ -1,0 +1,25 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 52,
+    "EndLine": 52,
+    "StartColumn": 93,
+    "EndColumn": 114,
+    "Match": "Key: `REDACTED`",
+    "Secret": "REDACTED",
+    "File": "product-mgmt/onboarding/broa-freight-auditor-onboarding.md",
+    "SymlinkFile": "",
+    "Commit": "df32ed61295de58ea0e5fdd7e28044063942ff99",
+    "Link": "https://github.com/Automation-Architecture/freight-auditor/blob/df32ed61295de58ea0e5fdd7e28044063942ff99/product-mgmt/onboarding/broa-freight-auditor-onboarding.md?plain=1#L52",
+    "Entropy": 3.640224,
+    "Author": "Brad Wilcox",
+    "Email": "bradfordhamiltonwilcox@gmail.com",
+    "Date": "2026-05-03T15:21:17Z",
+    "Message": "Update project docs: add vendor mapping, credentials request, onboarding doc, dashboard config; remove generated DOCX files\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "df32ed61295de58ea0e5fdd7e28044063942ff99:product-mgmt/onboarding/broa-freight-auditor-onboarding.md:generic-api-key:52"
+  }
+]

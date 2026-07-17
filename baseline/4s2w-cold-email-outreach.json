@@ -1,0 +1,71 @@
+[
+  {
+    "RuleID": "linkedin-client-id",
+    "Description": "Found a LinkedIn Client ID, risking unauthorized access to LinkedIn integrations and professional data exposure.",
+    "StartLine": 15,
+    "EndLine": 15,
+    "StartColumn": 25,
+    "EndColumn": 59,
+    "Match": "LinkedInEnrichment, REDACTED ",
+    "Secret": "REDACTED",
+    "File": "src/scoring/intent.ts",
+    "SymlinkFile": "",
+    "Commit": "17b6e2cb7b3a0f189744db996bd597528f322d48",
+    "Link": "https://github.com/Automation-Architecture/4s2w-cold-email-outreach/blob/17b6e2cb7b3a0f189744db996bd597528f322d48/src/scoring/intent.ts#L15",
+    "Entropy": 3.5216405,
+    "Author": "Claude",
+    "Email": "noreply@anthropic.com",
+    "Date": "2026-06-12T09:49:36Z",
+    "Message": "feat: two-stage ICP score gates spend in the Apollo refill pipeline\n\nStage 1 (pre-reveal, free): deterministic rubric over Apollo's structured\nsearch fields (persona title bucket, A1/A2 search leg, country tier,\nLinkedIn presence) drops obvious low-fit candidates before reveal credits\nare spent. Default cutoff 40/100.\n\nStage 2 (post-verify): Claude Haiku grades pain/intent evidence from the\nExa LinkedIn + news probes (reused for personalization, so scoring adds\nonly the Haiku call). Final score = 0.35*fit + 0.50*intent +\n0.15*reachability, tiered A-D; email-cohort leads below --icp-min-tier\n(default C) are parked as linkedin_only - they keep the HeyReach touch\nbut never consume an Instantly send slot. Intent probe is fail-open.\n\nScore/tier/reason land in new sheet columns Q/R/S. All weights live in\nsrc/scoring/weights.ts; scripts/calibrate-icp-score.ts mines actual sheet\noutcomes (tiered positives: reply=1, assessment=3, booking=10) and prints\nsuggested weight adjustments per persona/country/LinkedIn/tier bucket.\n\nNew flags on refill-leads-apollo.ts: --no-icp-gate, --icp-stage1-min,\n--icp-min-tier. Also fixes the anyMailFinder import casing that broke the\nscript on case-sensitive filesystems.\n\nhttps://claude.ai/code/session_01ULMZNXkKTM5TejpqhxMkTb",
+    "Tags": [
+
+    ],
+    "Fingerprint": "17b6e2cb7b3a0f189744db996bd597528f322d48:src/scoring/intent.ts:linkedin-client-id:15"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 36,
+    "EndLine": 37,
+    "StartColumn": 2,
+    "EndColumn": 35,
+    "Match": "curl -X POST \"https://api.anymailfinder.com/v5.1/find-email/person\" \\\n  -H \"Authorization: REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "docs/anymailfinder-api.md",
+    "SymlinkFile": "",
+    "Commit": "fa5c337763bcc11bb99394f64b6fd03144919526",
+    "Link": "https://github.com/Automation-Architecture/4s2w-cold-email-outreach/blob/fa5c337763bcc11bb99394f64b6fd03144919526/docs/anymailfinder-api.md?plain=1#L36-L37",
+    "Entropy": 3.251629,
+    "Author": "sweeney692",
+    "Email": "conorsweeney692@gmail.com",
+    "Date": "2026-03-26T11:21:18Z",
+    "Message": "feat: Phase 2+3 complete — Sheets, pipeline, AnyMailFinder, housekeeping\n\nNew clients:\n- src/clients/googleSheets.ts — appendLeads + updateLeadStatus (OAuth2)\n- src/clients/apifyRunner.ts — triggerActorRun + pollUntilComplete\n- src/clients/anyMailFinder.ts — LinkedIn URL (primary) + name+domain (fallback)\n\nNew pipeline:\n- src/pipeline/scrape.ts — trigger actor → poll → fetch → append to Sheets\n- src/pipeline/processLeads.ts — enrich → personalize → Instantly → Sheets status\n- src/routes/pipeline.ts — POST /pipeline/run/:campaign\n\nUpdated:\n- src/clients/apify.ts — AnyMailFinder fallback for leads missing email; prefers LinkedIn URL\n- src/config.ts — added googleSheetId, googleSheets vars, anyMailFinderApiKey; WhatsApp vars now optional\n- src/types/index.ts — googleSheetId on CampaignConfig\n- src/routes/apify.ts + instantly.ts — wire Sheets status updates\n- src/server.ts — register pipeline route\n- test-connections.ts — added AnyMailFinder test; fixed auth method + endpoint to v5.1\n- .env — fixed APIFY_API_TOKEN key name, filled actor IDs + campaign IDs\n\nDocs & housekeeping:\n- CLAUDE.md — updated integration status, phases, next steps\n- docs/api-reference.md — updated connection status, added AnyMailFinder section\n- docs/environment.md — full rewrite with correct var names and required/optional flags\n- docs/anymailfinder-api.md — new API reference doc\n- src/pipeline/README.md — new\n- src/clients/README.md + src/routes/README.md — updated for new files\n- Resources/Energy-Tech_Cluster1_Campaign_Content.md — moved from root\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "fa5c337763bcc11bb99394f64b6fd03144919526:docs/anymailfinder-api.md:curl-auth-header:36"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 59,
+    "EndLine": 60,
+    "StartColumn": 2,
+    "EndColumn": 35,
+    "Match": "curl -X POST \"https://api.anymailfinder.com/v5.1/find-email/linkedin-url\" \\\n  -H \"Authorization: REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "docs/anymailfinder-api.md",
+    "SymlinkFile": "",
+    "Commit": "fa5c337763bcc11bb99394f64b6fd03144919526",
+    "Link": "https://github.com/Automation-Architecture/4s2w-cold-email-outreach/blob/fa5c337763bcc11bb99394f64b6fd03144919526/docs/anymailfinder-api.md?plain=1#L59-L60",
+    "Entropy": 3.251629,
+    "Author": "sweeney692",
+    "Email": "conorsweeney692@gmail.com",
+    "Date": "2026-03-26T11:21:18Z",
+    "Message": "feat: Phase 2+3 complete — Sheets, pipeline, AnyMailFinder, housekeeping\n\nNew clients:\n- src/clients/googleSheets.ts — appendLeads + updateLeadStatus (OAuth2)\n- src/clients/apifyRunner.ts — triggerActorRun + pollUntilComplete\n- src/clients/anyMailFinder.ts — LinkedIn URL (primary) + name+domain (fallback)\n\nNew pipeline:\n- src/pipeline/scrape.ts — trigger actor → poll → fetch → append to Sheets\n- src/pipeline/processLeads.ts — enrich → personalize → Instantly → Sheets status\n- src/routes/pipeline.ts — POST /pipeline/run/:campaign\n\nUpdated:\n- src/clients/apify.ts — AnyMailFinder fallback for leads missing email; prefers LinkedIn URL\n- src/config.ts — added googleSheetId, googleSheets vars, anyMailFinderApiKey; WhatsApp vars now optional\n- src/types/index.ts — googleSheetId on CampaignConfig\n- src/routes/apify.ts + instantly.ts — wire Sheets status updates\n- src/server.ts — register pipeline route\n- test-connections.ts — added AnyMailFinder test; fixed auth method + endpoint to v5.1\n- .env — fixed APIFY_API_TOKEN key name, filled actor IDs + campaign IDs\n\nDocs & housekeeping:\n- CLAUDE.md — updated integration status, phases, next steps\n- docs/api-reference.md — updated connection status, added AnyMailFinder section\n- docs/environment.md — full rewrite with correct var names and required/optional flags\n- docs/anymailfinder-api.md — new API reference doc\n- src/pipeline/README.md — new\n- src/clients/README.md + src/routes/README.md — updated for new files\n- Resources/Energy-Tech_Cluster1_Campaign_Content.md — moved from root\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "fa5c337763bcc11bb99394f64b6fd03144919526:docs/anymailfinder-api.md:curl-auth-header:59"
+  }
+]

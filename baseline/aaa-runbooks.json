@@ -1,0 +1,163 @@
+[
+  {
+    "RuleID": "curl-auth-user",
+    "Description": "Discovered a potential basic authorization token provided in a curl command, which could compromise the curl accessed resource.",
+    "StartLine": 26,
+    "EndLine": 26,
+    "StartColumn": 4,
+    "EndColumn": 56,
+    "Match": "curl -s https://api.stripe.com/v1/account -u REDACTED ",
+    "Secret": "REDACTED",
+    "File": "integrations/stripe-api-auth.md",
+    "SymlinkFile": "",
+    "Commit": "e57e5d6de8dfc6c71fff562eb008b1ff9d2d0380",
+    "Link": "https://github.com/Automation-Architecture/aaa-runbooks/blob/e57e5d6de8dfc6c71fff562eb008b1ff9d2d0380/integrations/stripe-api-auth.md?plain=1#L26",
+    "Entropy": 2.5216405,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-08T16:37:15Z",
+    "Message": "docs(integrations): add Wise + Stripe API runbooks (#26)\n\nWise: Bearer personal-token auth, profile→balance→statement.csv export\nrecipe, 12-month/ISO-date/SCA gotchas. Stripe: key types, restricted\nread-only key creation, cursor-pagination export, and the CLI-default-\naccount misattribution gotcha. Index entries added.\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "e57e5d6de8dfc6c71fff562eb008b1ff9d2d0380:integrations/stripe-api-auth.md:curl-auth-user:26"
+  },
+  {
+    "RuleID": "curl-auth-user",
+    "Description": "Discovered a potential basic authorization token provided in a curl command, which could compromise the curl accessed resource.",
+    "StartLine": 30,
+    "EndLine": 30,
+    "StartColumn": 4,
+    "EndColumn": 80,
+    "Match": "curl -s \"https://api.stripe.com/v1/balance_transactions?limit=100\" -u REDACTED",
+    "Secret": "REDACTED",
+    "File": "integrations/stripe-api-auth.md",
+    "SymlinkFile": "",
+    "Commit": "e57e5d6de8dfc6c71fff562eb008b1ff9d2d0380",
+    "Link": "https://github.com/Automation-Architecture/aaa-runbooks/blob/e57e5d6de8dfc6c71fff562eb008b1ff9d2d0380/integrations/stripe-api-auth.md?plain=1#L30",
+    "Entropy": 2.5216405,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-08T16:37:15Z",
+    "Message": "docs(integrations): add Wise + Stripe API runbooks (#26)\n\nWise: Bearer personal-token auth, profile→balance→statement.csv export\nrecipe, 12-month/ISO-date/SCA gotchas. Stripe: key types, restricted\nread-only key creation, cursor-pagination export, and the CLI-default-\naccount misattribution gotcha. Index entries added.\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "e57e5d6de8dfc6c71fff562eb008b1ff9d2d0380:integrations/stripe-api-auth.md:curl-auth-user:30"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 134,
+    "EndLine": 136,
+    "StartColumn": 2,
+    "EndColumn": 48,
+    "Match": "curl --request GET \\\n  --url https://api.atlassian.com/oauth/token/accessible-resources \\\n  --header 'Authorization: Bearer REDACTED'",
+    "Secret": "REDACTED",
+    "File": "integrations/jira-oauth-3lo.md",
+    "SymlinkFile": "",
+    "Commit": "d39f6ee8312b09de76bb6a65c002c6d68890acc3",
+    "Link": "https://github.com/Automation-Architecture/aaa-runbooks/blob/d39f6ee8312b09de76bb6a65c002c6d68890acc3/integrations/jira-oauth-3lo.md?plain=1#L134-L136",
+    "Entropy": 3.0849626,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-30T15:40:02Z",
+    "Message": "chore: bootstrap aaa-runbooks knowledge base (#1)\n\nShared cross-project KB for reusable setup recipes, runbooks, and\nreference docs. Scaffolds folder taxonomy (integrations/infra/dashboard/\nprocess/reference), README index, contributor template + guide, repo\nCLAUDE.md, and the org copilot-review workflow.\n\nSeeds the first runbook: Jira OAuth 2.0 (3LO) scopes + URL construction\n(migrated and expanded from project auto-memory).\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "d39f6ee8312b09de76bb6a65c002c6d68890acc3:integrations/jira-oauth-3lo.md:curl-auth-header:134"
+  },
+  {
+    "RuleID": "jwt",
+    "Description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
+    "StartLine": 275455,
+    "EndLine": 275455,
+    "StartColumn": 2,
+    "EndColumn": 455,
+    "Match": "REDACTED",
+    "Secret": "REDACTED",
+    "File": "reference/clerk-docs/llms-full.txt",
+    "SymlinkFile": "",
+    "Commit": "bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6",
+    "Link": "https://github.com/Automation-Architecture/aaa-runbooks/blob/bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6/reference/clerk-docs/llms-full.txt#L275455",
+    "Entropy": 5.903653,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-05T14:38:03Z",
+    "Message": "docs: mirror Clerk documentation (llms.txt) (#18)\n\nFull Clerk docs snapshot via official llms.txt + llms-full.txt bundle\n(index + ~23MB full content) under reference/clerk-docs/, with a\nprovenance README + refresh steps. Prefer Context7 for live lookups.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6:reference/clerk-docs/llms-full.txt:jwt:275455"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 262484,
+    "EndLine": 262486,
+    "StartColumn": 2,
+    "EndColumn": 56,
+    "Match": "curl https://api.clerk.com/oauth_applications/access_tokens/verify \\\n  -X POST \\\n  -H 'Authorization: Bearer REDACTED'",
+    "Secret": "REDACTED",
+    "File": "reference/clerk-docs/llms-full.txt",
+    "SymlinkFile": "",
+    "Commit": "bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6",
+    "Link": "https://github.com/Automation-Architecture/aaa-runbooks/blob/bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6/reference/clerk-docs/llms-full.txt#L262484-L262486",
+    "Entropy": 3.257756,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-05T14:38:03Z",
+    "Message": "docs: mirror Clerk documentation (llms.txt) (#18)\n\nFull Clerk docs snapshot via official llms.txt + llms-full.txt bundle\n(index + ~23MB full content) under reference/clerk-docs/, with a\nprovenance README + refresh steps. Prefer Context7 for live lookups.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6:reference/clerk-docs/llms-full.txt:curl-auth-header:262484"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 274954,
+    "EndLine": 274954,
+    "StartColumn": 8,
+    "EndColumn": 62,
+    "Match": "publishableKey = 'REDACTED'",
+    "Secret": "REDACTED",
+    "File": "reference/clerk-docs/llms-full.txt",
+    "SymlinkFile": "",
+    "Commit": "bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6",
+    "Link": "https://github.com/Automation-Architecture/aaa-runbooks/blob/bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6/reference/clerk-docs/llms-full.txt#L274954",
+    "Entropy": 4.2873015,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-05T14:38:03Z",
+    "Message": "docs: mirror Clerk documentation (llms.txt) (#18)\n\nFull Clerk docs snapshot via official llms.txt + llms-full.txt bundle\n(index + ~23MB full content) under reference/clerk-docs/, with a\nprovenance README + refresh steps. Prefer Context7 for live lookups.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6:reference/clerk-docs/llms-full.txt:generic-api-key:274954"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 330464,
+    "EndLine": 330464,
+    "StartColumn": 67,
+    "EndColumn": 142,
+    "Match": "__clerk_testing_token=REDACTED",
+    "Secret": "REDACTED",
+    "File": "reference/clerk-docs/llms-full.txt",
+    "SymlinkFile": "",
+    "Commit": "bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6",
+    "Link": "https://github.com/Automation-Architecture/aaa-runbooks/blob/bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6/reference/clerk-docs/llms-full.txt#L330464",
+    "Entropy": 5.0092454,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-05T14:38:03Z",
+    "Message": "docs: mirror Clerk documentation (llms.txt) (#18)\n\nFull Clerk docs snapshot via official llms.txt + llms-full.txt bundle\n(index + ~23MB full content) under reference/clerk-docs/, with a\nprovenance README + refresh steps. Prefer Context7 for live lookups.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "bd1e7cb5ad8df3c0c69b91c999ecfee34e22a8d6:reference/clerk-docs/llms-full.txt:generic-api-key:330464"
+  }
+]

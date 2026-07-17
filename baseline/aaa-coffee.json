@@ -1,0 +1,71 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 15,
+    "EndLine": 15,
+    "StartColumn": 4,
+    "EndColumn": 98,
+    "Match": "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".github/workflows/ci.yml",
+    "SymlinkFile": "",
+    "Commit": "5afcf0d9db3f5c045800469f8de685754b3e79f4",
+    "Link": "https://github.com/Automation-Architecture/aaa-coffee/blob/5afcf0d9db3f5c045800469f8de685754b3e79f4/.github/workflows/ci.yml#L15",
+    "Entropy": 4.8773165,
+    "Author": "Javier",
+    "Email": "nhat.nm@minhanh-corp.com",
+    "Date": "2026-07-07T12:18:36Z",
+    "Message": "chore: initialize project structure with essential configuration files (#48)\n\n* chore: initialize project structure with essential configuration files\n\n- Added .editorconfig for consistent coding styles across editors.\n- Created .env.example with environment variable placeholders for configuration.\n- Introduced .gitignore to exclude sensitive files and build artifacts.\n- Set up initial ESLint configuration for code quality checks.\n- Established Next.js configuration and TypeScript settings.\n- Included vitest configuration for unit testing.\n- Added components.json for UI component settings.\n- Created postcss.config.mjs for Tailwind CSS integration.\n- Initialized package.json with project dependencies and scripts.\n\nThis commit lays the groundwork for the Coffee project, ensuring a standardized development environment.\n\n* feat: enhance project configuration and add Coffee database support\n\n- Updated .env.example with environment variables for Clerk and Coffee DB.\n- Modified .gitignore to include database backup files.\n- Enhanced ESLint configuration to ignore archived files.\n- Updated package.json with new scripts for database management and added dependencies for Clerk and Prisma.\n- Introduced Docker Compose setup for Coffee Postgres database.\n- Created Prisma configuration and initial database schema for user management.\n- Added API routes for user authentication and onboarding status.\n- Implemented middleware for Clerk authentication and updated app routing.\n\nThis commit establishes foundational support for user management and database interactions in the Coffee application.\n\n* feat: update configuration and UI components for improved onboarding experience\n\n- Enhanced .env.example with a new variable for skipping onboarding.\n- Updated next.config.ts to allow remote image patterns from Clerk.\n- Modified src/config.ts to include onboarding skip logic based on environment variable.\n- Revamped globals.css with new design tokens and improved color scheme for light and dark themes.\n- Updated layout.tsx to incorporate the Jura font for better typography.\n- Refined various UI components (Chip, WaveGlyph, AppChrome) to align with the new design system.\n- Improved responsiveness and accessibility in chat and approval views.\n- Adjusted styles in database-unavailable and login views for consistency with the new theme.\n\nThis commit enhances the user interface and onboarding process, ensuring a more cohesive experience across the application.\n\n* feat: enhance CI workflow and add TypeScript type checking\n\n- Added a new script for TypeScript type checking in package.json.\n- Updated CI workflow to include type checking, linting, unit testing, and building steps.\n- Switched to pnpm for package management in CI for improved performance.\n- Set environment variables in CI to prevent build failures due to missing configurations.\n\nThis commit improves the development workflow by ensuring type safety and streamlining the CI process.\n\n---------\n\nCo-authored-by: javier1234559 <nhat1234559@gmail.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "5afcf0d9db3f5c045800469f8de685754b3e79f4:.github/workflows/ci.yml:generic-api-key:15"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 15,
+    "EndLine": 15,
+    "StartColumn": 4,
+    "EndColumn": 98,
+    "Match": "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".github/workflows/ci.yml",
+    "SymlinkFile": "",
+    "Commit": "28d0c2e51fdc760f928c70a8430209dac76fa529",
+    "Link": "https://github.com/Automation-Architecture/aaa-coffee/blob/28d0c2e51fdc760f928c70a8430209dac76fa529/.github/workflows/ci.yml#L15",
+    "Entropy": 4.8773165,
+    "Author": "javier1234559",
+    "Email": "nhat1234559@gmail.com",
+    "Date": "2026-07-07T12:16:59Z",
+    "Message": "feat: enhance CI workflow and add TypeScript type checking\n\n- Added a new script for TypeScript type checking in package.json.\n- Updated CI workflow to include type checking, linting, unit testing, and building steps.\n- Switched to pnpm for package management in CI for improved performance.\n- Set environment variables in CI to prevent build failures due to missing configurations.\n\nThis commit improves the development workflow by ensuring type safety and streamlining the CI process.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "28d0c2e51fdc760f928c70a8430209dac76fa529:.github/workflows/ci.yml:generic-api-key:15"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 70,
+    "EndLine": 72,
+    "StartColumn": 2,
+    "EndColumn": 36,
+    "Match": "curl \"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent\" \\\n  -H 'Content-Type: application/json' \\\n  -H 'X-goog-api-key: REDACTED'",
+    "Secret": "REDACTED",
+    "File": "Resources/gemini-live-api.md",
+    "SymlinkFile": "",
+    "Commit": "454d341f729cd333aa0fffbe98a36e49c253403f",
+    "Link": "https://github.com/Automation-Architecture/aaa-coffee/blob/454d341f729cd333aa0fffbe98a36e49c253403f/Resources/gemini-live-api.md?plain=1#L70-L72",
+    "Entropy": 3.251629,
+    "Author": "Brad Wilcox",
+    "Email": "billing@coraltriangle.io",
+    "Date": "2026-03-29T15:11:26Z",
+    "Message": "chore: initial project scaffold — Discovery Phase complete\n\nAgent team workspace with 6 agents, V2 domain docs, PRD v2 (locked),\nCEO Test artifacts, enforcement SOPs, provisioning checklist, compliance\nspike report, cost model, data privacy research, and Design Sprint\noutputs (Days 1-2).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "454d341f729cd333aa0fffbe98a36e49c253403f:Resources/gemini-live-api.md:curl-auth-header:70"
+  }
+]

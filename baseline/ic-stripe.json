@@ -1,0 +1,117 @@
+[
+  {
+    "RuleID": "slack-webhook-url",
+    "Description": "Discovered a Slack Webhook, which could lead to unauthorized message posting and data leakage in Slack channels.",
+    "StartLine": 117,
+    "EndLine": 117,
+    "StartColumn": 15,
+    "EndColumn": 91,
+    "Match": "REDACTED",
+    "Secret": "REDACTED",
+    "File": "Resources/slack-webhook-triggers.md",
+    "SymlinkFile": "",
+    "Commit": "d0f4cbd339ee86d098bbca0677b137260a6624a1",
+    "Link": "https://github.com/Automation-Architecture/ic-stripe/blob/d0f4cbd339ee86d098bbca0677b137260a6624a1/Resources/slack-webhook-triggers.md?plain=1#L117",
+    "Entropy": 3.4009645,
+    "Author": "Brad Wilcox",
+    "Email": "billing@coraltriangle.io",
+    "Date": "2026-03-24T17:09:16Z",
+    "Message": "feat: initial commit — ic-stripe payment plan system\n\nStripe payment link with multi-phase subscription scheduling\n(£450/mo × 6 months → £95/mo ongoing) deployed to Railway with\nwebhook processing, Stripe Tax (UK VAT), and Slack monitoring.\n\nClient sandbox QA complete — all E2E tests passing.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "d0f4cbd339ee86d098bbca0677b137260a6624a1:Resources/slack-webhook-triggers.md:slack-webhook-url:117"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 179,
+    "EndLine": 179,
+    "StartColumn": 2,
+    "EndColumn": 54,
+    "Match": "SLACK_SIGNING_SECRET=REDACTED",
+    "Secret": "REDACTED",
+    "File": "Resources/slack-signature-verification.md",
+    "SymlinkFile": "",
+    "Commit": "8754fc2630b17c1d19bd7da3da7d262f3d17dd47",
+    "Link": "https://github.com/Automation-Architecture/ic-stripe/blob/8754fc2630b17c1d19bd7da3da7d262f3d17dd47/Resources/slack-signature-verification.md?plain=1#L179",
+    "Entropy": 3.6678379,
+    "Author": "Claude",
+    "Email": "noreply@anthropic.com",
+    "Date": "2026-04-26T14:11:02Z",
+    "Message": "Add comprehensive Slack API documentation for error-monitor agent\n\nAdded three new documentation files to Resources/:\n- slack-events-api.md: Events API setup, URL verification, event handling\n- slack-signature-verification.md: Request signature verification for security\n- slack-oauth-multi-workspace.md: OAuth 2.0 flow for multi-workspace installations\n\nThese docs support the planned multi-agent error monitoring system that will\nreceive Slack events, analyze errors with AI, and auto-fix issues across\nmultiple client workspaces.\n\nhttps://claude.ai/code/session_SxlXI",
+    "Tags": [
+
+    ],
+    "Fingerprint": "8754fc2630b17c1d19bd7da3da7d262f3d17dd47:Resources/slack-signature-verification.md:generic-api-key:179"
+  },
+  {
+    "RuleID": "slack-bot-token",
+    "Description": "Identified a Slack Bot token, which may compromise bot integrations and communication channel security.",
+    "StartLine": 154,
+    "EndLine": 154,
+    "StartColumn": 21,
+    "EndColumn": 73,
+    "Match": "REDACTED",
+    "Secret": "REDACTED",
+    "File": "Resources/slack-oauth-multi-workspace.md",
+    "SymlinkFile": "",
+    "Commit": "8754fc2630b17c1d19bd7da3da7d262f3d17dd47",
+    "Link": "https://github.com/Automation-Architecture/ic-stripe/blob/8754fc2630b17c1d19bd7da3da7d262f3d17dd47/Resources/slack-oauth-multi-workspace.md?plain=1#L154",
+    "Entropy": 4.8407593,
+    "Author": "Claude",
+    "Email": "noreply@anthropic.com",
+    "Date": "2026-04-26T14:11:02Z",
+    "Message": "Add comprehensive Slack API documentation for error-monitor agent\n\nAdded three new documentation files to Resources/:\n- slack-events-api.md: Events API setup, URL verification, event handling\n- slack-signature-verification.md: Request signature verification for security\n- slack-oauth-multi-workspace.md: OAuth 2.0 flow for multi-workspace installations\n\nThese docs support the planned multi-agent error monitoring system that will\nreceive Slack events, analyze errors with AI, and auto-fix issues across\nmultiple client workspaces.\n\nhttps://claude.ai/code/session_SxlXI",
+    "Tags": [
+
+    ],
+    "Fingerprint": "8754fc2630b17c1d19bd7da3da7d262f3d17dd47:Resources/slack-oauth-multi-workspace.md:slack-bot-token:154"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 81,
+    "EndLine": 81,
+    "StartColumn": 2,
+    "EndColumn": 42,
+    "Match": "SLACK_CLIENT_SECRET=REDACTED",
+    "Secret": "REDACTED",
+    "File": "Resources/slack-oauth-multi-workspace.md",
+    "SymlinkFile": "",
+    "Commit": "8754fc2630b17c1d19bd7da3da7d262f3d17dd47",
+    "Link": "https://github.com/Automation-Architecture/ic-stripe/blob/8754fc2630b17c1d19bd7da3da7d262f3d17dd47/Resources/slack-oauth-multi-workspace.md?plain=1#L81",
+    "Entropy": 4.3923173,
+    "Author": "Claude",
+    "Email": "noreply@anthropic.com",
+    "Date": "2026-04-26T14:11:02Z",
+    "Message": "Add comprehensive Slack API documentation for error-monitor agent\n\nAdded three new documentation files to Resources/:\n- slack-events-api.md: Events API setup, URL verification, event handling\n- slack-signature-verification.md: Request signature verification for security\n- slack-oauth-multi-workspace.md: OAuth 2.0 flow for multi-workspace installations\n\nThese docs support the planned multi-agent error monitoring system that will\nreceive Slack events, analyze errors with AI, and auto-fix issues across\nmultiple client workspaces.\n\nhttps://claude.ai/code/session_SxlXI",
+    "Tags": [
+
+    ],
+    "Fingerprint": "8754fc2630b17c1d19bd7da3da7d262f3d17dd47:Resources/slack-oauth-multi-workspace.md:generic-api-key:81"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 82,
+    "EndLine": 82,
+    "StartColumn": 2,
+    "EndColumn": 54,
+    "Match": "SLACK_SIGNING_SECRET=REDACTED",
+    "Secret": "REDACTED",
+    "File": "Resources/slack-oauth-multi-workspace.md",
+    "SymlinkFile": "",
+    "Commit": "8754fc2630b17c1d19bd7da3da7d262f3d17dd47",
+    "Link": "https://github.com/Automation-Architecture/ic-stripe/blob/8754fc2630b17c1d19bd7da3da7d262f3d17dd47/Resources/slack-oauth-multi-workspace.md?plain=1#L82",
+    "Entropy": 3.6678379,
+    "Author": "Claude",
+    "Email": "noreply@anthropic.com",
+    "Date": "2026-04-26T14:11:02Z",
+    "Message": "Add comprehensive Slack API documentation for error-monitor agent\n\nAdded three new documentation files to Resources/:\n- slack-events-api.md: Events API setup, URL verification, event handling\n- slack-signature-verification.md: Request signature verification for security\n- slack-oauth-multi-workspace.md: OAuth 2.0 flow for multi-workspace installations\n\nThese docs support the planned multi-agent error monitoring system that will\nreceive Slack events, analyze errors with AI, and auto-fix issues across\nmultiple client workspaces.\n\nhttps://claude.ai/code/session_SxlXI",
+    "Tags": [
+
+    ],
+    "Fingerprint": "8754fc2630b17c1d19bd7da3da7d262f3d17dd47:Resources/slack-oauth-multi-workspace.md:generic-api-key:82"
+  }
+]

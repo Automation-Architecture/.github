@@ -1,0 +1,117 @@
+[
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 19,
+    "EndLine": 20,
+    "StartColumn": 2,
+    "EndColumn": 40,
+    "Match": "curl -X POST https://api.hubapi.com/crm/v3/properties/deals \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/hubspot/crm-properties.md",
+    "SymlinkFile": "",
+    "Commit": "6656b8ead7324a20046d216b2e5e95e90122cb97",
+    "Link": "https://github.com/Automation-Architecture/client-onboarding/blob/6656b8ead7324a20046d216b2e5e95e90122cb97/resources/hubspot/crm-properties.md?plain=1#L19-L20",
+    "Entropy": 3.121928,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-08T15:10:28Z",
+    "Message": "chore: mirror HubSpot developer docs in resources/hubspot/ (#1)\n\nAdds scraped reference docs for the three HubSpot topics needed for\nthe onboarding workflow: MCP auth app setup, legacy private apps, and\nthe CRM Properties API (with curl examples for creating the two\nrequired deal properties).\n\nKey finding: private apps are now \"Legacy\" in HubSpot's new platform.\nMCP auth apps (OAuth + PKCE via mcp.hubspot.com) are the preferred\npattern for AI/Claude integrations going forward.\n\nCo-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "6656b8ead7324a20046d216b2e5e95e90122cb97:resources/hubspot/crm-properties.md:curl-auth-header:19"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 39,
+    "EndLine": 40,
+    "StartColumn": 2,
+    "EndColumn": 40,
+    "Match": "curl -X POST https://api.hubapi.com/crm/v3/properties/deals \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/hubspot/crm-properties.md",
+    "SymlinkFile": "",
+    "Commit": "6656b8ead7324a20046d216b2e5e95e90122cb97",
+    "Link": "https://github.com/Automation-Architecture/client-onboarding/blob/6656b8ead7324a20046d216b2e5e95e90122cb97/resources/hubspot/crm-properties.md?plain=1#L39-L40",
+    "Entropy": 3.121928,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-08T15:10:28Z",
+    "Message": "chore: mirror HubSpot developer docs in resources/hubspot/ (#1)\n\nAdds scraped reference docs for the three HubSpot topics needed for\nthe onboarding workflow: MCP auth app setup, legacy private apps, and\nthe CRM Properties API (with curl examples for creating the two\nrequired deal properties).\n\nKey finding: private apps are now \"Legacy\" in HubSpot's new platform.\nMCP auth apps (OAuth + PKCE via mcp.hubspot.com) are the preferred\npattern for AI/Claude integrations going forward.\n\nCo-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "6656b8ead7324a20046d216b2e5e95e90122cb97:resources/hubspot/crm-properties.md:curl-auth-header:39"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 48,
+    "EndLine": 49,
+    "StartColumn": 2,
+    "EndColumn": 46,
+    "Match": "curl -X POST https://api.hubapi.com/crm/v3/properties/deals \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/hubspot/service-keys.md",
+    "SymlinkFile": "",
+    "Commit": "3a073ecc6d8effad7173b9ee2eff9869e0310856",
+    "Link": "https://github.com/Automation-Architecture/client-onboarding/blob/3a073ecc6d8effad7173b9ee2eff9869e0310856/resources/hubspot/service-keys.md?plain=1#L48-L49",
+    "Entropy": 3.3278196,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-12T07:41:53Z",
+    "Message": "chore: add .env.example and commit service-keys docs (#2)\n\nAdds .env.example with HUBSPOT_SERVICE_KEY placeholder and instructions\nfor locating the token in HubSpot. Adds .gitignore to exclude real .env.\nAlso commits the previously-written service-keys.md reference doc and\nupdates resources/hubspot/README.md to reflect Service Keys as the\nrecommended auth path (over legacy private apps).\n\nCo-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "3a073ecc6d8effad7173b9ee2eff9869e0310856:resources/hubspot/service-keys.md:curl-auth-header:48"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 64,
+    "EndLine": 65,
+    "StartColumn": 2,
+    "EndColumn": 46,
+    "Match": "curl -X POST https://api.hubapi.com/crm/v3/properties/deals \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/hubspot/service-keys.md",
+    "SymlinkFile": "",
+    "Commit": "3a073ecc6d8effad7173b9ee2eff9869e0310856",
+    "Link": "https://github.com/Automation-Architecture/client-onboarding/blob/3a073ecc6d8effad7173b9ee2eff9869e0310856/resources/hubspot/service-keys.md?plain=1#L64-L65",
+    "Entropy": 3.3278196,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-12T07:41:53Z",
+    "Message": "chore: add .env.example and commit service-keys docs (#2)\n\nAdds .env.example with HUBSPOT_SERVICE_KEY placeholder and instructions\nfor locating the token in HubSpot. Adds .gitignore to exclude real .env.\nAlso commits the previously-written service-keys.md reference doc and\nupdates resources/hubspot/README.md to reflect Service Keys as the\nrecommended auth path (over legacy private apps).\n\nCo-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "3a073ecc6d8effad7173b9ee2eff9869e0310856:resources/hubspot/service-keys.md:curl-auth-header:64"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 28,
+    "EndLine": 28,
+    "StartColumn": 2,
+    "EndColumn": 43,
+    "Match": "curl -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/hubspot/private-apps.md",
+    "SymlinkFile": "",
+    "Commit": "6656b8ead7324a20046d216b2e5e95e90122cb97",
+    "Link": "https://github.com/Automation-Architecture/client-onboarding/blob/6656b8ead7324a20046d216b2e5e95e90122cb97/resources/hubspot/private-apps.md?plain=1#L28",
+    "Entropy": 3.121928,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-08T15:10:28Z",
+    "Message": "chore: mirror HubSpot developer docs in resources/hubspot/ (#1)\n\nAdds scraped reference docs for the three HubSpot topics needed for\nthe onboarding workflow: MCP auth app setup, legacy private apps, and\nthe CRM Properties API (with curl examples for creating the two\nrequired deal properties).\n\nKey finding: private apps are now \"Legacy\" in HubSpot's new platform.\nMCP auth apps (OAuth + PKCE via mcp.hubspot.com) are the preferred\npattern for AI/Claude integrations going forward.\n\nCo-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "6656b8ead7324a20046d216b2e5e95e90122cb97:resources/hubspot/private-apps.md:curl-auth-header:28"
+  }
+]

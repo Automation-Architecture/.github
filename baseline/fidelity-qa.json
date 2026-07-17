@@ -1,0 +1,25 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 14,
+    "EndLine": 14,
+    "StartColumn": 41,
+    "EndColumn": 77,
+    "Match": "credentials, REDACTED ",
+    "Secret": "REDACTED",
+    "File": "requirements/CHANGELOG.md",
+    "SymlinkFile": "",
+    "Commit": "6a2a98f780b43d32b249e1f1f265838aab5b27ca",
+    "Link": "https://github.com/Automation-Architecture/fidelity-qa/blob/6a2a98f780b43d32b249e1f1f265838aab5b27ca/requirements/CHANGELOG.md?plain=1#L14",
+    "Entropy": 4.0559583,
+    "Author": "mac-tuanhm",
+    "Email": "Tuanhm0704@gmail.com",
+    "Date": "2026-03-12T07:25:16Z",
+    "Message": "feat(add): assets, requirements, and test case",
+    "Tags": [
+
+    ],
+    "Fingerprint": "6a2a98f780b43d32b249e1f1f265838aab5b27ca:requirements/CHANGELOG.md:generic-api-key:14"
+  }
+]

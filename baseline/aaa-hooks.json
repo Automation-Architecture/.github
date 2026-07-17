@@ -1,0 +1,25 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 137,
+    "EndLine": 137,
+    "StartColumn": 56,
+    "EndColumn": 97,
+    "Match": "CLIENT_SECRET\":\"REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "tests/test-mcp-cred-guard.sh",
+    "SymlinkFile": "",
+    "Commit": "b338c5976872d2dc3c5de1dc1ce67e486bffad75",
+    "Link": "https://github.com/Automation-Architecture/aaa-hooks/blob/b338c5976872d2dc3c5de1dc1ce67e486bffad75/tests/test-mcp-cred-guard.sh#L137",
+    "Entropy": 4.643856,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-15T12:39:45Z",
+    "Message": "feat(hooks): add mcp-cred-guard — block inline credentials in mcp.json files\n\nPreToolUse:Write,Edit hook that denies writes to mcp.json/.mcp.json/.claude.json\nwhen the content contains a credential-adjacent JSON key (token/key/secret/api/\npassword/auth/bearer) with a value that looks like a real secret rather than a\nplaceholder (${VAR}, <bracket>, your-*, changeme, ...).\n\nTwo-pass detection: jq parse (accurate for full JSON Write payloads) + grep regex\nfallback (handles partial JSON fragments in Edit new_string). Whitelist covers\ncommon placeholder forms and URLs. Bypass: export AAA_MCP_CRED_OK=1 before\nstarting Claude Code. Fail-safe: any jq/parse error exits 0 — never blocks\nunrelated writes.\n\nRoot cause: ic-project session 2026-06-13 hardcoded an Apify API token in\n.claude/mcp.json instead of referencing ${APIFY_API_TOKEN}.\n\n20/20 tests passing.\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b338c5976872d2dc3c5de1dc1ce67e486bffad75:tests/test-mcp-cred-guard.sh:generic-api-key:137"
+  }
+]

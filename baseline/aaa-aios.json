@@ -1,0 +1,25 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 122,
+    "EndLine": 122,
+    "StartColumn": 8,
+    "EndColumn": 52,
+    "Match": "matchingKey: \"REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "tests/dashboard-redesign/wp5-snooze.vitest.ts",
+    "SymlinkFile": "",
+    "Commit": "5b192aa1a7ff1ead1ac402e72e39e9b55b1c6154",
+    "Link": "https://github.com/Automation-Architecture/aaa-aios/blob/5b192aa1a7ff1ead1ac402e72e39e9b55b1c6154/tests/dashboard-redesign/wp5-snooze.vitest.ts#L122",
+    "Entropy": 4.056565,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-07T14:42:47Z",
+    "Message": "feat(api): snooze for commitments + momentum signals (WP5, D2) (#108)\n\nPersisted hidden-until state via nullable snoozedUntil on commitments\n+ momentum_signals (migration 0037). Status enums untouched: snoozed\nitems stay open/active, are filtered from attention surfaces, and\nauto-resurface when the timestamp passes (pure query filtering, no\ncron). PATCH /:id/snooze on both routes mirrors the atomic\nconditional-update dismiss pattern (409 on non-eligible status).\ngetActiveSignals() is the single choke point (dashboard + Telegram);\nsnoozed signals still expire while hidden.\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "5b192aa1a7ff1ead1ac402e72e39e9b55b1c6154:tests/dashboard-redesign/wp5-snooze.vitest.ts:generic-api-key:122"
+  }
+]

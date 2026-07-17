@@ -1,0 +1,117 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 306,
+    "EndLine": 306,
+    "StartColumn": 2,
+    "EndColumn": 26,
+    "Match": "X-API-Key: REDACTED",
+    "Secret": "REDACTED",
+    "File": "api-design/SKILL.md",
+    "SymlinkFile": "",
+    "Commit": "b25027ab1d9904f5290e42527b5096868e725493",
+    "Link": "https://github.com/Automation-Architecture/claude-skills-shelf/blob/b25027ab1d9904f5290e42527b5096868e725493/api-design/SKILL.md?plain=1#L306",
+    "Entropy": 3.6644979,
+    "Author": "Brad Wilcox",
+    "Email": "bradfordhamiltonwilcox@gmail.com",
+    "Date": "2026-05-05T06:18:20Z",
+    "Message": "Phase 1 — flat backup of 47 skills from ~/.claude/skills/\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b25027ab1d9904f5290e42527b5096868e725493:api-design/SKILL.md:generic-api-key:306"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 160,
+    "EndLine": 161,
+    "StartColumn": 2,
+    "EndColumn": 45,
+    "Match": "curl -X PATCH https://api.clerk.com/v1/instance \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "clerk-chrome-extension-patterns/SKILL.md",
+    "SymlinkFile": "",
+    "Commit": "b25027ab1d9904f5290e42527b5096868e725493",
+    "Link": "https://github.com/Automation-Architecture/claude-skills-shelf/blob/b25027ab1d9904f5290e42527b5096868e725493/clerk-chrome-extension-patterns/SKILL.md?plain=1#L160-L161",
+    "Entropy": 3.189898,
+    "Author": "Brad Wilcox",
+    "Email": "bradfordhamiltonwilcox@gmail.com",
+    "Date": "2026-05-05T06:18:20Z",
+    "Message": "Phase 1 — flat backup of 47 skills from ~/.claude/skills/\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b25027ab1d9904f5290e42527b5096868e725493:clerk-chrome-extension-patterns/SKILL.md:curl-auth-header:160"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 91,
+    "EndLine": 92,
+    "StartColumn": 2,
+    "EndColumn": 45,
+    "Match": "curl -X PATCH https://api.clerk.com/v1/instance \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "clerk-chrome-extension-patterns/references/sync-host.md",
+    "SymlinkFile": "",
+    "Commit": "b25027ab1d9904f5290e42527b5096868e725493",
+    "Link": "https://github.com/Automation-Architecture/claude-skills-shelf/blob/b25027ab1d9904f5290e42527b5096868e725493/clerk-chrome-extension-patterns/references/sync-host.md?plain=1#L91-L92",
+    "Entropy": 3.189898,
+    "Author": "Brad Wilcox",
+    "Email": "bradfordhamiltonwilcox@gmail.com",
+    "Date": "2026-05-05T06:18:20Z",
+    "Message": "Phase 1 — flat backup of 47 skills from ~/.claude/skills/\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b25027ab1d9904f5290e42527b5096868e725493:clerk-chrome-extension-patterns/references/sync-host.md:curl-auth-header:91"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 109,
+    "EndLine": 110,
+    "StartColumn": 2,
+    "EndColumn": 45,
+    "Match": "curl -X PATCH https://api.clerk.com/v1/instance \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "clerk-chrome-extension-patterns/references/headless-extension.md",
+    "SymlinkFile": "",
+    "Commit": "b25027ab1d9904f5290e42527b5096868e725493",
+    "Link": "https://github.com/Automation-Architecture/claude-skills-shelf/blob/b25027ab1d9904f5290e42527b5096868e725493/clerk-chrome-extension-patterns/references/headless-extension.md?plain=1#L109-L110",
+    "Entropy": 3.189898,
+    "Author": "Brad Wilcox",
+    "Email": "bradfordhamiltonwilcox@gmail.com",
+    "Date": "2026-05-05T06:18:20Z",
+    "Message": "Phase 1 — flat backup of 47 skills from ~/.claude/skills/\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b25027ab1d9904f5290e42527b5096868e725493:clerk-chrome-extension-patterns/references/headless-extension.md:curl-auth-header:109"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 37,
+    "EndLine": 37,
+    "StartColumn": 8,
+    "EndColumn": 38,
+    "Match": "secret = \"REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "no-static-values/SKILL.md",
+    "SymlinkFile": "",
+    "Commit": "b25027ab1d9904f5290e42527b5096868e725493",
+    "Link": "https://github.com/Automation-Architecture/claude-skills-shelf/blob/b25027ab1d9904f5290e42527b5096868e725493/no-static-values/SKILL.md?plain=1#L37",
+    "Entropy": 3.6464393,
+    "Author": "Brad Wilcox",
+    "Email": "bradfordhamiltonwilcox@gmail.com",
+    "Date": "2026-05-05T06:18:20Z",
+    "Message": "Phase 1 — flat backup of 47 skills from ~/.claude/skills/\n\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b25027ab1d9904f5290e42527b5096868e725493:no-static-values/SKILL.md:generic-api-key:37"
+  }
+]

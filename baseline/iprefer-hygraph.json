@@ -1,0 +1,25 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 192,
+    "EndLine": 192,
+    "StartColumn": 27,
+    "EndColumn": 78,
+    "Match": "michelinKeyWinner\", \"REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "src/lib/types/models.ts",
+    "SymlinkFile": "",
+    "Commit": "9605461bc92815cecf0fe6d5db277ce49c629217",
+    "Link": "https://github.com/Automation-Architecture/iprefer-hygraph/blob/9605461bc92815cecf0fe6d5db277ce49c629217/src/lib/types/models.ts#L192",
+    "Entropy": 4.056565,
+    "Author": "Brad Wilcox",
+    "Email": "bradfordhamiltonwilcox@gmail.com",
+    "Date": "2026-04-12T14:34:56Z",
+    "Message": "Initial commit: iPrefer Hygraph sandbox\n\nNext.js 15 App Router frontend for iprefer.com, backed by Hygraph CMS.\nIncludes all page routes, components, GraphQL queries, types, and tests.\nScaffolded with project config (package.json, tsconfig, next.config, jest).\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "9605461bc92815cecf0fe6d5db277ce49c629217:src/lib/types/models.ts:generic-api-key:192"
+  }
+]

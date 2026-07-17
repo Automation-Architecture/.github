@@ -1,0 +1,25 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 284,
+    "EndLine": 284,
+    "StartColumn": 28,
+    "EndColumn": 58,
+    "Match": "key tags, REDACTED ",
+    "Secret": "REDACTED",
+    "File": "spec/jira-backlog-plan.md",
+    "SymlinkFile": "",
+    "Commit": "8c524755b1201a4c59205f5e0800e35e29282e83",
+    "Link": "https://github.com/Automation-Architecture/nzs-assessment-new/blob/8c524755b1201a4c59205f5e0800e35e29282e83/spec/jira-backlog-plan.md?plain=1#L284",
+    "Entropy": 3.6841838,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-07-04T05:34:57Z",
+    "Message": "Initial NZS assessment app",
+    "Tags": [
+
+    ],
+    "Fingerprint": "8c524755b1201a4c59205f5e0800e35e29282e83:spec/jira-backlog-plan.md:generic-api-key:284"
+  }
+]

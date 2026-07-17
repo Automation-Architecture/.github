@@ -1,0 +1,117 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 66,
+    "EndLine": 66,
+    "StartColumn": 8,
+    "EndColumn": 70,
+    "Match": "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".github/workflows/pr-gate.yml",
+    "SymlinkFile": "",
+    "Commit": "6aebf1eed2570d63cbfa27ea7111a5fe8e652196",
+    "Link": "https://github.com/Automation-Architecture/funston-advisory-services/blob/6aebf1eed2570d63cbfa27ea7111a5fe8e652196/.github/workflows/pr-gate.yml#L66",
+    "Entropy": 4.110577,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-07-17T04:17:46Z",
+    "Message": "INGOV-93 package portal for Azure App Service",
+    "Tags": [
+
+    ],
+    "Fingerprint": "6aebf1eed2570d63cbfa27ea7111a5fe8e652196:.github/workflows/pr-gate.yml:generic-api-key:66"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 66,
+    "EndLine": 66,
+    "StartColumn": 8,
+    "EndColumn": 70,
+    "Match": "NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".github/workflows/pr-gate.yml",
+    "SymlinkFile": "",
+    "Commit": "bd08db0ff2807bc258559964c417c3fd29973304",
+    "Link": "https://github.com/Automation-Architecture/funston-advisory-services/blob/bd08db0ff2807bc258559964c417c3fd29973304/.github/workflows/pr-gate.yml#L66",
+    "Entropy": 4.110577,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-07-17T05:18:02Z",
+    "Message": "INGOV-93 package portal for Azure App Service (#248)",
+    "Tags": [
+
+    ],
+    "Fingerprint": "bd08db0ff2807bc258559964c417c3fd29973304:.github/workflows/pr-gate.yml:generic-api-key:66"
+  },
+  {
+    "RuleID": "stripe-access-token",
+    "Description": "Found a Stripe Access Token, posing a risk to payment processing services and sensitive financial data.",
+    "StartLine": 36,
+    "EndLine": 36,
+    "StartColumn": 38,
+    "EndColumn": 57,
+    "Match": "REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "apps/portal/src/lib/onboarding/upsert-client.test.ts",
+    "SymlinkFile": "",
+    "Commit": "b836fed2de86bd8a93bb55b0728a935cc2e69855",
+    "Link": "https://github.com/Automation-Architecture/funston-advisory-services/blob/b836fed2de86bd8a93bb55b0728a935cc2e69855/apps/portal/src/lib/onboarding/upsert-client.test.ts#L36",
+    "Entropy": 3.5766177,
+    "Author": "Son Pham",
+    "Email": "115443243+seanpham99@users.noreply.github.com",
+    "Date": "2026-06-04T09:24:12Z",
+    "Message": "Enforce admin subdomain and improve routing for admin portal (#125)\n\n* chore: add .worktrees/ to .gitignore\n\n* feat(auth): enforce admin.boardsmart.xyz subdomain for admin portal\n\nAdmin routes are now only reachable at admin.boardsmart.xyz:\n- Fund subdomains hitting /admin/* get a hard 404\n- Apex domain hitting /admin/* gets a 302 redirect to admin.boardsmart.xyz\n- admin.boardsmart.xyz blocks non-admin/non-auth/non-static routes\n- /sign-in works at admin.boardsmart.xyz so Sara can authenticate\n\nAdds reserved-slug protection so no fund can be onboarded with a\nsubdomain/client_id that collides with infrastructure subdomains\n(admin, www, api, scorecard, health, static). Enforced at application\nlayer in executeUpsertClient and at DB layer via CHECK constraints.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b836fed2de86bd8a93bb55b0728a935cc2e69855:apps/portal/src/lib/onboarding/upsert-client.test.ts:stripe-access-token:36"
+  },
+  {
+    "RuleID": "jwt",
+    "Description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
+    "StartLine": 5,
+    "EndLine": 5,
+    "StartColumn": 64,
+    "EndColumn": 272,
+    "Match": "REDACTED'",
+    "Secret": "REDACTED",
+    "File": "scripts/test-subdomain.mjs",
+    "SymlinkFile": "",
+    "Commit": "ec8cfce5cc818daa66f343e5f52d15b2e10fe005",
+    "Link": "https://github.com/Automation-Architecture/funston-advisory-services/blob/ec8cfce5cc818daa66f343e5f52d15b2e10fe005/scripts/test-subdomain.mjs#L5",
+    "Entropy": 5.5282235,
+    "Author": "web3sea",
+    "Email": "bao.ntg@minhanh-corp.com",
+    "Date": "2026-05-14T03:33:50Z",
+    "Message": "chore(config): :wrench: update default client ID variable for local development and add fast-check dependency",
+    "Tags": [
+
+    ],
+    "Fingerprint": "ec8cfce5cc818daa66f343e5f52d15b2e10fe005:scripts/test-subdomain.mjs:jwt:5"
+  },
+  {
+    "RuleID": "stripe-access-token",
+    "Description": "Found a Stripe Access Token, posing a risk to payment processing services and sensitive financial data.",
+    "StartLine": 12,
+    "EndLine": 12,
+    "StartColumn": 26,
+    "EndColumn": 44,
+    "Match": "REDACTED",
+    "Secret": "REDACTED",
+    "File": ".github/workflows/pr-gate.yml",
+    "SymlinkFile": "",
+    "Commit": "b6b49b23a5cb3ce0c82a3c8bb58178f552b478b8",
+    "Link": "https://github.com/Automation-Architecture/funston-advisory-services/blob/b6b49b23a5cb3ce0c82a3c8bb58178f552b478b8/.github/workflows/pr-gate.yml#L12",
+    "Entropy": 3.5766177,
+    "Author": "web3sea",
+    "Email": "yanji.notification@gmail.com",
+    "Date": "2026-05-13T13:42:58Z",
+    "Message": "feat(ui): :sparkles: multi-tenant stack + dashboard home page",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b6b49b23a5cb3ce0c82a3c8bb58178f552b478b8:.github/workflows/pr-gate.yml:stripe-access-token:12"
+  }
+]
