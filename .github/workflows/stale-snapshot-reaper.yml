@@ -1,0 +1,111 @@
+name: Stale Snapshot PR Reaper
+
+# Backstop for the automated-PR pileup. Some scheduled generators regenerate a
+# data/status snapshot every run and open a NEW dated PR each time (husser's
+# daily board sweep; the sprint-progress.json Jira sync). For each such
+# "snapshot family" this keeps only the NEWEST open PR and closes + deletes the
+# branches of the older, superseded ones.
+#
+# ⚠ SCOPE IS DELIBERATELY NARROW — an explicit allowlist of anchored title
+# patterns AND bot authors. It will NEVER touch a human PR, a feature/fix PR, or
+# a per-period deliverable. In particular the weekly `draft(weekly): funston`
+# PRs are EXCLUDED on purpose: each week is DISTINCT content, not a regenerated
+# snapshot, so an older week is not "superseded" by a newer one.
+#
+# Adding a family: only add a pattern after confirming it is a REGENERATED
+# same-content snapshot where older runs are genuinely obsolete. When unsure,
+# leave it out — a missed family is cheap; a wrongly-closed deliverable is not.
+#
+# This is a BACKSTOP, not the fix. The real fix is generators updating ONE
+# rolling PR (fixed branch) or writing data directly instead of PR-ing a fresh
+# snapshot each run — see docs/snapshot-generators.md.
+#
+# Prereq: AAA_ORG_TOKEN needs pull-requests:write + contents:write on org repos.
+# If it lacks them every close fails and the job fails loudly (by design — a
+# reaper that silently does nothing is the failure mode we're avoiding).
+
+on:
+  schedule:
+    - cron: '30 14 * * *'   # 14:30 UTC daily — ~90 min after the 8am ET (≈12:00 UTC) generators run
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Preview only: list what WOULD be closed, close nothing.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read   # actual writes use AAA_ORG_TOKEN, not GITHUB_TOKEN
+
+concurrency:
+  group: snapshot-reaper
+  cancel-in-progress: false
+
+jobs:
+  reap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+      DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+    steps:
+      - name: Reap superseded snapshot PRs
+        run: |
+          set -uo pipefail
+
+          # --- ALLOWLIST (anchored). Title must match one of these AND author a bot. ---
+          TITLE_PAT='^chore(\(husser\))?: daily board sweep|^chore: sync sprint-progress\.json'
+          BOT_PAT='^(web3sea|aaa-dashboard-bot|github-actions)'
+
+          repos=$(gh repo list Automation-Architecture --no-archived --limit 500 \
+                    --json nameWithOwner --jq '.[].nameWithOwner')
+
+          : > actions.md
+          echo "DRY_RUN=$DRY_RUN"
+
+          for repo in $repos; do
+            # Group matching PRs into families (title with digits/punct stripped);
+            # within each family keep the newest, mark the rest to close.
+            plan=$(gh pr list --repo "$repo" --state open --limit 200 \
+                     --json number,title,author,createdAt,headRefName \
+                   | jq -c --arg pat "$TITLE_PAT" --arg bots "$BOT_PAT" '
+                       def famkey: (.title|ascii_downcase|gsub("[0-9]";"")|gsub("[-_/(),.]";" ")|gsub("\\s+";" ")|gsub("^ | $";""));
+                       [ .[] | select((.title|test($pat;"i")) and (.author.login|test($bots))) ]
+                       | group_by(famkey)
+                       | map(sort_by(.createdAt) | {keep: .[-1].number, close: [.[:-1][] | {number, headRefName}]})
+                       | map(select(.close|length > 0))
+                     ' 2>/dev/null || echo '[]')
+            [ -z "$plan" ] && continue
+            [ "$plan" = "[]" ] && continue
+
+            echo "$plan" | jq -c '.[]' | while read -r fam; do
+              keep=$(printf '%s' "$fam" | jq -r '.keep')
+              printf '%s' "$fam" | jq -c '.close[]' | while read -r item; do
+                num=$(printf '%s' "$item" | jq -r '.number')
+                br=$(printf '%s' "$item" | jq -r '.headRefName')
+                if [ "$DRY_RUN" = "true" ]; then
+                  echo "- [dry-run] $repo #$num (branch \`$br\`) — superseded by #$keep" >> actions.md
+                  continue
+                fi
+                if gh pr close "$num" --repo "$repo" \
+                     --comment "Closing as **superseded** by #$keep — this is a regenerated snapshot, so only the newest is current. Auto-managed by the Stale Snapshot PR Reaper (\`.github/workflows/stale-snapshot-reaper.yml\`). Reopen if you need this specific run." >/dev/null 2>&1; then
+                  gh api -X DELETE "repos/$repo/git/refs/heads/$br" >/dev/null 2>&1 || true
+                  echo "- closed $repo #$num (superseded by #$keep)" >> actions.md
+                else
+                  echo "- FAILED $repo #$num" >> actions.md
+                fi
+              done
+            done
+          done
+
+          # The pipe-fed while loops run in subshells, so tally from the file.
+          closed=$(grep -c '^- closed'   actions.md 2>/dev/null || echo 0)
+          failed=$(grep -c '^- FAILED'   actions.md 2>/dev/null || echo 0)
+          dry=$(grep -c '^- \[dry-run\]' actions.md 2>/dev/null || echo 0)
+          echo "=== Reaper summary: closed=$closed  failed=$failed  dry_run_would_close=$dry ==="
+          cat actions.md 2>/dev/null || echo "(no actions)"
+
+          if [ "${failed:-0}" -gt 0 ]; then
+            echo "::error::Reaper failed to close $failed PR(s) — verify AAA_ORG_TOKEN has pull-requests:write + contents:write on org repos."
+            exit 1
+          fi
