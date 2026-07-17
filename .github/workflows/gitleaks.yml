@@ -25,7 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: ${{ inputs.scan_history && 0 || 1 }}
+          # NOTE the quotes: in GitHub Actions expressions the number 0 is
+          # FALSY, so an unquoted `x && 0 || 1` collapses to 1 in both branches
+          # and history is never fetched. Quoting makes '0' a truthy string.
+          fetch-depth: ${{ inputs.scan_history && '0' || '1' }}
 
       - name: Install gitleaks
         env:
