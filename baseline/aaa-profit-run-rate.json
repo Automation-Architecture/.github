@@ -1,0 +1,94 @@
+[
+  {
+    "RuleID": "jwt",
+    "Description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
+    "StartLine": 131,
+    "EndLine": 131,
+    "StartColumn": 35,
+    "EndColumn": 243,
+    "Match": "REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "login.html",
+    "SymlinkFile": "",
+    "Commit": "bf3b9a3e17f913a6e2197a086a7cebb5937d2ada",
+    "Link": "https://github.com/Automation-Architecture/aaa-profit-run-rate/blob/bf3b9a3e17f913a6e2197a086a7cebb5937d2ada/login.html#L131",
+    "Entropy": 5.513285,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-11T08:58:11Z",
+    "Message": "refactor: replace basic-auth with Supabase founder-allowlist gate (#6)\n\n* refactor: replace basic-auth with Supabase founder-allowlist gate\n\nSwap the sitewide HTTP basic-auth gate for the same Supabase login flow as\nthe AIOS acquisition tracker (magic-link + Google), scoped founder-only via\nan ALLOWED_EMAILS allowlist. Edge middleware validates the session\nserver-side and checks the email before serving — the financial HTML is\nnever returned to an unauthenticated/unauthorized browser (same edge-gate\nproperty as the old basic-auth). Adds login.html + auth/callback.html.\nDependency-free middleware; reuses the shared internal Supabase project\n(auth only). ACME /.well-known exemption preserved. DASH_AUTH retired.\n\nMiddleware verified against real minted sessions (allowlisted, non-allowlisted,\nno-cookie, public paths, chunked-cookie reassembly).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n* fix: harden auth middleware + callback per review\n\n- middleware: guard decodeURIComponent against malformed cookies (an uncaught\n  throw would 500 the edge gate and break login); exempt /favicon.ico from the\n  redirect-to-login path\n- callback: on an explicit provider error, bail without also wiring up the\n  session listeners (avoids racing redirects)\n\nRe-verified against real minted sessions incl. malformed-cookie cases.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "bf3b9a3e17f913a6e2197a086a7cebb5937d2ada:login.html:jwt:131"
+  },
+  {
+    "RuleID": "jwt",
+    "Description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
+    "StartLine": 42,
+    "EndLine": 42,
+    "StartColumn": 35,
+    "EndColumn": 243,
+    "Match": "REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "auth/callback.html",
+    "SymlinkFile": "",
+    "Commit": "6f9ff784bccbecf142b2869adfb6dbca42901418",
+    "Link": "https://github.com/Automation-Architecture/aaa-profit-run-rate/blob/6f9ff784bccbecf142b2869adfb6dbca42901418/auth/callback.html#L42",
+    "Entropy": 5.461113,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-12T03:03:25Z",
+    "Message": "refactor: decouple auth onto dedicated Supabase project (magic-link only) (#7)\n\n* refactor: decouple auth onto dedicated Supabase project, magic-link only\n\nMove auth off the shared aios-acquisition-tracker Supabase project onto a\ndedicated project (aaa-run-rate-auth, jbixotucnqhodoqmfsfw) so the founder\nfinance dashboard no longer rides another app's auth lifecycle.\n\nDrop Google sign-in: the only existing Google OAuth client lives in the\naaa-aios (flagship) GCP project, and reusing it would re-introduce the\ncross-project coupling this change removes. Magic-link is the same security\nwith no GCP/AIOS dependency. Edge allowlist gating is unchanged.\n\n* chore: drop stray supabase/.temp from repo; gitignore it",
+    "Tags": [
+
+    ],
+    "Fingerprint": "6f9ff784bccbecf142b2869adfb6dbca42901418:auth/callback.html:jwt:42"
+  },
+  {
+    "RuleID": "jwt",
+    "Description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
+    "StartLine": 129,
+    "EndLine": 129,
+    "StartColumn": 35,
+    "EndColumn": 243,
+    "Match": "REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "login.html",
+    "SymlinkFile": "",
+    "Commit": "6f9ff784bccbecf142b2869adfb6dbca42901418",
+    "Link": "https://github.com/Automation-Architecture/aaa-profit-run-rate/blob/6f9ff784bccbecf142b2869adfb6dbca42901418/login.html#L129",
+    "Entropy": 5.461113,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-12T03:03:25Z",
+    "Message": "refactor: decouple auth onto dedicated Supabase project (magic-link only) (#7)\n\n* refactor: decouple auth onto dedicated Supabase project, magic-link only\n\nMove auth off the shared aios-acquisition-tracker Supabase project onto a\ndedicated project (aaa-run-rate-auth, jbixotucnqhodoqmfsfw) so the founder\nfinance dashboard no longer rides another app's auth lifecycle.\n\nDrop Google sign-in: the only existing Google OAuth client lives in the\naaa-aios (flagship) GCP project, and reusing it would re-introduce the\ncross-project coupling this change removes. Magic-link is the same security\nwith no GCP/AIOS dependency. Edge allowlist gating is unchanged.\n\n* chore: drop stray supabase/.temp from repo; gitignore it",
+    "Tags": [
+
+    ],
+    "Fingerprint": "6f9ff784bccbecf142b2869adfb6dbca42901418:login.html:jwt:129"
+  },
+  {
+    "RuleID": "jwt",
+    "Description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
+    "StartLine": 42,
+    "EndLine": 42,
+    "StartColumn": 35,
+    "EndColumn": 243,
+    "Match": "REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "auth/callback.html",
+    "SymlinkFile": "",
+    "Commit": "bf3b9a3e17f913a6e2197a086a7cebb5937d2ada",
+    "Link": "https://github.com/Automation-Architecture/aaa-profit-run-rate/blob/bf3b9a3e17f913a6e2197a086a7cebb5937d2ada/auth/callback.html#L42",
+    "Entropy": 5.513285,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-11T08:58:11Z",
+    "Message": "refactor: replace basic-auth with Supabase founder-allowlist gate (#6)\n\n* refactor: replace basic-auth with Supabase founder-allowlist gate\n\nSwap the sitewide HTTP basic-auth gate for the same Supabase login flow as\nthe AIOS acquisition tracker (magic-link + Google), scoped founder-only via\nan ALLOWED_EMAILS allowlist. Edge middleware validates the session\nserver-side and checks the email before serving — the financial HTML is\nnever returned to an unauthenticated/unauthorized browser (same edge-gate\nproperty as the old basic-auth). Adds login.html + auth/callback.html.\nDependency-free middleware; reuses the shared internal Supabase project\n(auth only). ACME /.well-known exemption preserved. DASH_AUTH retired.\n\nMiddleware verified against real minted sessions (allowlisted, non-allowlisted,\nno-cookie, public paths, chunked-cookie reassembly).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n* fix: harden auth middleware + callback per review\n\n- middleware: guard decodeURIComponent against malformed cookies (an uncaught\n  throw would 500 the edge gate and break login); exempt /favicon.ico from the\n  redirect-to-login path\n- callback: on an explicit provider error, bail without also wiring up the\n  session listeners (avoids racing redirects)\n\nRe-verified against real minted sessions incl. malformed-cookie cases.\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "bf3b9a3e17f913a6e2197a086a7cebb5937d2ada:auth/callback.html:jwt:42"
+  }
+]

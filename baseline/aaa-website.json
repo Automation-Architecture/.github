@@ -1,0 +1,25 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 49,
+    "EndLine": 49,
+    "StartColumn": 90,
+    "EndColumn": 118,
+    "Match": "key: `REDACTED`",
+    "Secret": "REDACTED",
+    "File": "CLAUDE.md",
+    "SymlinkFile": "",
+    "Commit": "9d9f7cd908aa194166c0f9cb54d6e6c39115b3f4",
+    "Link": "https://github.com/Automation-Architecture/aaa-website/blob/9d9f7cd908aa194166c0f9cb54d6e6c39115b3f4/CLAUDE.md?plain=1#L49",
+    "Entropy": 4.095795,
+    "Author": "Brad Wilcox",
+    "Email": "billing@coraltriangle.io",
+    "Date": "2026-03-22T23:36:47Z",
+    "Message": "feat(homepage): align hero, sections, and illustrations with Figma design\n\nReplace hand-coded SVG illustrations with actual Figma exports for\nagent-network, cube-single, cube-triple, pyramid-blocks, and both\nlogo variants. Add Figma-exported tool icons for Operator Trap section.\n\nRestructure hero to headline-only on lime with 75% width, move body\ntext to block2 on cream background with 25/75 column split. Convert\n\"What We Actually Build\" and \"Two Paths\" from lime banners to plain\nheadings. Restyle guarantees as divider rows. Add diagonal-cut edge\ndecorations to header. Update CLAUDE.md with new Figma file key.\n\nCo-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "9d9f7cd908aa194166c0f9cb54d6e6c39115b3f4:CLAUDE.md:generic-api-key:49"
+  }
+]

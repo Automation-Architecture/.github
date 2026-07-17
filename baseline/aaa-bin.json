@@ -1,0 +1,25 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 38,
+    "EndLine": 38,
+    "StartColumn": 32,
+    "EndColumn": 83,
+    "Match": "NAMECHEAP_OP_KEY_ITEM\", \"REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "bin/namecheap-dns",
+    "SymlinkFile": "",
+    "Commit": "f572e7950e0d7ca18680074c83803eddd1038ae5",
+    "Link": "https://github.com/Automation-Architecture/aaa-bin/blob/f572e7950e0d7ca18680074c83803eddd1038ae5/bin/namecheap-dns#L38",
+    "Entropy": 3.6902604,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-07T15:52:23Z",
+    "Message": "feat: add namecheap-dns guard-railed DNS CLI (#33)\n\nNamecheap's setHosts replaces the ENTIRE record set and silently drops\ncustom MX records without EmailType=MX — one bare call can take down\nbusiness email and every subdomain. This tool makes the safe pattern\nthe only pattern: every mutation backs up to JSON, re-submits the full\nset, and diff-verifies the result, dying loudly with a restore command\non any drift.\n\nSelf-tested live against automationarchitecture.ai (add + delete of a\nTXT probe record; all 21 production records preserved through both\nwrites).",
+    "Tags": [
+
+    ],
+    "Fingerprint": "f572e7950e0d7ca18680074c83803eddd1038ae5:bin/namecheap-dns:generic-api-key:38"
+  }
+]

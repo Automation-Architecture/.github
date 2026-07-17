@@ -1,0 +1,48 @@
+[
+  {
+    "RuleID": "jwt",
+    "Description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
+    "StartLine": 42,
+    "EndLine": 42,
+    "StartColumn": 35,
+    "EndColumn": 243,
+    "Match": "REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "public/auth/callback.html",
+    "SymlinkFile": "",
+    "Commit": "52f4310af40fefb976949f2286e9a20aad789885",
+    "Link": "https://github.com/Automation-Architecture/aa-project-pipeline/blob/52f4310af40fefb976949f2286e9a20aad789885/public/auth/callback.html#L42",
+    "Entropy": 5.5362034,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-12T13:40:05Z",
+    "Message": "feat: add Supabase magic-link edge gate (founder-only) (#9)\n\nThis internal dashboard was publicly accessible. Add the run-rate edge-gating\npattern: middleware validates a Supabase session + ALLOWED_EMAILS allowlist\nbefore serving public/index.html. Auth backend is the shared aaa-internal-auth\nproject (magic-link). login + callback added under public/.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "52f4310af40fefb976949f2286e9a20aad789885:public/auth/callback.html:jwt:42"
+  },
+  {
+    "RuleID": "jwt",
+    "Description": "Uncovered a JSON Web Token, which may lead to unauthorized access to web applications and sensitive user data.",
+    "StartLine": 129,
+    "EndLine": 129,
+    "StartColumn": 35,
+    "EndColumn": 243,
+    "Match": "REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "public/login.html",
+    "SymlinkFile": "",
+    "Commit": "52f4310af40fefb976949f2286e9a20aad789885",
+    "Link": "https://github.com/Automation-Architecture/aa-project-pipeline/blob/52f4310af40fefb976949f2286e9a20aad789885/public/login.html#L129",
+    "Entropy": 5.5362034,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-12T13:40:05Z",
+    "Message": "feat: add Supabase magic-link edge gate (founder-only) (#9)\n\nThis internal dashboard was publicly accessible. Add the run-rate edge-gating\npattern: middleware validates a Supabase session + ALLOWED_EMAILS allowlist\nbefore serving public/index.html. Auth backend is the shared aaa-internal-auth\nproject (magic-link). login + callback added under public/.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "52f4310af40fefb976949f2286e9a20aad789885:public/login.html:jwt:129"
+  }
+]

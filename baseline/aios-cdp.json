@@ -1,0 +1,117 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 12,
+    "EndLine": 12,
+    "StartColumn": 8,
+    "EndColumn": 69,
+    "Match": "ENCRYPTION_SECRET = 'REDACTED'",
+    "Secret": "REDACTED",
+    "File": "apps/cdp-worker/src/__tests__/googleTokens.test.ts",
+    "SymlinkFile": "",
+    "Commit": "4057c8e50702a56dd7838b4708b426c7cb3e738a",
+    "Link": "https://github.com/Automation-Architecture/aios-cdp/blob/4057c8e50702a56dd7838b4708b426c7cb3e738a/apps/cdp-worker/src/__tests__/googleTokens.test.ts#L12",
+    "Entropy": 3.6495817,
+    "Author": "huytuong010101",
+    "Email": "huytuong010101@gmail.com",
+    "Date": "2026-07-16T06:39:22Z",
+    "Message": "fix(google,cdp-worker): mark a connection as errored on a dead refresh token\n\nGoogle's invalid_grant (revoked, or expired under a Testing-mode OAuth\nconsent screen's 7-day cap) previously just bubbled up as a generic\nError -- nothing marked the connection as broken, so the recurring\nconnector poll (added in the previous PR) would re-enqueue and re-fail\nthe exact same connection's ingest job every 15 minutes, forever, with\nno signal anywhere telling the user to reconnect.\n\npackages/google: refreshAccessToken now throws a distinguishable\nGoogleInvalidGrantError specifically for error: \"invalid_grant\",\ninstead of an indistinguishable generic Error.\n\napps/cdp-worker: extracts the near-identical getTokens() duplicated\nacross google-calendar.ts/gmail.ts/google-drive.ts/google-contacts.ts\ninto one shared getGoogleTokens() (adapters/googleTokens.ts). On\nGoogleInvalidGrantError, it now sets connection.status = 'error'\n(already a valid value in the schema's CHECK constraint) before\nrethrowing -- the poll job's own `WHERE status = 'active'` query then\nnaturally stops touching it, and GET /connections already surfaces\n`status` to the frontend.\n\nHubSpot/Slack/Jira use their own separate getTokens() with different\nOAuth error shapes -- not covered here, same class of gap, tracked as\na follow-up.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "4057c8e50702a56dd7838b4708b426c7cb3e738a:apps/cdp-worker/src/__tests__/googleTokens.test.ts:generic-api-key:12"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 16,
+    "EndLine": 16,
+    "StartColumn": 8,
+    "EndColumn": 62,
+    "Match": "JWT_SECRET = 'REDACTED'",
+    "Secret": "REDACTED",
+    "File": "apps/cdp-api/src/__tests__/materialize.test.ts",
+    "SymlinkFile": "",
+    "Commit": "38f695a9cb99f71661b829f5a285448f5f5b563a",
+    "Link": "https://github.com/Automation-Architecture/aios-cdp/blob/38f695a9cb99f71661b829f5a285448f5f5b563a/apps/cdp-api/src/__tests__/materialize.test.ts#L16",
+    "Entropy": 3.6757164,
+    "Author": "tuongnh",
+    "Email": "huytuong010101@gmail.com",
+    "Date": "2026-07-03T16:10:01Z",
+    "Message": "test(cdp-api,cdp-worker): QA — materialization registry + scheduler wiring\n\nRegistry records kind=view w/ cadence and kind=table w/o cadence; GET /materialize\nscoped per product+tenant; findDueViews returns only due views (never tables);\nNULL next_refresh_at treated as due; cross-tenant list isolation + 401.\n\nJira: CDP-85\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "38f695a9cb99f71661b829f5a285448f5f5b563a:apps/cdp-api/src/__tests__/materialize.test.ts:generic-api-key:16"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 17,
+    "EndLine": 17,
+    "StartColumn": 8,
+    "EndColumn": 62,
+    "Match": "ENC_SECRET = 'REDACTED'",
+    "Secret": "REDACTED",
+    "File": "apps/cdp-api/src/__tests__/materialize.test.ts",
+    "SymlinkFile": "",
+    "Commit": "38f695a9cb99f71661b829f5a285448f5f5b563a",
+    "Link": "https://github.com/Automation-Architecture/aios-cdp/blob/38f695a9cb99f71661b829f5a285448f5f5b563a/apps/cdp-api/src/__tests__/materialize.test.ts#L17",
+    "Entropy": 3.5995817,
+    "Author": "tuongnh",
+    "Email": "huytuong010101@gmail.com",
+    "Date": "2026-07-03T16:10:01Z",
+    "Message": "test(cdp-api,cdp-worker): QA — materialization registry + scheduler wiring\n\nRegistry records kind=view w/ cadence and kind=table w/o cadence; GET /materialize\nscoped per product+tenant; findDueViews returns only due views (never tables);\nNULL next_refresh_at treated as due; cross-tenant list isolation + 401.\n\nJira: CDP-85\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "38f695a9cb99f71661b829f5a285448f5f5b563a:apps/cdp-api/src/__tests__/materialize.test.ts:generic-api-key:17"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 11,
+    "EndLine": 11,
+    "StartColumn": 8,
+    "EndColumn": 57,
+    "Match": "JWT_SECRET = 'REDACTED'",
+    "Secret": "REDACTED",
+    "File": "apps/cdp-api/src/__tests__/tier.test.ts",
+    "SymlinkFile": "",
+    "Commit": "808d3a8e1a6ee2659beabedbe9049f375fd4c0b4",
+    "Link": "https://github.com/Automation-Architecture/aios-cdp/blob/808d3a8e1a6ee2659beabedbe9049f375fd4c0b4/apps/cdp-api/src/__tests__/tier.test.ts#L11",
+    "Entropy": 3.542832,
+    "Author": "huytuong010101",
+    "Email": "huytuong010101@gmail.com",
+    "Date": "2026-06-25T16:43:24Z",
+    "Message": "test(cdp-api): QA — escalation-tier routing verified (CDP-101)\n\nA14 HTTP-boundary: escalation-tier token without TENANT_DB_URL → 503;\ndefault-tier token → 200; tier resolved server-side (client cannot override).\n\nJira: CDP-101\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "808d3a8e1a6ee2659beabedbe9049f375fd4c0b4:apps/cdp-api/src/__tests__/tier.test.ts:generic-api-key:11"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 9,
+    "EndLine": 9,
+    "StartColumn": 8,
+    "EndColumn": 57,
+    "Match": "JWT_SECRET = 'REDACTED'",
+    "Secret": "REDACTED",
+    "File": "apps/cdp-api/src/__tests__/rls.test.ts",
+    "SymlinkFile": "",
+    "Commit": "b8e27e2aaafe00a519466946f8ea0e7fa64f77fb",
+    "Link": "https://github.com/Automation-Architecture/aios-cdp/blob/b8e27e2aaafe00a519466946f8ea0e7fa64f77fb/apps/cdp-api/src/__tests__/rls.test.ts#L9",
+    "Entropy": 3.531679,
+    "Author": "huytuong010101",
+    "Email": "huytuong010101@gmail.com",
+    "Date": "2026-06-25T16:42:35Z",
+    "Message": "test(cdp-api): QA — RLS-at-API tenant isolation verified (CDP-97)\n\nA14 HTTP-boundary: tenant-A token → only tenant-A clients; tenant-B token →\nempty list (cross-tenant isolation); no auth → 401. Concurrent-request\nisolation verified via parallel inject calls.\n\nJira: CDP-97\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b8e27e2aaafe00a519466946f8ea0e7fa64f77fb:apps/cdp-api/src/__tests__/rls.test.ts:generic-api-key:9"
+  }
+]

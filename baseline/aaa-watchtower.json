@@ -1,0 +1,71 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 66,
+    "EndLine": 66,
+    "StartColumn": 12,
+    "EndColumn": 44,
+    "Match": "API_KEY = 'REDACTED'",
+    "Secret": "REDACTED",
+    "File": "tests/state/workspace-registry-daytona.test.js",
+    "SymlinkFile": "",
+    "Commit": "b83f495c84581ace0663415c4f6bdd863ebb89fb",
+    "Link": "https://github.com/Automation-Architecture/aaa-watchtower/blob/b83f495c84581ace0663415c4f6bdd863ebb89fb/tests/state/workspace-registry-daytona.test.js#L66",
+    "Entropy": 4.106603,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-16T04:39:15Z",
+    "Message": "feat(fixer): Daytona sandbox client + credentials (WAT-66) (#35)\n\n* feat(fixer): Daytona sandbox client + credentials (WAT-66)\n\nInjectable @daytona/sdk wrapper (provision/start/statusRead/destroy) for the\nautonomous-fixer sandbox, plus per-workspace Daytona API-key storage and a\ndraft sandbox image.\n\n- src/integrations/daytona-client.js — factory-injectable client; maps the\n  grilled run-bound/teardown decisions onto the SDK (autoStop/autoDelete\n  intervals, snapshot image, env injection). statusRead classifies the real\n  SandboxState enum terminal-vs-running for the poller backstop (decision 05);\n  destroy is idempotent on DaytonaNotFoundError. SDK contract verified against\n  the installed @daytona/sdk@0.187.0, not just docs.\n- workspace-registry: migration v6 + updateDaytonaCredentials/getDaytonaCredentials\n  (API key AES-256-GCM encrypted at rest, mirrors WAT-65).\n- add-daytona-credentials.js — one-time registration script.\n- fixer-sandbox/ — DRAFT image (Dockerfile + README); blocked on the WAT-67\n  wrapper entrypoint + operator Daytona account/registry.\n\nTests: 27 new (21 client + 6 registry round-trip); full suite 1746 green.\nImage build + real Daytona path deferred to staging (WAT-71).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n* fix(fixer): address code-review findings on daytona-client (WAT-66)\n\n- destroy(): drop the /not found/i message-regex arm — it masked a live\n  sandbox behind any unrelated error containing \"not found\" (orphan/billing\n  leak). Match only DaytonaNotFoundError by name + 404 statusCode.\n- provision(): return ok:true ONLY with a truthy sandboxId AND a non-terminal\n  state; add the `terminal` field so the result shape matches statusRead()\n  (a fresh provision into error/build_failed no longer reads as dispatching-ready).\n- provision(): throw on missing snapshot, consistent with start/statusRead/\n  destroy and the file header's \"missing required args throw\" contract.\n- all ops: normalise catch detail via errMessage() (non-Error throws no longer\n  log/return `undefined`), mirroring the add-*-credentials describeError helper.\n- isTerminalState: add a separate exhaustiveness test that imports the real\n  @daytona/sdk SandboxState enum and fails if the SDK adds a state we haven't\n  classified (guards the silent \"unknown → running\" default).\n- statusRead docstring: document the finished-but-not-stopped limitation — the\n  WAT-67 entrypoint must self-stop on every exit path for the poller backstop.\n- remove dead `_internal` export (no test referenced it).\n- Dockerfile: unpin gh (apt repo serves only latest — `gh=<old>` is a build\n  time-bomb); comment the COPY skills/ line so the DRAFT image is consistently\n  not-yet-buildable alongside the WAT-67 entrypoint.\n\nFull suite: 1750 green (Node 22).\n\nCo-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Opus 4.8 (1M context) <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "b83f495c84581ace0663415c4f6bdd863ebb89fb:tests/state/workspace-registry-daytona.test.js:generic-api-key:66"
+  },
+  {
+    "RuleID": "private-key",
+    "Description": "Identified a Private Key, which may compromise cryptographic security and sensitive data encryption.",
+    "StartLine": 72,
+    "EndLine": 118,
+    "StartColumn": 27,
+    "EndColumn": 52,
+    "Match": "REDACTED",
+    "Secret": "REDACTED",
+    "File": "tests/state/workspace-registry-app.test.js",
+    "SymlinkFile": "",
+    "Commit": "4195f60f36938ccaaafa7e83b5674985ea5a0e89",
+    "Link": "https://github.com/Automation-Architecture/aaa-watchtower/blob/4195f60f36938ccaaafa7e83b5674985ea5a0e89/tests/state/workspace-registry-app.test.js#L72-L118",
+    "Entropy": 5.1200476,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-06-14T15:44:10Z",
+    "Message": "feat(github-app): per-run repo-scoped installation token minter (WAT-65) (#30)\n\nAdds a GitHub App installation token minter so the autonomous fixer\nsandbox can obtain short-lived (~1h), single-repo credentials without\na per-user PAT.\n\nNew files:\n  - src/integrations/github-app-client.js  — 3-step mint flow:\n    (1) sign RS256 App JWT via Node crypto (no third-party JWT lib),\n    (2) GET /repos/{owner}/{repo}/installation → installation id,\n    (3) POST /app/installations/{id}/access_tokens with bare repo name.\n    Returns discriminated union: { ok:true, token, expiresAt } or\n    { ok:false, reason:'app_not_installed' }. Non-404 errors propagate.\n    All HTTP via retryableFetch (CJS mock-compatible).\n  - add-github-app-credentials.js           — registration script.\n  - tests/integrations/github-app-client.test.js  — 6 tests incl.\n    real RSA-2048 keypair in all mint-flow scenarios, JWT structure +\n    sig verification, and no-secrets-in-logs assertion.\n  - tests/state/workspace-registry-app.test.js    — 6 round-trip +\n    guard tests for the new registry methods.\n\nSchema:\n  - workspace-registry.js MIGRATIONS v5 adds 4 columns:\n    github_app_id (plain text), github_app_key_{iv,auth_tag,encrypted}\n    (AES-256-GCM). Includes bootstrapCheck for all 4 columns.\n  - New exports: updateGithubAppCredentials, getGithubAppCredentials.\n\nCLAUDE.md updated: Key Files table + credentials script list.\n\nOperator prerequisites (outside this PR — real App must exist first):\n  create GitHub App in org → generate private key (store in 1Password)\n  → install App on target repos → run add-github-app-credentials.js.\n\nCo-authored-by: Claude Sonnet 4.6 <noreply@anthropic.com>",
+    "Tags": [
+
+    ],
+    "Fingerprint": "4195f60f36938ccaaafa7e83b5674985ea5a0e89:tests/state/workspace-registry-app.test.js:private-key:72"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 14,
+    "EndLine": 14,
+    "StartColumn": 2,
+    "EndColumn": 92,
+    "Match": "process.env.MASTER_KEY = 'REDACTED'",
+    "Secret": "REDACTED",
+    "File": "tests/setup.js",
+    "SymlinkFile": "",
+    "Commit": "31de9093b6d9d2a8874d1ea83eb5ca4a70b10f0d",
+    "Link": "https://github.com/Automation-Architecture/aaa-watchtower/blob/31de9093b6d9d2a8874d1ea83eb5ca4a70b10f0d/tests/setup.js#L14",
+    "Entropy": 4,
+    "Author": "Claude",
+    "Email": "noreply@anthropic.com",
+    "Date": "2026-04-26T14:20:40Z",
+    "Message": "Initial implementation of multi-agent error monitoring system",
+    "Tags": [
+
+    ],
+    "Fingerprint": "31de9093b6d9d2a8874d1ea83eb5ca4a70b10f0d:tests/setup.js:generic-api-key:14"
+  }
+]

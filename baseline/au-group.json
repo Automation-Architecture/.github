@@ -1,0 +1,94 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 26,
+    "EndLine": 26,
+    "StartColumn": 12,
+    "EndColumn": 66,
+    "Match": "JWT_SECRET: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".github/workflows/ci-parser.yml",
+    "SymlinkFile": "",
+    "Commit": "3dd92ef15d4843eb83e3df2c1d13bd5a3cc2ed06",
+    "Link": "https://github.com/Automation-Architecture/au-group/blob/3dd92ef15d4843eb83e3df2c1d13bd5a3cc2ed06/.github/workflows/ci-parser.yml#L26",
+    "Entropy": 3.6024883,
+    "Author": "mac-baontg",
+    "Email": "bao.ntg@minhanh-corp.com",
+    "Date": "2026-05-22T03:10:21Z",
+    "Message": "feat(ci): implement ci/cd (#4)",
+    "Tags": [
+
+    ],
+    "Fingerprint": "3dd92ef15d4843eb83e3df2c1d13bd5a3cc2ed06:.github/workflows/ci-parser.yml:generic-api-key:26"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 41,
+    "EndLine": 41,
+    "StartColumn": 12,
+    "EndColumn": 66,
+    "Match": "JWT_SECRET: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".github/workflows/document-parser.yml",
+    "SymlinkFile": "",
+    "Commit": "caf5a461b1c42726fe24f24efcb714a6899efed7",
+    "Link": "https://github.com/Automation-Architecture/au-group/blob/caf5a461b1c42726fe24f24efcb714a6899efed7/.github/workflows/document-parser.yml#L41",
+    "Entropy": 3.6024883,
+    "Author": "mac-baontg",
+    "Email": "bao.ntg@minhanh-corp.com",
+    "Date": "2026-05-18T14:53:58Z",
+    "Message": "feat(authentication): Implement JWT authentication and enhance API key verification",
+    "Tags": [
+
+    ],
+    "Fingerprint": "caf5a461b1c42726fe24f24efcb714a6899efed7:.github/workflows/document-parser.yml:generic-api-key:41"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 26,
+    "EndLine": 26,
+    "StartColumn": 12,
+    "EndColumn": 66,
+    "Match": "JWT_SECRET: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".github/workflows/ci-parser.yml",
+    "SymlinkFile": "",
+    "Commit": "cc8194efed71a8b323a4f62ad694a890833f89ed",
+    "Link": "https://github.com/Automation-Architecture/au-group/blob/cc8194efed71a8b323a4f62ad694a890833f89ed/.github/workflows/ci-parser.yml#L26",
+    "Entropy": 3.6024883,
+    "Author": "mac-baontg",
+    "Email": "bao.ntg@minhanh-corp.com",
+    "Date": "2026-05-22T02:57:40Z",
+    "Message": "feat(ci): implement ci/cd",
+    "Tags": [
+
+    ],
+    "Fingerprint": "cc8194efed71a8b323a4f62ad694a890833f89ed:.github/workflows/ci-parser.yml:generic-api-key:26"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 33,
+    "EndLine": 33,
+    "StartColumn": 25,
+    "EndColumn": 82,
+    "Match": "JWT_SECRET\", \"REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "services/document-parser/tests/conftest.py",
+    "SymlinkFile": "",
+    "Commit": "caf5a461b1c42726fe24f24efcb714a6899efed7",
+    "Link": "https://github.com/Automation-Architecture/au-group/blob/caf5a461b1c42726fe24f24efcb714a6899efed7/services/document-parser/tests/conftest.py#L33",
+    "Entropy": 3.6024883,
+    "Author": "mac-baontg",
+    "Email": "bao.ntg@minhanh-corp.com",
+    "Date": "2026-05-18T14:53:58Z",
+    "Message": "feat(authentication): Implement JWT authentication and enhance API key verification",
+    "Tags": [
+
+    ],
+    "Fingerprint": "caf5a461b1c42726fe24f24efcb714a6899efed7:services/document-parser/tests/conftest.py:generic-api-key:33"
+  }
+]

@@ -1,0 +1,71 @@
+[
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 23,
+    "EndLine": 23,
+    "StartColumn": 45,
+    "EndColumn": 98,
+    "Match": "token=REDACTED\"",
+    "Secret": "REDACTED",
+    "File": ".claude/mcp.json",
+    "SymlinkFile": "",
+    "Commit": "39d76b7006309d525d4ff819b257fcf248f037d2",
+    "Link": "https://github.com/Automation-Architecture/ic-linkedin-dashboard/blob/39d76b7006309d525d4ff819b257fcf248f037d2/.claude/mcp.json#L23",
+    "Entropy": 5.0118275,
+    "Author": "web3sea",
+    "Email": "yanji.notification@gmail.com",
+    "Date": "2026-04-09T12:59:05Z",
+    "Message": "feat(config): [ic-linkedin-189] migrate UAT to PROD",
+    "Tags": [
+
+    ],
+    "Fingerprint": "39d76b7006309d525d4ff819b257fcf248f037d2:.claude/mcp.json:generic-api-key:23"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 306,
+    "EndLine": 306,
+    "StartColumn": 2,
+    "EndColumn": 26,
+    "Match": "X-API-Key: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".agents/skills/api-design/SKILL.md",
+    "SymlinkFile": "",
+    "Commit": "39d76b7006309d525d4ff819b257fcf248f037d2",
+    "Link": "https://github.com/Automation-Architecture/ic-linkedin-dashboard/blob/39d76b7006309d525d4ff819b257fcf248f037d2/.agents/skills/api-design/SKILL.md?plain=1#L306",
+    "Entropy": 3.6644979,
+    "Author": "web3sea",
+    "Email": "yanji.notification@gmail.com",
+    "Date": "2026-04-09T12:59:05Z",
+    "Message": "feat(config): [ic-linkedin-189] migrate UAT to PROD",
+    "Tags": [
+
+    ],
+    "Fingerprint": "39d76b7006309d525d4ff819b257fcf248f037d2:.agents/skills/api-design/SKILL.md:generic-api-key:306"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 306,
+    "EndLine": 306,
+    "StartColumn": 2,
+    "EndColumn": 26,
+    "Match": "X-API-Key: REDACTED",
+    "Secret": "REDACTED",
+    "File": ".claude/skills/api-design/SKILL.md",
+    "SymlinkFile": "",
+    "Commit": "39d76b7006309d525d4ff819b257fcf248f037d2",
+    "Link": "https://github.com/Automation-Architecture/ic-linkedin-dashboard/blob/39d76b7006309d525d4ff819b257fcf248f037d2/.claude/skills/api-design/SKILL.md?plain=1#L306",
+    "Entropy": 3.6644979,
+    "Author": "web3sea",
+    "Email": "yanji.notification@gmail.com",
+    "Date": "2026-04-09T12:59:05Z",
+    "Message": "feat(config): [ic-linkedin-189] migrate UAT to PROD",
+    "Tags": [
+
+    ],
+    "Fingerprint": "39d76b7006309d525d4ff819b257fcf248f037d2:.claude/skills/api-design/SKILL.md:generic-api-key:306"
+  }
+]

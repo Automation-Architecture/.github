@@ -1,0 +1,94 @@
+[
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 93,
+    "EndLine": 94,
+    "StartColumn": 2,
+    "EndColumn": 46,
+    "Match": "curl \"https://public-api.granola.ai/v1/notes?created_after=2026-01-27T00:00:00Z&page_size=30\" \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/granola/api-reference.md",
+    "SymlinkFile": "",
+    "Commit": "452be7b5436d1fb1eb3cacefffe629ca33005d83",
+    "Link": "https://github.com/Automation-Architecture/meeting-transcript-router/blob/452be7b5436d1fb1eb3cacefffe629ca33005d83/resources/granola/api-reference.md?plain=1#L93-L94",
+    "Entropy": 3.5778196,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-30T15:31:30Z",
+    "Message": "chore: bootstrap repo with source API references (#1)\n\nInitial scaffold for the meeting-transcript-router automation.\n\n- README: sources (Fireflies > Granola > Zoom), routing logic,\n  destinations, and draft architecture (mixed push/pull + dedup)\n- resources/: captured per-source API docs (Fireflies, Granola,\n  Zoom) with source URLs + fetch date, via Context7/official docs\n- copilot-review.yml: org-standard Copilot reviewer workflow\n- .gitignore: Python/Node/env baseline\n\nNo application code yet.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "452be7b5436d1fb1eb3cacefffe629ca33005d83:resources/granola/api-reference.md:curl-auth-header:93"
+  },
+  {
+    "RuleID": "curl-auth-header",
+    "Description": "Discovered a potential authorization token provided in a curl command header, which could compromise the curl accessed resource.",
+    "StartLine": 171,
+    "EndLine": 172,
+    "StartColumn": 2,
+    "EndColumn": 46,
+    "Match": "curl \"https://public-api.granola.ai/v1/notes/not_1d3tmYTlCICgjy?include=transcript\" \\\n  -H \"Authorization: Bearer REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/granola/api-reference.md",
+    "SymlinkFile": "",
+    "Commit": "452be7b5436d1fb1eb3cacefffe629ca33005d83",
+    "Link": "https://github.com/Automation-Architecture/meeting-transcript-router/blob/452be7b5436d1fb1eb3cacefffe629ca33005d83/resources/granola/api-reference.md?plain=1#L171-L172",
+    "Entropy": 3.5778196,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-30T15:31:30Z",
+    "Message": "chore: bootstrap repo with source API references (#1)\n\nInitial scaffold for the meeting-transcript-router automation.\n\n- README: sources (Fireflies > Granola > Zoom), routing logic,\n  destinations, and draft architecture (mixed push/pull + dedup)\n- resources/: captured per-source API docs (Fireflies, Granola,\n  Zoom) with source URLs + fetch date, via Context7/official docs\n- copilot-review.yml: org-standard Copilot reviewer workflow\n- .gitignore: Python/Node/env baseline\n\nNo application code yet.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "452be7b5436d1fb1eb3cacefffe629ca33005d83:resources/granola/api-reference.md:curl-auth-header:171"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 291,
+    "EndLine": 291,
+    "StartColumn": 7,
+    "EndColumn": 43,
+    "Match": "plainToken\": \"REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/zoom/api-reference.md",
+    "SymlinkFile": "",
+    "Commit": "452be7b5436d1fb1eb3cacefffe629ca33005d83",
+    "Link": "https://github.com/Automation-Architecture/meeting-transcript-router/blob/452be7b5436d1fb1eb3cacefffe629ca33005d83/resources/zoom/api-reference.md?plain=1#L291",
+    "Entropy": 4.095795,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-30T15:31:30Z",
+    "Message": "chore: bootstrap repo with source API references (#1)\n\nInitial scaffold for the meeting-transcript-router automation.\n\n- README: sources (Fireflies > Granola > Zoom), routing logic,\n  destinations, and draft architecture (mixed push/pull + dedup)\n- resources/: captured per-source API docs (Fireflies, Granola,\n  Zoom) with source URLs + fetch date, via Context7/official docs\n- copilot-review.yml: org-standard Copilot reviewer workflow\n- .gitignore: Python/Node/env baseline\n\nNo application code yet.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "452be7b5436d1fb1eb3cacefffe629ca33005d83:resources/zoom/api-reference.md:generic-api-key:291"
+  },
+  {
+    "RuleID": "generic-api-key",
+    "Description": "Detected a Generic API Key, potentially exposing access to various services and sensitive operations.",
+    "StartLine": 301,
+    "EndLine": 301,
+    "StartColumn": 5,
+    "EndColumn": 41,
+    "Match": "plainToken\": \"REDACTED\"",
+    "Secret": "REDACTED",
+    "File": "resources/zoom/api-reference.md",
+    "SymlinkFile": "",
+    "Commit": "452be7b5436d1fb1eb3cacefffe629ca33005d83",
+    "Link": "https://github.com/Automation-Architecture/meeting-transcript-router/blob/452be7b5436d1fb1eb3cacefffe629ca33005d83/resources/zoom/api-reference.md?plain=1#L301",
+    "Entropy": 4.095795,
+    "Author": "Brad Wilcox",
+    "Email": "billing@automationarchitecture.ai",
+    "Date": "2026-05-30T15:31:30Z",
+    "Message": "chore: bootstrap repo with source API references (#1)\n\nInitial scaffold for the meeting-transcript-router automation.\n\n- README: sources (Fireflies > Granola > Zoom), routing logic,\n  destinations, and draft architecture (mixed push/pull + dedup)\n- resources/: captured per-source API docs (Fireflies, Granola,\n  Zoom) with source URLs + fetch date, via Context7/official docs\n- copilot-review.yml: org-standard Copilot reviewer workflow\n- .gitignore: Python/Node/env baseline\n\nNo application code yet.",
+    "Tags": [
+
+    ],
+    "Fingerprint": "452be7b5436d1fb1eb3cacefffe629ca33005d83:resources/zoom/api-reference.md:generic-api-key:301"
+  }
+]
