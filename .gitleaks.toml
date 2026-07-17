@@ -1,0 +1,21 @@
+# Shared gitleaks config for the Automation-Architecture org secret scanner.
+# Extends gitleaks' default ruleset. Keep the allowlist tight — the leaks we've
+# actually hit lived in committed docs (.md) and config (vercel.json), so we do
+# NOT broadly allowlist those. Only genuinely-safe placeholder files are excused.
+
+title = "Automation-Architecture gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Org-wide allowlist (placeholder/sample files only)"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\.sample$''',
+  '''(^|/)\.env\.template$''',
+]
+# 1Password reference URIs are pointers, not secrets — the org's good pattern.
+regexes = [
+  '''op://[A-Za-z0-9._~%\-/]+''',
+]

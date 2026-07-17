@@ -1,0 +1,45 @@
+name: gitleaks (reusable)
+
+# Reusable per-repo secret scan. Call it from any repo with a 3-line caller
+# (see workflow-templates/gitleaks.yml) to gate PRs and pushes on gitleaks.
+# Uses the gitleaks binary directly (no gitleaks-action org license needed).
+# Secret values are redacted from all output.
+
+on:
+  workflow_call:
+    inputs:
+      scan_history:
+        description: 'Scan full git history (true) or only the current tree (false).'
+        type: boolean
+        default: true
+      gitleaks_version:
+        type: string
+        default: '8.30.1'
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ inputs.scan_history && 0 || 1 }}
+
+      - name: Install gitleaks
+        env:
+          V: ${{ inputs.gitleaks_version }}
+        run: |
+          set -euo pipefail
+          curl -sSL "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz" -o gitleaks.tgz
+          tar -xzf gitleaks.tgz gitleaks
+          sudo mv gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan
+        run: |
+          set -euo pipefail
+          # A repo may drop its own .gitleaks.toml to add allowlists; otherwise
+          # gitleaks uses its default ruleset.
+          gitleaks detect --source . --redact --no-banner -v
