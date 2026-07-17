@@ -1,0 +1,6 @@
+{
+  "name": "Secret scan (gitleaks)",
+  "description": "Scan this repo for committed secrets on every PR and push to the default branch.",
+  "iconName": "shield-lock",
+  "categories": ["Security"]
+}

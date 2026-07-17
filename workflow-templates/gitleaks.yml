@@ -1,0 +1,16 @@
+name: Secret scan (gitleaks)
+
+# Starter workflow: gates PRs and pushes to the default branch on a gitleaks
+# secret scan. Add it from a repo's Actions > New workflow page.
+
+on:
+  pull_request:
+  push:
+    branches: [ $default-branch ]
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    uses: Automation-Architecture/.github/.github/workflows/gitleaks.yml@main
