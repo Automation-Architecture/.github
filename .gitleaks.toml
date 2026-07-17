@@ -8,6 +8,40 @@ title = "Automation-Architecture gitleaks config"
 [extend]
 useDefault = true
 
+# ─── Custom rules ────────────────────────────────────────────────────────────
+# The default ruleset MISSES both of the real leaks this scanner was built for
+# (verified 2026-07-17 against the actual files):
+#   - ic-stripe/CLIENT-DEPLOYMENT.md   → a live `whsec_` Stripe webhook secret.
+#     The built-in stripe rule only matches sk_live_/rk_live_ API keys.
+#   - fidelity-dashboard/vercel.json   → a plaintext `Authorization: Bearer …`
+#     cron token. No built-in rule covers generic bearer tokens.
+# Without these two rules the scan reports "no leaks found" on both. Do not
+# remove them without re-verifying against those files.
+
+[[rules]]
+id = "stripe-webhook-secret"
+description = "Stripe webhook signing secret (whsec_)"
+regex = '''whsec_[A-Za-z0-9]{32,}'''
+keywords = ["whsec_"]
+
+[[rules]]
+id = "http-bearer-token"
+description = "Hardcoded HTTP Bearer token"
+regex = '''(?i)\bbearer\s+([A-Za-z0-9_\-\.=]{24,})'''
+secretGroup = 1
+entropy = 3.5
+keywords = ["bearer"]
+
+  # Placeholders/interpolations are not secrets: Bearer ${TOKEN}, <token>, YOUR_KEY…
+  # regexTarget = "line" is REQUIRED: allowlist regexes match the captured secret
+  # by default, so a `bearer\s+…` pattern could never match. Verified 2026-07-17.
+  [rules.allowlist]
+  regexTarget = "line"
+  regexes = [
+    '''(?i)bearer\s+[\$\{<%]''',
+    '''(?i)bearer\s+(your|my|the|some|example|placeholder|token|secret|changeme|dummy|xxx|\.\.\.)''',
+  ]
+
 [allowlist]
 description = "Org-wide allowlist (placeholder/sample files only)"
 paths = [
