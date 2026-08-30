@@ -1,23 +1,86 @@
 name: Auto-Merge when Checks Green
 
-# Merges a PR automatically when the branch is ready:
-#   - All check-runs on HEAD SHA completed with no failures
+# Squash-merges a PR once ALL check-runs on the HEAD SHA have completed with
+# none failed.
 #
-# CodeRabbit is the sole required reviewer; the merge step respects the org
-# ruleset, so it can never merge before the required CodeRabbit check is green.
-# (The Copilot inline-comment gate was removed 2026-06-11 with the Copilot reviewer.)
+# ⚠️ THIS IS NOT A REVIEW GATE. It gates on check-runs only.
+#
+# The header used to claim "CodeRabbit is the sole required reviewer ... it can
+# never merge before the required CodeRabbit check is green." That was false in
+# two ways and was removed 2026-08-30:
+#   - CodeRabbit was retired org-wide on 2026-06-11. Its last review anywhere in
+#     the org was that day. Nothing has replaced it as a *required* check.
+#   - A review is not a check-run, so this workflow cannot see one and cannot
+#     wait for one. A MISSING reviewer is not a failure, so the condition the
+#     old comment called impossible is reachable: it can merge a PR nobody has
+#     reviewed.
+#
+# Reviewers, for the avoidance of doubt — both ADVISORY here, since neither
+# produces a check-run, so neither blocks nor delays this workflow:
+#   - **Codex** (`chatgpt-codex-connector[bot]`) is the reviewer to prefer and
+#     to ask for by name (`@codex review`).
+#   - `claude[bot]` is also installed org-wide, but as of 2026-08-30 every
+#     recent "review" it posts is the notice "Code review skipped — your
+#     organization's overage spend limit has been reached". It is posted as a
+#     review, so it inflates review counts without reviewing anything. An
+#     admin raises the limit at claude.ai/admin-settings/claude-code.
+#   Two things about Codex are load-bearing when reasoning about what got
+#   reviewed:
+#     - It reviews on PR **open** / ready-for-review / an `@codex review`
+#       comment — NOT on push. Commits pushed after the first review are
+#       unreviewed unless you ask again.
+#     - It is enabled **per repo** in the ChatGPT Codex settings, not by the
+#       GitHub App's org-wide install. Many org repos have it on; many do not.
+#   See aaa-runbooks `integrations/codex-pr-code-review.md`.
+#
+# If you want merges genuinely gated on review, that belongs in branch
+# protection ("require approvals" / a required check), not in this file. This
+# workflow deliberately does NOT use --admin, so it does respect whatever the
+# ruleset requires — but on a repo whose ruleset requires no reviews, that
+# constrains nothing.
 #
 # Triggers:
-#   check_suite:completed — fires when a suite of checks finishes (CI, CodeRabbit, etc.)
-#   pull_request_review:submitted — fires when CodeRabbit posts its review;
-#     often the last event before all conditions are met
+#   check_suite:completed         — a suite of checks finished
+#   pull_request_review:submitted — a review was submitted
+#
+# ⚠️ KNOWN LIMITATION — on many repos this workflow effectively never merges.
+#   GitHub's documented rule: a `check_suite` event "does not trigger workflows
+#   if the check suite was created by GitHub Actions". Our CI IS GitHub
+#   Actions, so the `check_suite:completed` trigger is dead for every suite CI
+#   produces — only a non-Actions GitHub App's suite (which CodeRabbit used to
+#   be) could ever have fired it, which is another way of saying it stopped
+#   working on 2026-06-11. So the only live trigger is
+#   `pull_request_review:submitted` — which fires when a bot posts a review,
+#   typically while CI is still pending. It logs "still pending — not merging
+#   yet", and nothing wakes it again once CI goes green. Measured on
+#   Automation-Architecture/opportunity-builder 2026-08-30: every run in the
+#   retained history (83 at time of writing, 2026-08-13 onward) was
+#   `pull_request_review`, a
+#   `?event=check_suite` filter returns 0, and the workflow has never merged a
+#   PR there (every merged PR has a human `merged_by`).
+#
+#   20 org repos already run a `workflow_run:` variant of this file that fixes
+#   exactly this (23 carry some non-canonical copy). That variant is NOT
+#   canonical, so those repos have drifted
+#   ahead of this file. Reconciling the two (and deciding whether auto-merge
+#   SHOULD start working on the other ~46) is a deliberate behaviour change and
+#   is tracked separately — do not "fix" it by editing a per-repo copy.
 #
 # Merge strategy:
 #   1. gh pr merge --squash --delete-branch (normal merge, respects ruleset)
 #   2. gh pr merge --auto  --squash --delete-branch (queue native auto-merge if still BLOCKED)
 #   Deliberately NOT --admin. Admin bypass lives in aaa-merge / operator-explicit flows only.
 #
-# Rollout: copy this file to .github/workflows/ in every active repo.
+# Rollout: canonical copy lives in Automation-Architecture/.github. Edit it
+# here. Per-repo copies are synced ONLY through rollout PRs that
+# rollout-monitor drains; it never writes to a repo's own main, so a repo that
+# edited its copy keeps its edit (23 already have). ⚠️ As of 2026-08-30 this
+# correction reaches nobody: the only open rollout PRs sit on the bundled
+# branch, whose PATTERNS entry still lists findings-fixer.yml (deleted from
+# canonical in PR #20), and the loader skips the whole branch when a listed
+# file is missing. The single-file `feat/auto-merge-workflow` pattern still
+# works but has no open PRs. So the 46 repos carrying the old header keep it
+# until someone opens rollout PRs on the live branch or fixes PATTERNS.
 
 on:
   check_suite:
@@ -106,8 +169,8 @@ jobs:
           # ── All checks green — attempt merge ──────────────────────────────
           echo "All checks green. Merging PR #$PR_NUMBER..."
 
-          # Try normal merge first; fall back to --auto if ruleset is still
-          # BLOCKED (e.g. the CodeRabbit check hasn't flipped green yet).
+          # Try normal merge first; fall back to --auto if the ruleset still
+          # reports BLOCKED (e.g. a required check has not flipped green yet).
           if gh pr merge "$PR_NUMBER" --squash --delete-branch --repo "$REPO" 2>&1; then
             echo "Merged via squash."
             exit 0
