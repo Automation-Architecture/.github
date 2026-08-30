@@ -53,13 +53,15 @@ name: Auto-Merge when Checks Green
 #   `pull_request_review:submitted` — which fires when a bot posts a review,
 #   typically while CI is still pending. It logs "still pending — not merging
 #   yet", and nothing wakes it again once CI goes green. Measured on
-#   Automation-Architecture/opportunity-builder 2026-08-30: all 74 runs in the
-#   retained history (2026-08-13 onward) were `pull_request_review`, a
+#   Automation-Architecture/opportunity-builder 2026-08-30: every run in the
+#   retained history (83 at time of writing, 2026-08-13 onward) was
+#   `pull_request_review`, a
 #   `?event=check_suite` filter returns 0, and the workflow has never merged a
 #   PR there (every merged PR has a human `merged_by`).
 #
-#   ~23 org repos already run a `workflow_run:` variant of this file that fixes
-#   exactly this. That variant is NOT canonical, so those repos have drifted
+#   20 org repos already run a `workflow_run:` variant of this file that fixes
+#   exactly this (23 carry some non-canonical copy). That variant is NOT
+#   canonical, so those repos have drifted
 #   ahead of this file. Reconciling the two (and deciding whether auto-merge
 #   SHOULD start working on the other ~46) is a deliberate behaviour change and
 #   is tracked separately — do not "fix" it by editing a per-repo copy.
@@ -72,12 +74,13 @@ name: Auto-Merge when Checks Green
 # Rollout: canonical copy lives in Automation-Architecture/.github. Edit it
 # here. Per-repo copies are synced ONLY through rollout PRs that
 # rollout-monitor drains; it never writes to a repo's own main, so a repo that
-# edited its copy keeps its edit (22 already have). ⚠️ As of 2026-08-30 that
-# rollout path is a no-op for this file: rollout-monitor's PATTERNS still maps
-# the primary rollout branch to findings-fixer.yml, which was deleted from
-# canonical in PR #20, and its loader skips the whole branch when a listed
-# file is missing. So this correction does not reach the ~46 repos carrying
-# the old header until that is fixed.
+# edited its copy keeps its edit (23 already have). ⚠️ As of 2026-08-30 this
+# correction reaches nobody: the only open rollout PRs sit on the bundled
+# branch, whose PATTERNS entry still lists findings-fixer.yml (deleted from
+# canonical in PR #20), and the loader skips the whole branch when a listed
+# file is missing. The single-file `feat/auto-merge-workflow` pattern still
+# works but has no open PRs. So the 46 repos carrying the old header keep it
+# until someone opens rollout PRs on the live branch or fixes PATTERNS.
 
 on:
   check_suite:
