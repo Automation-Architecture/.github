@@ -15,11 +15,17 @@ name: Auto-Merge when Checks Green
 #     old comment called impossible is reachable: it can merge a PR nobody has
 #     reviewed.
 #
-# Reviewer, for the avoidance of doubt:
-#   **Codex is the org's PR reviewer** (`chatgpt-codex-connector[bot]`), and is
-#   the one to prefer and to ask for by name. But it is ADVISORY here — it
-#   produces no check-run, so it neither blocks nor delays this workflow. Two
-#   things about it are load-bearing when reasoning about what got reviewed:
+# Reviewers, for the avoidance of doubt — both ADVISORY here, since neither
+# produces a check-run, so neither blocks nor delays this workflow:
+#   - **Codex** (`chatgpt-codex-connector[bot]`) is the reviewer to prefer and
+#     to ask for by name (`@codex review`).
+#   - `claude[bot]` is also installed org-wide, but as of 2026-08-30 every
+#     recent "review" it posts is the notice "Code review skipped — your
+#     organization's overage spend limit has been reached". It is posted as a
+#     review, so it inflates review counts without reviewing anything. An
+#     admin raises the limit at claude.ai/admin-settings/claude-code.
+#   Two things about Codex are load-bearing when reasoning about what got
+#   reviewed:
 #     - It reviews on PR **open** / ready-for-review / an `@codex review`
 #       comment — NOT on push. Commits pushed after the first review are
 #       unreviewed unless you ask again.
@@ -38,14 +44,19 @@ name: Auto-Merge when Checks Green
 #   pull_request_review:submitted — a review was submitted
 #
 # ⚠️ KNOWN LIMITATION — on many repos this workflow effectively never merges.
-#   GitHub does not deliver `check_suite:completed` to workflows for suites
-#   created by GITHUB_TOKEN, which is how most of our CI runs. So on those repos
-#   the only live trigger is `pull_request_review:submitted` — which fires when
-#   a bot posts a review, typically while CI is still pending. It logs
-#   "still pending — not merging yet", and nothing wakes it again once CI goes
-#   green. Measured on Automation-Architecture/opportunity-builder 2026-08-30:
-#   all 20 runs were `pull_request_review`, none were `check_suite`, and the
-#   workflow has never merged a PR there.
+#   GitHub's documented rule: a `check_suite` event "does not trigger workflows
+#   if the check suite was created by GitHub Actions". Our CI IS GitHub
+#   Actions, so the `check_suite:completed` trigger is dead for every suite CI
+#   produces — only a non-Actions GitHub App's suite (which CodeRabbit used to
+#   be) could ever have fired it, which is another way of saying it stopped
+#   working on 2026-06-11. So the only live trigger is
+#   `pull_request_review:submitted` — which fires when a bot posts a review,
+#   typically while CI is still pending. It logs "still pending — not merging
+#   yet", and nothing wakes it again once CI goes green. Measured on
+#   Automation-Architecture/opportunity-builder 2026-08-30: all 74 runs in the
+#   retained history (2026-08-13 onward) were `pull_request_review`, a
+#   `?event=check_suite` filter returns 0, and the workflow has never merged a
+#   PR there (every merged PR has a human `merged_by`).
 #
 #   ~23 org repos already run a `workflow_run:` variant of this file that fixes
 #   exactly this. That variant is NOT canonical, so those repos have drifted
@@ -59,7 +70,14 @@ name: Auto-Merge when Checks Green
 #   Deliberately NOT --admin. Admin bypass lives in aaa-merge / operator-explicit flows only.
 #
 # Rollout: canonical copy lives in Automation-Architecture/.github. Edit it
-# there only; per-repo edits are overwritten by rollout-monitor.
+# here. Per-repo copies are synced ONLY through rollout PRs that
+# rollout-monitor drains; it never writes to a repo's own main, so a repo that
+# edited its copy keeps its edit (22 already have). ⚠️ As of 2026-08-30 that
+# rollout path is a no-op for this file: rollout-monitor's PATTERNS still maps
+# the primary rollout branch to findings-fixer.yml, which was deleted from
+# canonical in PR #20, and its loader skips the whole branch when a listed
+# file is missing. So this correction does not reach the ~46 repos carrying
+# the old header until that is fixed.
 
 on:
   check_suite:
