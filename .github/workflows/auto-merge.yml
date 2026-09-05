@@ -3,7 +3,17 @@ name: Auto-Merge when Checks Green
 # Squash-merges a PR once ALL check-runs on the HEAD SHA have completed with
 # none failed.
 #
-# ⚠️ THIS IS NOT A REVIEW GATE. It gates on check-runs only.
+# ⚠️ THIS IS A WEAK REVIEW GATE. It gates on check-runs, plus one narrow
+# review condition added 2026-09-05: it refuses to merge while an inline
+# review comment still applies to the head SHA. It does NOT require an
+# approval, and it cannot tell a P1 from a nit — any finding parks the PR
+# for a human. If you want merges genuinely gated on approval, that still
+# belongs in branch protection, not here.
+#
+# Why the narrow gate exists: a review is not a check-run, so before this
+# the workflow could not see findings at all, and it merged two PRs over an
+# unaddressed Codex P1 — aaa-SOP#35 (ef42f3b) and invoice-tracker#13
+# (d742b80), both merged_by github-actions[bot].
 #
 # The header used to claim "CodeRabbit is the sole required reviewer ... it can
 # never merge before the required CodeRabbit check is green." That was false in
@@ -167,6 +177,30 @@ jobs:
           fi
 
           # ── All checks green — attempt merge ──────────────────────────────
+          # -- Gate: no unresolved review findings on THIS head SHA -----------
+          # A review is not a check-run, so the check gate above cannot see Codex
+          # findings. Two PRs merged over an unaddressed P1 this way:
+          # aaa-SOP#35 (ef42f3b) and invoice-tracker#13 (d742b80), both by
+          # github-actions[bot]. Mirrors doc-auto-merge.sh review_verdict().
+          #
+          # GitHub advances an inline comment's commit_id to the current head for as
+          # long as it still applies to the diff; once the flagged hunk changes the
+          # comment goes outdated and stops matching. So "commit_id == $SHA" means
+          # "findings that still apply to the code we are about to merge".
+          #
+          # Fails CLOSED -- an unreadable gate is not a passed gate. A blocked PR is
+          # not stuck: a human reads the finding and merges, or pushes a fix.
+          if ! FINDING_IDS=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/comments" --paginate \
+               --jq '.[] | select(.commit_id == "'"$SHA"'") | .id' 2>/dev/null); then
+            echo "::warning::Could not read review comments for #$PR_NUMBER -- not merging."
+            exit 0
+          fi
+          FINDINGS=$(printf '%s' "$FINDING_IDS" | grep -c . || true)
+          if [ "$FINDINGS" -gt 0 ]; then
+            echo "::notice::$FINDINGS unresolved review finding(s) on $SHA -- not merging; a human should read them."
+            exit 0
+          fi
+          
           echo "All checks green. Merging PR #$PR_NUMBER..."
 
           # Try normal merge first; fall back to --auto if the ruleset still
