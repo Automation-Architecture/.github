@@ -193,11 +193,19 @@ jobs:
           if ! FINDING_IDS=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/comments" --paginate \
                --jq '.[] | select(.commit_id == "'"$SHA"'") | .id' 2>/dev/null); then
             echo "::warning::Could not read review comments for #$PR_NUMBER -- not merging."
+            # Revoke any auto-merge armed by an earlier run's `--auto` fallback.
+            # Without this the PR still merges the moment the outstanding requirement
+            # clears -- exactly what this gate exists to prevent.
+            gh pr merge "$PR_NUMBER" --disable-auto --repo "$REPO" >/dev/null 2>&1 || true
             exit 0
           fi
           FINDINGS=$(printf '%s' "$FINDING_IDS" | grep -c . || true)
           if [ "$FINDINGS" -gt 0 ]; then
             echo "::notice::$FINDINGS unresolved review finding(s) on $SHA -- not merging; a human should read them."
+            # Revoke any auto-merge armed by an earlier run's `--auto` fallback.
+            # Without this the PR still merges the moment the outstanding requirement
+            # clears -- exactly what this gate exists to prevent.
+            gh pr merge "$PR_NUMBER" --disable-auto --repo "$REPO" >/dev/null 2>&1 || true
             exit 0
           fi
           
@@ -205,12 +213,12 @@ jobs:
 
           # Try normal merge first; fall back to --auto if the ruleset still
           # reports BLOCKED (e.g. a required check has not flipped green yet).
-          if gh pr merge "$PR_NUMBER" --squash --delete-branch --repo "$REPO" 2>&1; then
+          if gh pr merge "$PR_NUMBER" --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO" 2>&1; then
             echo "Merged via squash."
             exit 0
           fi
 
-          if gh pr merge "$PR_NUMBER" --auto --squash --delete-branch --repo "$REPO" 2>&1; then
+          if gh pr merge "$PR_NUMBER" --auto --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO" 2>&1; then
             echo "Queued for auto-merge."
             exit 0
           fi
