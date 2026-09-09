@@ -15,7 +15,8 @@ name: Rollout PR Monitor
 # Skips PRs whose CI has hard failures (those need human attention).
 #
 # A single rollout branch may carry MORE THAN ONE canonical file (e.g. the
-# bundled auto-merge + findings-fixer rollout). PATTERNS therefore maps a
+# bundled auto-merge + findings-fixer rollout; findings-fixer is now gone).
+# PATTERNS therefore maps a
 # branch name to a LIST of canonical file paths; the PATCH step syncs every
 # listed file before the PR is eligible to merge.
 #
@@ -27,9 +28,8 @@ name: Rollout PR Monitor
 #   Until set, each step will fail with 401 and the monitor is a no-op.
 #
 # Rollout branches and their canonical source file(s) (in this repo's main):
-#   feat/add-auto-merge-workflow  → auto-merge.yml + findings-fixer.yml (bundled)
+#   feat/add-auto-merge-workflow  → auto-merge.yml (was bundled with the now-deleted findings-fixer.yml)
 #   feat/auto-merge-workflow      → auto-merge.yml      (legacy single-file)
-#   feat/findings-fixer-workflow  → findings-fixer.yml  (legacy single-file)
 #   feat/dashboard-sync-workflow  → dashboard-sync.yml
 #   feat/sentry-release-workflow  → sentry-release.yml
 
@@ -64,11 +64,16 @@ jobs:
           # set below prevents double-processing if GitHub head: search matches
           # a PR under more than one pattern.
           AM = ".github/workflows/auto-merge.yml"
-          FF = ".github/workflows/findings-fixer.yml"
+          # findings-fixer.yml was DELETED from canonical in PR #20. Every
+          # PATTERNS entry that still listed it made the loader below skip the
+          # ENTIRE branch as a config error - including the bundled branch that
+          # carries the only open rollout PRs. Net effect: rollout was dead for
+          # every branch except the single-file one, which has no open PRs, so
+          # canonical changes reached nobody. Do not re-add a path here unless
+          # the file exists in this repo.
           PATTERNS = {
-              "feat/add-auto-merge-workflow": [AM, FF],
+              "feat/add-auto-merge-workflow": [AM],
               "feat/auto-merge-workflow":     [AM],
-              "feat/findings-fixer-workflow": [FF],
               "feat/dashboard-sync-workflow": [".github/workflows/dashboard-sync.yml"],
               "feat/sentry-release-workflow": [".github/workflows/sentry-release.yml"],
           }
