@@ -1,0 +1,89 @@
+name: Auto-Merge Sweep (org-wide)
+
+# ONE scheduled job for the whole org instead of one per repo.
+#
+# Why this exists: the per-repo auto-merge.yml is event-driven (CI finished, a
+# review landed). One thing has no event: a human RESOLVING a review thread,
+# which is exactly what releases a PR held by Gate 3. Something has to come
+# back and look. The previous canonical did that with `schedule: */10` inside
+# every repo's copy. GitHub bills each job rounded UP to a whole minute
+# (https://docs.github.com/en/billing/reference/actions-runner-pricing), so
+# ~62 active repos x 144 ticks/day was ~268,000 runner-minutes a month, billed
+# whether or not a single PR was open, against 3,000 included on Team.
+#
+# This job costs one minute per tick, then dispatches the per-repo workflow
+# ONLY for repos that currently have an open, non-draft PR. Those dispatched
+# runs cost a minute each, so the bill scales with open PRs, not with repos.
+# The interval below is the cost dial: */30 is a deliberate compromise. Fast
+# paths (CI green, review submitted) are still immediate via the per-repo
+# event triggers; only thread-resolution waits for the next tick.
+#
+# There is exactly ONE gate implementation, the per-repo auto-merge.yml. This
+# file evaluates nothing; it only asks each repo to re-evaluate itself. Do not
+# add gates here.
+#
+# Token: AAA_ORG_TOKEN (org Actions secret, classic PAT, repo + workflow
+# scope; 1Password vault aaa-APIs, item aaa-org-token). `gh workflow run`
+# needs the `workflow` scope. Without the secret every step 401s.
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch auto-merge on every repo with an open PR
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ORG: Automation-Architecture
+          WF: auto-merge.yml
+        run: |
+          set -u
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::AAA_ORG_TOKEN is not set — sweep cannot run."
+            exit 1
+          fi
+
+          # Fail CLOSED on the search: an empty answer because the API errored
+          # must not look like "nothing is open".
+          if ! REPOS=$(gh api -X GET search/issues --paginate -f per_page=100 \
+                 -f q="org:$ORG is:pr is:open draft:false archived:false" \
+                 --jq '.items[].repository_url' 2>/tmp/search.err); then
+            echo "::error::PR search failed: $(head -c 300 /tmp/search.err)"
+            exit 1
+          fi
+          REPOS=$(printf '%s\n' "$REPOS" | awk -F/ 'NF{print $NF}' | sort -u)
+          N=$(printf '%s\n' "$REPOS" | grep -c . || true)
+          echo "Repos with open non-draft PRs: $N"
+          # search/issues caps at 1000 results. Far above current org volume,
+          # but if it is ever hit, later repos are silently absent from a tick.
+          [ "$N" -ge 950 ] && echo "::warning::approaching the 1000-result search cap; some repos may be skipped."
+
+          dispatched=0; skipped=0; failed=0
+          for r in $REPOS; do
+            # Only dispatch where the per-repo workflow exists on the default
+            # branch and is not disabled. A 404 is a repo that never received
+            # the rollout; a disabled workflow is a deliberate per-repo opt-out.
+            state=$(gh api "repos/$ORG/$r/actions/workflows/$WF" --jq '.state' 2>/dev/null || echo "absent")
+            if [ "$state" != "active" ]; then
+              echo "  - $r: $WF is $state — skip."
+              skipped=$((skipped + 1)); continue
+            fi
+            if gh workflow run "$WF" -R "$ORG/$r" >/dev/null 2>&1; then
+              echo "  + $r: dispatched."
+              dispatched=$((dispatched + 1))
+            else
+              echo "::warning::$r: dispatch failed."
+              failed=$((failed + 1))
+            fi
+          done
+          echo "Summary: repos=$N dispatched=$dispatched skipped=$skipped failed=$failed"
