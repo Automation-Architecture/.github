@@ -14,16 +14,24 @@ name: Auto-Merge when Checks Green and Reviews In
 # successful check called `Greptile Review`. Gate 2 therefore also requires
 # `.app.slug == greptile-apps`.
 #
-# WHY THE CHECK AND NOT THE REVIEWS API. Greptile submits a review only when
-# it has something to say; a clean pass on a new commit posts no review at
-# all. Measured 2026-09-13: aaa-bin#59 head 5395c69 and aaa-pr-bot#26 head
-# ab23294 each had a passing Greptile check and NO review for that SHA, the
-# last review sitting on the previous commit. Requiring a review on the head
-# would therefore deadlock exactly as the Codex version did in #77 -> #78.
-# The check-run is always emitted, always on the head SHA, and already
-# encodes the verdict: Greptile fails it on any finding (this org requires
-# 5/5 confidence), so a passing check means "reviewed THIS code, found
-# nothing".
+# EITHER SIGNAL ON THE HEAD COUNTS, because neither is emitted reliably.
+# Measured 2026-09-13 across five PRs:
+#
+#   aaa-bin#59 5395c69      check success, NO review on that SHA
+#   aaa-pr-bot#26 ab23294   check success, NO review on that SHA
+#   aaa-aiosiq#284 291805f  check success, NO review on that SHA
+#   skills-shelf#68 3222540 check success AND an APPROVED review
+#   aaa-hooks#52 abfa05a    NO check at all, a COMMENTED review on that SHA
+#
+# A clean pass often posts no review, so a review-only gate hangs on it — the
+# deadlock the Codex version hit in #77 -> #78. But a check-only gate hangs
+# the other way: on aaa-hooks#52 the check-SUITE sat `queued` with zero
+# check-runs across three consecutive pushes while reviews kept arriving, so
+# the head never got a check and the PR could never have merged. The union
+# covers all five shapes; neither half alone does.
+#
+# Gate 3 still reads the findings themselves, so "the reviewer spoke" and
+# "the reviewer was happy" stay separate questions.
 #
 # WHAT THIS FIXES. The old gate accepted a review of ANY commit, which is how
 # aaa-runbooks#127 merged on 2026-09-13 while a fix round was still in
@@ -153,6 +161,8 @@ jobs:
           # slug of the GitHub App that must have produced it.
           REQUIRED_REVIEW_CHECK: "Greptile Review"
           REQUIRED_REVIEW_APP: "greptile-apps"
+          # The same reviewer as it appears in the REVIEWS API (a login, not a slug).
+          REQUIRED_REVIEW_BOT: "greptile-apps[bot]"
         run: |
           set -euo pipefail
 
@@ -255,8 +265,9 @@ jobs:
             # check from another producer and an unreadable answer all hold.
             # $CHECKS is the head SHA's check-runs fetched in Gate 1, so this
             # cannot drift onto another commit.
-            if [ -z "${REQUIRED_REVIEW_CHECK// /}" ] || [ -z "${REQUIRED_REVIEW_APP// /}" ]; then
-              echo "::error::REQUIRED_REVIEW_CHECK/REQUIRED_REVIEW_APP is empty - refusing to merge unreviewed."
+            if [ -z "${REQUIRED_REVIEW_CHECK// /}" ] || [ -z "${REQUIRED_REVIEW_APP// /}" ] \
+               || [ -z "${REQUIRED_REVIEW_BOT// /}" ]; then
+              echo "::error::REQUIRED_REVIEW_CHECK/APP/BOT is empty - refusing to merge unreviewed."
               continue
             fi
 
@@ -267,24 +278,38 @@ jobs:
               continue
             fi
 
+            # Signal 1: the reviewer's check on this head, from THAT app.
             REVIEW_OK=$(echo "$CHECKS" | jq --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
               '[.[] | select(.name == $n and .app.slug == $a
                              and .status == "completed" and .conclusion == "success")] | length')
+
+            # Signal 2: a review the app submitted on this exact SHA. DISMISSED
+            # and CHANGES_REQUESTED do not count; CHANGES_REQUESTED is already
+            # refused above. Fail closed if the reviews read fails.
             if [ "${REVIEW_OK:-0}" -lt 1 ]; then
-              # Name the wrong-producer case explicitly: that is a collision or an
-              # impersonation, not a reviewer that has yet to run.
+              REVIEW_ON_HEAD=$(echo "$REVIEWS" | jq --arg u "$REQUIRED_REVIEW_BOT" --arg s "$SHA" \
+                '[.[] | select(.user.login == $u and .commit_id == $s
+                               and (.state | IN("DISMISSED", "CHANGES_REQUESTED") | not))] | length' 2>/dev/null)
+              if [ -z "$REVIEW_ON_HEAD" ]; then
+                echo "::error::PR #$PR_NUMBER held - could not read reviews."
+                continue
+              fi
+              [ "$REVIEW_ON_HEAD" -ge 1 ] && REVIEW_OK=1
+            fi
+
+            if [ "${REVIEW_OK:-0}" -lt 1 ]; then
               SEEN_STATE=$(echo "$CHECKS" | jq -r --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
                 '[.[] | select(.name == $n)] as $named
                  | ($named | map(select(.app.slug == $a))) as $mine
                  | if   ($named | length) == 0 then "absent"
                    elif ($mine  | length) == 0 then "produced by " + ($named | map(.app.slug // "unknown") | unique | join(",")) + ", not " + $a
                    else ($mine | map("\(.status)/\(.conclusion // "-")") | join(",")) end')
-              printf '::notice::PR #%s held - check %s on %s is %s, not a success by %s.\n' \
-                "$PR_NUMBER" "$REQUIRED_REVIEW_CHECK" "${SHA:0:7}" "$SEEN_STATE" "$REQUIRED_REVIEW_APP"
+              printf '::notice::PR #%s held - no verdict on %s: check %s is %s, and %s has not reviewed this SHA.\n' \
+                "$PR_NUMBER" "${SHA:0:7}" "$REQUIRED_REVIEW_CHECK" "$SEEN_STATE" "$REQUIRED_REVIEW_BOT"
               continue
             fi
-            printf 'Gate 2 OK: check %s by %s passed on %s.\n' \
-              "$REQUIRED_REVIEW_CHECK" "$REQUIRED_REVIEW_APP" "${SHA:0:7}"
+            printf 'Gate 2 OK: %s cleared %s (check or review on this head).\n' \
+              "$REQUIRED_REVIEW_APP" "${SHA:0:7}"
 
             # ── Gate 3: unresolved review findings ──────────────────────────
             # Gate 2 only proves a review was submitted. This reads what it
