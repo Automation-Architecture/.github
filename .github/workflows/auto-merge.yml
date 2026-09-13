@@ -4,33 +4,39 @@ name: Auto-Merge when Checks Green and Reviews In
 # required reviewer has reviewed. A PR whose required review is missing is
 # HELD. It is never merged unreviewed.
 #
-# ── Why a hard hold, and why there is no grace period any more ─────────────
-# Two defects shaped this gate:
-#   - A RACE: on aaa-runbooks#74 the workflow merged 77 seconds before Codex
-#     submitted a review reporting a broken snippet. Holding until the review
-#     exists closes that completely; no timer is needed for it.
-#   - A DEADLOCK: requiring a review of the current HEAD SHA blocks forever
-#     because Codex reviews on PR open / `@codex review`, NOT on push. So a
-#     review of ANY commit satisfies Gate 2 (aaa-runbooks #77 -> #78), and
-#     Gate 3 covers what that review actually said.
+# ── Gate 2 is the reviewer's CHECK on the head SHA (2026-09-13) ────────────
+# Greptile (the org-wide `greptile-apps` GitHub App) replaced PR Autopilot as
+# the reviewer on 2026-09-13, and Gate 2 now requires its check-run, named
+# `Greptile Review`, to have concluded `success` ON THE CURRENT HEAD SHA.
 #
-# The previous version added a REVIEW_GRACE_SECONDS expiry that merged
-# UNREVIEWED after 600s "so a repo without Codex is not blocked forever".
-# Generalised to the org that is the wrong trade: measured 2026-09-10, 34 of
-# the 62 active repos carrying this workflow have never had a Codex review,
-# and on every one of them the expiry would have merged every green PR ten
-# minutes after opening with nobody having read it. Those repos have never
-# auto-merged anyway (the old check_suite trigger was dead), so holding loses
-# nothing there and stops unreviewed merges everywhere.
+# WHY THE CHECK AND NOT THE REVIEWS API. Greptile submits a review only when
+# it has something to say; a clean pass on a new commit posts no review at
+# all. Measured 2026-09-13: aaa-bin#59 head 5395c69 and aaa-pr-bot#26 head
+# ab23294 each had a passing Greptile check and NO review for that SHA, the
+# last review sitting on the previous commit. Requiring a review on the head
+# would therefore deadlock exactly as the Codex version did in #77 -> #78.
+# The check-run is always emitted, always on the head SHA, and already
+# encodes the verdict: Greptile fails it on any finding (this org requires
+# 5/5 confidence), so a passing check means "reviewed THIS code, found
+# nothing".
 #
-# THE RESULTING ORG POLICY IS DELIBERATE: enabling Codex on a repo (per-repo,
-# in ChatGPT settings) is the switch that turns auto-merge on for that repo.
-# Without it, every PR holds and a human merges via aaa-merge. If Codex is
-# rate-limited or posts a skip notice, the PR holds too. That is correct.
+# WHAT THIS FIXES. The old gate accepted a review of ANY commit, which is how
+# aaa-runbooks#127 merged on 2026-09-13 while a fix round was still in
+# flight: the review it counted was two commits old, and the follow-up commit
+# then landed on a closed PR and never reached main. Pinning to the head
+# closes that race without reintroducing the deadlock.
 #
-# BE CLEAR ABOUT WHAT THIS GUARANTEES: a review was SUBMITTED and left no
-# unresolved thread. It is NOT an approval gate; Codex posts COMMENTED, never
-# APPROVED. A genuine approval requirement belongs in branch protection.
+# THE RESULTING ORG POLICY IS DELIBERATE: a repo the reviewer does not cover
+# has no such check, so every PR holds and a human merges via aaa-merge. If
+# the reviewer is down or rate-limited, the PR holds too. That is correct —
+# holding is the safe direction, and nothing here may add a timer that
+# expires into an unreviewed merge (the pre-2026-09-10 version had one; see
+# the git history for why it was removed).
+#
+# BE CLEAR ABOUT WHAT THIS GUARANTEES: an automated reviewer examined this
+# exact commit and raised nothing, and no unresolved thread remains. It is
+# NOT human approval. A genuine approval requirement belongs in branch
+# protection.
 #
 # ── Why Gate 3 exists ──────────────────────────────────────────────────────
 # Gate 2 asks "did the reviewer show up", which is not the same question as
@@ -48,11 +54,9 @@ name: Auto-Merge when Checks Green and Reviews In
 # nobody addresses blocks until a human resolves the thread, which is the
 # intended outcome, and nothing in this file is allowed to paper over it.
 #
-# claude[bot] is deliberately NOT in REQUIRED_REVIEWERS: as of 2026-08-31 every
-# review it posts is "Code review skipped — your organization's overage spend
-# limit has been reached". Requiring a skip notice is worse than requiring
-# nothing. Re-add it once an admin raises the limit at
-# claude.ai/admin-settings/claude-code.
+# A bot that posts a "review" saying it skipped the review (claude[bot] did
+# exactly that through 2026-08-31, on an overage spend limit) can no longer
+# satisfy this gate: a check-run conclusion is not forgeable by a review body.
 #
 # ── Triggers ───────────────────────────────────────────────────────────────
 #   workflow_run          — CI finished. Usually BEFORE the review bots submit.
@@ -139,9 +143,9 @@ jobs:
           EVENT: ${{ github.event_name }}
           WR_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
           PRR_PR: ${{ github.event.pull_request.number }}
-          # Reviewers that must weigh in before a merge, comma-separated GitHub
-          # logins exactly as they appear in the reviews API.
-          REQUIRED_REVIEWERS: "chatgpt-codex-connector[bot]"
+          # The review check-run that must have concluded `success` on the head
+          # SHA, named exactly as it appears in the check-runs API.
+          REQUIRED_REVIEW_CHECK: "Greptile Review"
         run: |
           set -euo pipefail
 
@@ -218,9 +222,9 @@ jobs:
             [ "$FAILED" -gt 0 ]  && { echo "$FAILED check(s) failed — skip."; continue; }
             echo "Gate 1 OK: $TOTAL check-run(s) green."
 
-            # ── Gate 2: required reviews (hard hold) ─────────────────────────────────
-            # Reviews of ANY commit count. Requiring the current HEAD SHA
-            # deadlocks, because Codex does not review on push (see #78).
+            # ── Gate 2: the review check on THIS head (hard hold) ────────────
+            # The check-run, not the reviews API — see the header: a clean
+            # pass posts no review at all.
             REVIEWS=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate --jq '.[]' | jq -s '.')
 
             # Only each reviewer's LATEST decision counts. The reviews API keeps
@@ -239,33 +243,31 @@ jobs:
               continue
             fi
 
-            # Fail CLOSED on counting: demand positive confirmation of the full
-            # set, never merge because a "missing" string happened to be empty.
-            WANTED=0; MATCHED=0; MISSING=""
-            while IFS= read -r R; do
-              R="$(echo "$R" | xargs)"; [ -z "$R" ] && continue
-              WANTED=$((WANTED + 1))
-              SEEN=$(echo "$REVIEWS" | jq --arg r "$R" '[.[] | select(.user.login == $r)] | length')
-              if [ "$SEEN" -gt 0 ]; then MATCHED=$((MATCHED + 1)); else MISSING="$MISSING $R"; fi
-            done < <(echo "$REQUIRED_REVIEWERS" | tr ',' '\n')
-
-            if [ "$WANTED" -eq 0 ]; then
-              echo "::error::REQUIRED_REVIEWERS is empty — refusing to merge unreviewed."
+            # Fail CLOSED: refuse unless the named check is positively present
+            # and successful on $SHA. A missing name, a missing check and an
+            # unreadable answer all hold. $CHECKS is the head SHA's check-runs
+            # fetched in Gate 1, so this cannot drift onto another commit.
+            if [ -z "${REQUIRED_REVIEW_CHECK// /}" ]; then
+              echo "::error::REQUIRED_REVIEW_CHECK is empty — refusing to merge unreviewed."
               continue
             fi
 
-            # HOLD, never expire. See the header for why there is no grace
-            # period: on a repo without the required reviewer this holds every
-            # PR, which is the intended opt-in switch, not a defect.
+            # HOLD, never expire. On a repo the reviewer does not cover this
+            # holds every PR, which is the intended opt-in switch, not a defect.
             if [ "$PENDING_REVIEWERS" -gt 0 ]; then
               echo "::notice::PR #$PR_NUMBER held — $PENDING_REVIEWERS requested reviewer(s)/team(s) still pending."
               continue
             fi
-            if [ "$MATCHED" -ne "$WANTED" ]; then
-              echo "::notice::PR #$PR_NUMBER held — required review(s) not yet submitted:$MISSING"
+
+            REVIEW_OK=$(echo "$CHECKS" | jq --arg n "$REQUIRED_REVIEW_CHECK" \
+              '[.[] | select(.name == $n and .status == "completed" and .conclusion == "success")] | length')
+            if [ "${REVIEW_OK:-0}" -lt 1 ]; then
+              SEEN_STATE=$(echo "$CHECKS" | jq -r --arg n "$REQUIRED_REVIEW_CHECK" \
+                '[.[] | select(.name == $n) | "\(.status)/\(.conclusion // "-")"] | if length == 0 then "absent" else join(",") end')
+              echo "::notice::PR #$PR_NUMBER held — '"'"'$REQUIRED_REVIEW_CHECK'"'"' on ${SHA:0:7} is $SEEN_STATE, not success."
               continue
             fi
-            echo "Gate 2 OK: $MATCHED/$WANTED required reviewer(s) have reviewed."
+            echo "Gate 2 OK: '"'"'$REQUIRED_REVIEW_CHECK'"'"' passed on ${SHA:0:7}."
 
             # ── Gate 3: unresolved review findings ──────────────────────────
             # Gate 2 only proves a review was submitted. This reads what it
