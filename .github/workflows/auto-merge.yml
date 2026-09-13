@@ -9,6 +9,11 @@ name: Auto-Merge when Checks Green and Reviews In
 # the reviewer on 2026-09-13, and Gate 2 now requires its check-run, named
 # `Greptile Review`, to have concluded `success` ON THE CURRENT HEAD SHA.
 #
+# THE PRODUCING APP IS VERIFIED, NOT JUST THE NAME. A display name is not an
+# identity: any app or workflow with checks:write on the repo can emit a
+# successful check called `Greptile Review`. Gate 2 therefore also requires
+# `.app.slug == greptile-apps`.
+#
 # WHY THE CHECK AND NOT THE REVIEWS API. Greptile submits a review only when
 # it has something to say; a clean pass on a new commit posts no review at
 # all. Measured 2026-09-13: aaa-bin#59 head 5395c69 and aaa-pr-bot#26 head
@@ -144,8 +149,10 @@ jobs:
           WR_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
           PRR_PR: ${{ github.event.pull_request.number }}
           # The review check-run that must have concluded `success` on the head
-          # SHA, named exactly as it appears in the check-runs API.
+          # SHA: its name exactly as it appears in the check-runs API, and the
+          # slug of the GitHub App that must have produced it.
           REQUIRED_REVIEW_CHECK: "Greptile Review"
+          REQUIRED_REVIEW_APP: "greptile-apps"
         run: |
           set -euo pipefail
 
@@ -243,31 +250,41 @@ jobs:
               continue
             fi
 
-            # Fail CLOSED: refuse unless the named check is positively present
-            # and successful on $SHA. A missing name, a missing check and an
-            # unreadable answer all hold. $CHECKS is the head SHA's check-runs
-            # fetched in Gate 1, so this cannot drift onto another commit.
-            if [ -z "${REQUIRED_REVIEW_CHECK// /}" ]; then
-              echo "::error::REQUIRED_REVIEW_CHECK is empty — refusing to merge unreviewed."
+            # Fail CLOSED: refuse unless the named check, FROM THE NAMED APP, is
+            # present and successful on $SHA. A missing name, a missing check, a
+            # check from another producer and an unreadable answer all hold.
+            # $CHECKS is the head SHA's check-runs fetched in Gate 1, so this
+            # cannot drift onto another commit.
+            if [ -z "${REQUIRED_REVIEW_CHECK// /}" ] || [ -z "${REQUIRED_REVIEW_APP// /}" ]; then
+              echo "::error::REQUIRED_REVIEW_CHECK/REQUIRED_REVIEW_APP is empty - refusing to merge unreviewed."
               continue
             fi
 
             # HOLD, never expire. On a repo the reviewer does not cover this
             # holds every PR, which is the intended opt-in switch, not a defect.
             if [ "$PENDING_REVIEWERS" -gt 0 ]; then
-              echo "::notice::PR #$PR_NUMBER held — $PENDING_REVIEWERS requested reviewer(s)/team(s) still pending."
+              echo "::notice::PR #$PR_NUMBER held - $PENDING_REVIEWERS requested reviewer(s)/team(s) still pending."
               continue
             fi
 
-            REVIEW_OK=$(echo "$CHECKS" | jq --arg n "$REQUIRED_REVIEW_CHECK" \
-              '[.[] | select(.name == $n and .status == "completed" and .conclusion == "success")] | length')
+            REVIEW_OK=$(echo "$CHECKS" | jq --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
+              '[.[] | select(.name == $n and .app.slug == $a
+                             and .status == "completed" and .conclusion == "success")] | length')
             if [ "${REVIEW_OK:-0}" -lt 1 ]; then
-              SEEN_STATE=$(echo "$CHECKS" | jq -r --arg n "$REQUIRED_REVIEW_CHECK" \
-                '[.[] | select(.name == $n) | "\(.status)/\(.conclusion // "-")"] | if length == 0 then "absent" else join(",") end')
-              echo "::notice::PR #$PR_NUMBER held — '"'"'$REQUIRED_REVIEW_CHECK'"'"' on ${SHA:0:7} is $SEEN_STATE, not success."
+              # Name the wrong-producer case explicitly: that is a collision or an
+              # impersonation, not a reviewer that has yet to run.
+              SEEN_STATE=$(echo "$CHECKS" | jq -r --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
+                '[.[] | select(.name == $n)] as $named
+                 | ($named | map(select(.app.slug == $a))) as $mine
+                 | if   ($named | length) == 0 then "absent"
+                   elif ($mine  | length) == 0 then "produced by " + ($named | map(.app.slug // "unknown") | unique | join(",")) + ", not " + $a
+                   else ($mine | map("\(.status)/\(.conclusion // "-")") | join(",")) end')
+              printf '::notice::PR #%s held - check %s on %s is %s, not a success by %s.\n' \
+                "$PR_NUMBER" "$REQUIRED_REVIEW_CHECK" "${SHA:0:7}" "$SEEN_STATE" "$REQUIRED_REVIEW_APP"
               continue
             fi
-            echo "Gate 2 OK: '"'"'$REQUIRED_REVIEW_CHECK'"'"' passed on ${SHA:0:7}."
+            printf 'Gate 2 OK: check %s by %s passed on %s.\n' \
+              "$REQUIRED_REVIEW_CHECK" "$REQUIRED_REVIEW_APP" "${SHA:0:7}"
 
             # ── Gate 3: unresolved review findings ──────────────────────────
             # Gate 2 only proves a review was submitted. This reads what it
