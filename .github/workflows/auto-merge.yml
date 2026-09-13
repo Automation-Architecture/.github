@@ -163,6 +163,15 @@ jobs:
           REQUIRED_REVIEW_APP: "greptile-apps"
           # The same reviewer as it appears in the REVIEWS API (a login, not a slug).
           REQUIRED_REVIEW_BOT: "greptile-apps[bot]"
+          # Case-insensitive regex. A review whose BODY matches is a status
+          # notice, not a verdict, and does not satisfy Gate 2. Reviewers post
+          # these during outages, rate limits and spend caps: claude[bot] spent
+          # 2026-08-31 posting "Code review skipped - your organization's overage
+          # spend limit has been reached" AS A REVIEW. Such a review carries no
+          # findings, so Gate 3 sees nothing wrong and the PR would merge having
+          # been read by nobody. Holding is the safe direction, so this pattern
+          # is deliberately broad.
+          REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit"
         run: |
           set -euo pipefail
 
@@ -266,8 +275,8 @@ jobs:
             # $CHECKS is the head SHA's check-runs fetched in Gate 1, so this
             # cannot drift onto another commit.
             if [ -z "${REQUIRED_REVIEW_CHECK// /}" ] || [ -z "${REQUIRED_REVIEW_APP// /}" ] \
-               || [ -z "${REQUIRED_REVIEW_BOT// /}" ]; then
-              echo "::error::REQUIRED_REVIEW_CHECK/APP/BOT is empty - refusing to merge unreviewed."
+               || [ -z "${REQUIRED_REVIEW_BOT// /}" ] || [ -z "${REVIEW_SKIP_PATTERN// /}" ]; then
+              echo "::error::REQUIRED_REVIEW_CHECK/APP/BOT or REVIEW_SKIP_PATTERN is empty - refusing to merge unreviewed."
               continue
             fi
 
@@ -285,11 +294,14 @@ jobs:
 
             # Signal 2: a review the app submitted on this exact SHA. DISMISSED
             # and CHANGES_REQUESTED do not count; CHANGES_REQUESTED is already
-            # refused above. Fail closed if the reviews read fails.
+            # refused above. Neither does a body that is a status notice rather
+            # than a verdict — see REVIEW_SKIP_PATTERN. Fail closed if the
+            # reviews read fails.
             if [ "${REVIEW_OK:-0}" -lt 1 ]; then
-              REVIEW_ON_HEAD=$(echo "$REVIEWS" | jq --arg u "$REQUIRED_REVIEW_BOT" --arg s "$SHA" \
+              REVIEW_ON_HEAD=$(echo "$REVIEWS" | jq --arg u "$REQUIRED_REVIEW_BOT" --arg s "$SHA" --arg skip "$REVIEW_SKIP_PATTERN" \
                 '[.[] | select(.user.login == $u and .commit_id == $s
-                               and (.state | IN("DISMISSED", "CHANGES_REQUESTED") | not))] | length' 2>/dev/null)
+                               and (.state | IN("DISMISSED", "CHANGES_REQUESTED") | not)
+                               and (((.body // "") | test($skip; "i")) | not))] | length' 2>/dev/null)
               if [ -z "$REVIEW_ON_HEAD" ]; then
                 echo "::error::PR #$PR_NUMBER held - could not read reviews."
                 continue
