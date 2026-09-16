@@ -4,6 +4,59 @@ name: Auto-Merge when Checks Green and Reviews In
 # required reviewer has reviewed. A PR whose required review is missing is
 # HELD. It is never merged unreviewed.
 #
+# ── Gate 0: never auto-merge a PR that edits the reviewer (2026-09-16) ────
+# Ported from the aaa-client-dashboard pilot (#235) for AAA-711 / .github#31.
+# These files instruct the reviewer or this gate. A PR that changes them can
+# suppress the review judging it: an added "scope restrictions" section in
+# CLAUDE.md/AGENTS.md is a demonstrated way to silence a finding, and Greptile
+# imports those files as review context. A PR editing auto-merge.yml is the
+# same problem one level up. Humans merge these, deliberately, via aaa-merge.
+#
+# Guarded paths: CLAUDE.md, AGENTS.md, .cursorrules, .claude/, .greptile/,
+# and .github/workflows/auto-merge.yml. Matched on both the new and previous
+# filename so a rename cannot dodge it (AGENTS.md -> docs/notes.md otherwise
+# shows only its unguarded destination). Fail CLOSED if the file list is
+# unreadable: masking a gh/API failure as "no guarded files" would let
+# exactly the PR this gate exists for through.
+#
+# The list-PR-files endpoint returns at most 3000 files. `gh --paginate`
+# stops when GitHub reports no further pages, so a truncated set still
+# looks like a successful complete list. Gate 0 therefore compares the
+# returned object count to `.changed_files` and HOLDS if they differ, and
+# HOLDS at `changed_files >= 3000` even when the counts match — we cannot
+# tell a complete 3000-file PR from a truncated larger one. A truncated
+# list is never treated as "no guarded paths".
+#
+# Bound to BOTH head and base. The file list is the effective diff against
+# the PR's current base. GitHub's merge API has no expectedBaseOid;
+# `gh pr merge --match-head-commit` only pins the head. Pinning the base
+# by a local squash + `git push --force-with-lease=refs/heads/<base>:<sha>`
+# is deliberately NOT used: this workflow is the org-wide canonical
+# auto-merge, it must not --admin, and a direct push to the default branch
+# would bypass per-repo rulesets (required PRs, required checks).
+#
+# Strongest close that still respects those rulesets:
+#   1. Last head+base re-read and Gate 0 re-check run immediately before
+#      merge, with no unrelated work between them.
+#   2. After a successful squash, confirm the new commit's parent is the
+#      locked base SHA. A mismatch is a hard ::error:: (retarget or base
+#      movement between lock and merge). This job then fails. We cannot
+#      unmerge.
+#
+# Residual TOCTOU (accepted, detected after the fact): between the merge
+# RPC and GitHub applying it, a retarget can still land. There is no API
+# to prevent that. Detection is the post-merge parent check. Do not
+# "fix" this with --admin, a force-push to main, or native --auto merge.
+#
+# NEVER leave native auto-merge or a merge-queue entry armed after a
+# non-merge. `gh pr merge` exit 0 is provisional: when the base requires
+# a merge queue it can enqueue / enable auto-merge without merging, and
+# GitHub would then land the PR later with Gates 0-3 and the base lock
+# bypassed. A zero exit is re-read immediately. If `merged != true`,
+# auto-merge is revoked, any merge-queue entry is dequeued, and that is
+# a hard ::error:: — enrollment is not a merge. This workflow will not
+# enroll; a branch that requires a merge queue is held for aaa-merge.
+#
 # ── Gate 2 is the reviewer's CHECK on the head SHA (2026-09-13) ────────────
 # Greptile (the org-wide `greptile-apps` GitHub App) replaced PR Autopilot as
 # the reviewer on 2026-09-13, and Gate 2 now requires its check-run, named
@@ -47,9 +100,51 @@ name: Auto-Merge when Checks Green and Reviews In
 # the git history for why it was removed).
 #
 # BE CLEAR ABOUT WHAT THIS GUARANTEES: an automated reviewer examined this
-# exact commit and raised nothing, and no unresolved thread remains. It is
-# NOT human approval. A genuine approval requirement belongs in branch
-# protection.
+# exact COMMIT (not necessarily this PR's diff against this base — see the
+# accepted residual below) and raised nothing, and no unresolved thread
+# remains. It is NOT human approval. A genuine approval requirement belongs
+# in branch protection.
+#
+# ── ACCEPTED residual: the check binds to a commit, not a PR (AAA-711) ────
+# Gate 2's check signal is publisher-verified (`.app.slug`) and pinned to the
+# head SHA. It is NOT bound to this pull request or its base. Decision
+# recorded 2026-09-16 on AAA-711 / .github#31: accept that gap and write it
+# down. Do not "fix" it with the substitutes below; they already failed.
+#
+# A check-run attaches to a commit. Greptile reviews a diff against a base.
+# The same head SHA can sit in two PRs with different bases — a small one
+# against a feature branch, reviewed clean, and a second against `main`
+# carrying far more — and the check earned by the first satisfies Gate 2 on
+# the second. Gate 3 does not catch it: it queries only the second PR's
+# threads. Greptile skipping reviews at an org flex-usage cap makes "the
+# second PR was never reviewed" a state that occurs on its own.
+#
+# The obvious fix does not work. Requiring the check's `.pull_requests` to
+# contain this PR number rejects every genuine signal — that array is empty
+# in practice for this App (measured on aaa-client-dashboard#237:
+# app=greptile-apps, conclusion=success, pull_requests=[]).
+#
+# Substitutes attempted and withdrawn on aaa-client-dashboard#238:
+#   - Check alone: binds to a commit, not a PR or base.
+#   - Greptile reaction on the PR: binds to a PR, not a commit or a point in
+#     time; survives later pushes and base changes.
+#   - Both together: correlates nothing — a reaction from an earlier head
+#     plus a check from another PR still reads as "reviewed".
+#   - Codex comment naming a ~10-hex prefix: too little binding; the comment
+#     survives pushes.
+#
+# Other options considered the same day, and not taken:
+#   - Require a review object only (what the dashboard pilot does now).
+#     Sound, but a clean review leaves no review object, so clean PRs never
+#     auto-merge and take aaa-merge instead.
+#   - Enable Greptile Auto-approve, which emits the missing artifact
+#     (commit-pinned, PR-scoped, author-verified). Rejected for AAA on
+#     2026-09-16 (aaa-runbooks#137): branch protection counts bot approvals
+#     as real ones.
+#
+# Exploitation needs two PRs sharing a head with different bases. That is
+# the residual. The next real fix is a review object from a clean pass,
+# which Auto-approve would emit and which AAA has declined.
 #
 # ── Why Gate 3 exists ──────────────────────────────────────────────────────
 # Gate 2 asks "did the reviewer show up", which is not the same question as
@@ -97,7 +192,7 @@ name: Auto-Merge when Checks Green and Reviews In
 # whatever the repo's ruleset requires. Admin bypass lives in aaa-merge and
 # other operator-explicit flows, never here. Note the corollary: on a repo
 # whose ruleset requires no reviews, "respects the ruleset" constrains nothing,
-# and Gates 1-3 below are the only thing standing between a PR and main.
+# and Gates 0-3 below are the only thing standing between a PR and main.
 #
 # There is deliberately NO `--auto` fallback. Queuing native auto-merge hands
 # the decision to GitHub, which merges once the blocking requirement clears
@@ -196,6 +291,201 @@ jobs:
             return 0
           }
 
+          # Read isInMergeQueue as the literals true/false only. Empty, null,
+          # missing fields, GraphQL errors, and transport failures are all
+          # unreadable — callers must not treat them as "not in queue".
+          read_is_in_merge_queue() {
+            local pr="$1" json
+            json=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$pr" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){ isInMergeQueue } } }' 2>/dev/null) || json=""
+            printf '%s' "$json" | jq -r '
+              if (.errors | type == "array") and (.errors | length) > 0 then empty
+              elif .data.repository.pullRequest.isInMergeQueue == true then "true"
+              elif .data.repository.pullRequest.isInMergeQueue == false then "false"
+              else empty end' 2>/dev/null || true
+          }
+
+          # Dequeue a merge-queue entry. Mutation input is pullRequestId (the
+          # PR node id), not id. Fail CLOSED: mutation errors are not
+          # swallowed, and only an explicit post-read isInMergeQueue==false
+          # is success. An unreadable pre-read still attempts dequeue — it
+          # must not skip the mutation and leave a queued PR armed.
+          dequeue_merge_queue() {
+            local pr="$1" node_id in_queue mut_json mut_rc mut_err
+            in_queue=$(read_is_in_merge_queue "$pr")
+            if [ "$in_queue" = "false" ]; then
+              return 0
+            fi
+            if [ "$in_queue" != "true" ]; then
+              echo "::error::Could not read isInMergeQueue for #$pr before dequeue — attempting dequeuePullRequest anyway."
+            fi
+
+            node_id=$(gh api "/repos/$REPO/pulls/$pr" --jq '.node_id' 2>/dev/null || true)
+            if [ -z "$node_id" ] || [ "$node_id" = "null" ]; then
+              echo "::error::Could not read node_id for #$pr — cannot dequeue merge-queue entry."
+              return 1
+            fi
+
+            mut_rc=0
+            mut_json=$(gh api graphql -f pullRequestId="$node_id" \
+              -f query='mutation($pullRequestId:ID!){
+                dequeuePullRequest(input:{pullRequestId:$pullRequestId}){ clientMutationId } }' \
+              2>/dev/null) || mut_rc=$?
+            mut_err=$(printf '%s' "$mut_json" | jq -r '.errors[]?.message // empty' 2>/dev/null | tr '\n' ';' | sed 's/;$//')
+            if [ "$mut_rc" -ne 0 ] || [ -n "$mut_err" ]; then
+              echo "::error::dequeuePullRequest failed for #$pr (rc=$mut_rc${mut_err:+; $mut_err})."
+            fi
+
+            in_queue=$(read_is_in_merge_queue "$pr")
+            if [ "$in_queue" != "false" ]; then
+              echo "::error::Could not dequeue merge-queue entry on #$pr (isInMergeQueue=${in_queue:-unreadable}) - it may merge despite these gates."
+              return 1
+            fi
+            if [ "$mut_rc" -ne 0 ] || [ -n "$mut_err" ]; then
+              echo "::error::dequeuePullRequest failed for #$pr after verify — refusing to treat as a clean dequeue."
+              return 1
+            fi
+            return 0
+          }
+
+          # Every non-merge exit must leave neither native auto-merge nor a
+          # merge-queue entry armed. GitHub would otherwise merge later
+          # without re-running Gates 0-3.
+          disarm_deferred_merge() {
+            local pr="$1" rc=0
+            revoke_auto_merge "$pr" || rc=1
+            dequeue_merge_queue "$pr" || rc=1
+            return "$rc"
+          }
+
+          # Hold when the base clearly has a merge queue. Detected via
+          # mergeStateStatus=QUEUED, isInMergeQueue, or repository.mergeQueue
+          # for this branch. A GraphQL miss is NOT a hold (no false positives);
+          # the post-merge re-read still refuses enrollment.
+          hold_if_merge_queue() {
+            local pr="$1" branch="$2" why="$3" status qid in_queue
+            status=$(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus \
+                     --jq '.mergeStateStatus' 2>/dev/null || echo "")
+            qid=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -f branch="$branch" \
+              -f query='query($owner:String!,$name:String!,$branch:String!){
+                repository(owner:$owner,name:$name){ mergeQueue(branch:$branch){ id } } }' \
+              --jq '.data.repository.mergeQueue.id // empty' 2>/dev/null || echo "")
+            in_queue=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$pr" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){ isInMergeQueue } } }' \
+              --jq '.data.repository.pullRequest.isInMergeQueue' 2>/dev/null || echo "")
+            if [ "$status" = "QUEUED" ] || [ "$in_queue" = "true" ] \
+               || { [ -n "$qid" ] && [ "$qid" != "null" ]; }; then
+              echo "::notice::PR #$pr held — base $branch requires a merge queue ($why; status=${status:-unknown}). This workflow will not enroll; humans use aaa-merge."
+              disarm_deferred_merge "$pr" || return 1
+              return 1
+            fi
+            return 0
+          }
+
+          # Gate 0: hold a PR whose effective diff edits reviewer/gate config.
+          # Reads filename AND previous_filename so a rename cannot dodge it.
+          # Fail CLOSED on an unreadable OR incomplete file list (GitHub caps
+          # list-PR-files at 3000). $3 is the PR JSON that supplied
+          # changed_files — do not re-fetch it here, so the count and the
+          # file list stay on one snapshot. Used at evaluation start AND
+          # immediately before merge.
+          GATE0_RE='(^|/)(CLAUDE\.md|AGENTS\.md|\.cursorrules)$|(^|/)\.claude/|(^|/)\.greptile/|(^|/)\.github/workflows/auto-merge\.yml$'
+          GATE0_FILE_CAP=3000
+          GATE0_RACE=0
+          gate0_hold_if_guarded() {
+            local pr="$1" why="$2" pr_json="$3"
+            local changed_files files_json n_listed guarded
+            if [ -z "${GATE0_RE}" ]; then
+              echo "::error::GATE0_RE is empty — refusing to merge."
+              return 1
+            fi
+            if [ -z "$pr_json" ]; then
+              echo "::error::Gate 0 ($why) missing PR payload for #$pr — refusing to merge."
+              return 1
+            fi
+            changed_files=$(echo "$pr_json" | jq -r '.changed_files')
+            case "$changed_files" in
+              ''|*[!0-9]*)
+                echo "::error::Could not read changed_files for #$pr ($why) — refusing to merge."
+                return 1
+                ;;
+            esac
+            # A truncated page chain still looks like success. Hold at the
+            # cap even when listed == 3000: that cannot be distinguished
+            # from a truncated larger PR.
+            if [ "$changed_files" -ge "$GATE0_FILE_CAP" ]; then
+              echo "::error::PR #$pr has $changed_files changed files, at or above the ${GATE0_FILE_CAP}-file list cap ($why) — refusing to merge."
+              return 1
+            fi
+            if ! files_json=$(gh api "/repos/$REPO/pulls/$pr/files" --paginate --jq '.[]' | jq -s '.'); then
+              echo "::error::Could not read changed files for #$pr ($why) — refusing to merge."
+              return 1
+            fi
+            if ! echo "$files_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+              echo "::error::Unreadable changed-file list for #$pr ($why) — refusing to merge."
+              return 1
+            fi
+            n_listed=$(echo "$files_json" | jq 'length')
+            case "$n_listed" in
+              ''|*[!0-9]*)
+                echo "::error::Could not count changed files for #$pr ($why) — refusing to merge."
+                return 1
+                ;;
+            esac
+            if [ "$n_listed" -ne "$changed_files" ]; then
+              echo "::error::PR #$pr changed-file list incomplete (listed=$n_listed changed_files=$changed_files, $why) — refusing to merge."
+              return 1
+            fi
+            guarded=$(echo "$files_json" | jq -r '.[] | .filename, (.previous_filename // empty)' \
+              | grep -Ei "$GATE0_RE" || true)
+            if [ -n "$guarded" ]; then
+              echo "::notice::PR #$pr held — edits reviewer/gate configuration, needs a human merge:"
+              echo "$guarded" | sed 's/^/  - /'
+              return 1
+            fi
+            return 0
+          }
+
+          # After a squash merge, the new tip must parent the base SHA we
+          # locked. GitHub has no expectedBaseOid; this is the detect-after
+          # close for a retarget between lock and merge. Cannot unmerge.
+          verify_squash_parent() {
+            local pr="$1" locked_base="$2" locked_ref="$3"
+            local merged_json merge_sha parent merged
+            if ! merged_json=$(gh api "/repos/$REPO/pulls/$pr"); then
+              echo "::error::Could not re-read PR #$pr after merge — cannot verify Gate 0 base pin."
+              return 1
+            fi
+            merged=$(echo "$merged_json" | jq -r '.merged')
+            merge_sha=$(echo "$merged_json" | jq -r '.merge_commit_sha')
+            if [ "$merged" != "true" ] || [ -z "$merge_sha" ] || [ "$merge_sha" = "null" ]; then
+              echo "::error::PR #$pr merge reported success but merge commit is missing — cannot verify Gate 0 base pin."
+              return 1
+            fi
+            if ! parent=$(gh api "/repos/$REPO/commits/$merge_sha" --jq '.parents[0].sha'); then
+              echo "::error::Could not read squash parent of $merge_sha for #$pr — cannot verify Gate 0 base pin."
+              return 1
+            fi
+            if [ -z "$parent" ] || [ "$parent" = "null" ]; then
+              echo "::error::Squash $merge_sha for #$pr has no parent — cannot verify Gate 0 base pin."
+              return 1
+            fi
+            if [ "$parent" != "$locked_base" ]; then
+              echo "::error::Gate 0 base-race on #$pr: squash $merge_sha parent $parent is not locked base $locked_base (ref $locked_ref). A retarget or base movement between lock and merge can put guarded config into the landed diff. Manual inspection required; this workflow cannot unmerge."
+              return 1
+            fi
+            printf 'Gate 0 post-merge OK: squash %s parents locked %s (%s).\n' \
+              "${merge_sha:0:7}" "${locked_base:0:7}" "$locked_ref"
+            return 0
+          }
+
           case "$EVENT" in
             pull_request_review|pull_request_review_thread) PR_LIST="$PRR_PR" ;;
             workflow_run)        PR_LIST="$WR_PR" ;;
@@ -218,6 +508,8 @@ jobs:
 
             PR=$(gh api "/repos/$REPO/pulls/$PR_NUMBER")
             SHA=$(echo "$PR"    | jq -r '.head.sha')
+            BASE=$(echo "$PR"   | jq -r '.base.sha')
+            BASE_REF=$(echo "$PR" | jq -r '.base.ref')
             STATE=$(echo "$PR"  | jq -r '.state')
             DRAFT=$(echo "$PR"  | jq -r '.draft')
             PENDING_REVIEWERS=$(echo "$PR" | jq '([.requested_reviewers[]?.login] + [.requested_teams[]?.slug]) | length')
@@ -226,13 +518,34 @@ jobs:
               echo "::error::Could not resolve HEAD SHA for #$PR_NUMBER — skipping."
               continue
             fi
+            if [ -z "$BASE" ] || [ "$BASE" = "null" ] \
+               || [ -z "$BASE_REF" ] || [ "$BASE_REF" = "null" ]; then
+              echo "::error::Could not resolve base SHA/ref for #$PR_NUMBER — refusing to merge."
+              continue
+            fi
             [ "$STATE" != "open" ] && { echo "state=$STATE — skip."; continue; }
             [ "$DRAFT" = "true" ]  && { echo "draft — skip."; continue; }
 
             # Before ANY gate. Every exit below - checks pending, checks failed,
             # missing review, unresolved findings, unreadable gate - must not
-            # leave a queued native merge armed behind it.
-            revoke_auto_merge "$PR_NUMBER" || continue
+            # leave a queued native merge or merge-queue entry armed behind it.
+            disarm_deferred_merge "$PR_NUMBER" || continue
+            hold_if_merge_queue "$PR_NUMBER" "$BASE_REF" "initial" || continue
+
+            # ── Gate 0: never auto-merge a PR that edits the reviewer ────────
+            # These files are instructions to the reviewer, or to this gate.
+            # A PR that changes them can suppress the review judging it: an
+            # added "scope restrictions" section in CLAUDE.md/AGENTS.md is a
+            # demonstrated way to silence a finding, and Greptile imports those
+            # files as review context. A PR editing auto-merge.yml is the same
+            # problem one level up. Humans merge these, deliberately.
+            # Fail CLOSED if the file list is unreadable: `|| true` on the whole
+            # pipeline would mask a gh/API failure as "no guarded files" and let
+            # exactly the PR this gate exists for through. Suppress only grep's
+            # no-match status, and read `previous_filename` too — a rename away
+            # from a guarded path (AGENTS.md -> docs/notes.md) otherwise shows
+            # only its unguarded destination.
+            gate0_hold_if_guarded "$PR_NUMBER" "initial" "$PR" || continue
 
             # ── Gate 1: check-runs on the current head ──────────────────────
             CHECKS=$(gh api "/repos/$REPO/commits/$SHA/check-runs" --paginate --jq '.check_runs[]' | jq -s '.')
@@ -288,6 +601,10 @@ jobs:
             fi
 
             # Signal 1: the reviewer's check on this head, from THAT app.
+            # ACCEPTED residual (AAA-711): this check is bound to $SHA, not to
+            # this PR or its base. `.pull_requests` is empty for this App, so
+            # we cannot close that. See the header. Do not "fix" this by also
+            # requiring a reaction, a Codex comment, or `.pull_requests`.
             REVIEW_OK=$(echo "$CHECKS" | jq --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
               '[.[] | select(.name == $n and .app.slug == $a
                              and .status == "completed" and .conclusion == "success")] | length')
@@ -379,13 +696,99 @@ jobs:
             fi
             echo "Gate 3 OK: no unresolved review findings."
 
-            echo "Merging PR #$PR_NUMBER..."
-            gh pr merge "$PR_NUMBER" --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO" && continue
+            # Merge-time Gate 0. Order is load-bearing: files check first,
+            # then the last head+base re-read, then merge with nothing else
+            # in between. GitHub has no expectedBaseOid; --match-head-commit
+            # only pins the head. A retarget after the lock is detected by
+            # verify_squash_parent (squash parent must be $BASE).
+            if ! PR_PRE=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
+              echo "::error::Could not re-read PR #$PR_NUMBER before merge — refusing to merge."
+              continue
+            fi
+            SHA_NOW=$(echo "$PR_PRE"  | jq -r '.head.sha')
+            BASE_NOW=$(echo "$PR_PRE" | jq -r '.base.sha')
+            BASE_REF_NOW=$(echo "$PR_PRE" | jq -r '.base.ref')
+            if [ -z "$SHA_NOW" ] || [ "$SHA_NOW" = "null" ] \
+               || [ -z "$BASE_NOW" ] || [ "$BASE_NOW" = "null" ] \
+               || [ -z "$BASE_REF_NOW" ] || [ "$BASE_REF_NOW" = "null" ]; then
+              echo "::error::Could not resolve head/base for #$PR_NUMBER before merge — refusing to merge."
+              continue
+            fi
+            if [ "$SHA_NOW" != "$SHA" ]; then
+              echo "::notice::PR #$PR_NUMBER head moved since evaluation — leaving it for the next sweep."
+              continue
+            fi
+            if [ "$BASE_NOW" != "$BASE" ] || [ "$BASE_REF_NOW" != "$BASE_REF" ]; then
+              echo "::notice::PR #$PR_NUMBER base moved since Gate 0 ($BASE_REF@$BASE -> $BASE_REF_NOW@$BASE_NOW) — holding; next sweep re-evaluates against the new base."
+              continue
+            fi
+            hold_if_merge_queue "$PR_NUMBER" "$BASE_REF" "pre-merge" || continue
+            gate0_hold_if_guarded "$PR_NUMBER" "pre-merge" "$PR_PRE" || continue
+            echo "Merging PR #$PR_NUMBER (Gate 0 revalidated)..."
+            # Last head+base re-read. Local jq only between here and merge.
+            if ! PR_LOCK=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
+              echo "::error::Could not re-read PR #$PR_NUMBER before merge — refusing to merge."
+              continue
+            fi
+            if [ "$(echo "$PR_LOCK" | jq -r '.head.sha')" != "$SHA" ] \
+               || [ "$(echo "$PR_LOCK" | jq -r '.base.sha')" != "$BASE" ] \
+               || [ "$(echo "$PR_LOCK" | jq -r '.base.ref')" != "$BASE_REF" ]; then
+              echo "::notice::PR #$PR_NUMBER head/base changed during Gate 0 revalidation — holding."
+              continue
+            fi
+            PRE_N=$(echo "$PR_PRE"  | jq -r '.changed_files')
+            LOCK_N=$(echo "$PR_LOCK" | jq -r '.changed_files')
+            if [ "$PRE_N" != "$LOCK_N" ]; then
+              echo "::notice::PR #$PR_NUMBER changed_files moved during Gate 0 ($PRE_N -> $LOCK_N) — holding."
+              continue
+            fi
+
+            # gh pr merge exit 0 is provisional: a merge-queue base enqueues
+            # or enables auto-merge without merging. Re-read immediately.
+            # Enrollment is not a merge; disarm and fail closed.
+            merge_rc=0
+            gh pr merge "$PR_NUMBER" --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO" || merge_rc=$?
+            if ! POST=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
+              echo "::error::Could not re-read PR #$PR_NUMBER after merge command — refusing to treat as merged."
+              disarm_deferred_merge "$PR_NUMBER" || true
+              GATE0_RACE=1
+              continue
+            fi
+            POST_MERGED=$(echo "$POST" | jq -r '.merged')
+            POST_SHA=$(echo "$POST" | jq -r '.merge_commit_sha')
+            if [ "$POST_MERGED" = "true" ] && [ -n "$POST_SHA" ] && [ "$POST_SHA" != "null" ]; then
+              if ! verify_squash_parent "$PR_NUMBER" "$BASE" "$BASE_REF"; then
+                GATE0_RACE=1
+              fi
+              continue
+            fi
+            POST_ARMED=$(echo "$POST" | jq '(.auto_merge != null)' 2>/dev/null || echo unknown)
+            POST_STATUS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeStateStatus \
+                          --jq '.mergeStateStatus' 2>/dev/null || echo "")
+            POST_QUEUE=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){ isInMergeQueue } } }' \
+              --jq '.data.repository.pullRequest.isInMergeQueue' 2>/dev/null || echo "")
+            if [ "$merge_rc" -eq 0 ] || [ "$POST_ARMED" = "true" ] \
+               || [ "$POST_QUEUE" = "true" ] || [ "$POST_STATUS" = "QUEUED" ]; then
+              echo "::error::PR #$PR_NUMBER: gh pr merge exited $merge_rc but merged=$POST_MERGED — enrollment (auto-merge / merge queue) is not a merge. GitHub would land this later without Gates 0-3. Disarming; humans use aaa-merge."
+              disarm_deferred_merge "$PR_NUMBER" || true
+              GATE0_RACE=1
+              continue
+            fi
+            disarm_deferred_merge "$PR_NUMBER" || continue
             # Deliberately NO `--auto` fallback. Queuing native auto-merge hands
             # the decision to GitHub, which merges once the blocking requirement
-            # clears WITHOUT re-running anything here - Gates 1-3 and the head
+            # clears WITHOUT re-running anything here - Gates 0-3 and the head
             # pin are all bypassed. The */10 sweep retries instead, re-evaluating
             # every gate against the head as it is at that moment. A blocked PR
             # waits; it does not slip through.
             echo "::notice::PR #$PR_NUMBER not mergeable yet - leaving it for the next sweep."
           done
+
+          if [ "$GATE0_RACE" -ne 0 ]; then
+            echo "::error::One or more merges failed Gate 0 post-checks (base-race or merge-queue/auto-merge enrollment without a merge)."
+            exit 1
+          fi
