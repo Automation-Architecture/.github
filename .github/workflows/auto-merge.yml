@@ -48,6 +48,15 @@ name: Auto-Merge when Checks Green and Reviews In
 # to prevent that. Detection is the post-merge parent check. Do not
 # "fix" this with --admin, a force-push to main, or native --auto merge.
 #
+# NEVER leave native auto-merge or a merge-queue entry armed after a
+# non-merge. `gh pr merge` exit 0 is provisional: when the base requires
+# a merge queue it can enqueue / enable auto-merge without merging, and
+# GitHub would then land the PR later with Gates 0-3 and the base lock
+# bypassed. A zero exit is re-read immediately. If `merged != true`,
+# auto-merge is revoked, any merge-queue entry is dequeued, and that is
+# a hard ::error:: — enrollment is not a merge. This workflow will not
+# enroll; a branch that requires a merge queue is held for aaa-merge.
+#
 # ── Gate 2 is the reviewer's CHECK on the head SHA (2026-09-13) ────────────
 # Greptile (the org-wide `greptile-apps` GitHub App) replaced PR Autopilot as
 # the reviewer on 2026-09-13, and Gate 2 now requires its check-run, named
@@ -282,6 +291,68 @@ jobs:
             return 0
           }
 
+          # Dequeue a merge-queue entry if the API exposes one. Fail CLOSED
+          # only when we can see the PR is still in the queue afterwards;
+          # a missing field on a repo without merge queues is not a hold.
+          dequeue_merge_queue() {
+            local pr="$1" node_id in_queue
+            node_id=$(gh api "/repos/$REPO/pulls/$pr" --jq '.node_id' 2>/dev/null || true)
+            if [ -n "$node_id" ] && [ "$node_id" != "null" ]; then
+              gh api graphql -f id="$node_id" \
+                -f query='mutation($id:ID!){ dequeuePullRequest(input:{id:$id}){ clientMutationId } }' \
+                >/dev/null 2>&1 || true
+            fi
+            in_queue=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$pr" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){ isInMergeQueue } } }' \
+              --jq '.data.repository.pullRequest.isInMergeQueue' 2>/dev/null || echo "")
+            if [ "$in_queue" = "true" ]; then
+              echo "::error::Could not dequeue merge-queue entry on #$pr - it may merge despite these gates."
+              return 1
+            fi
+            return 0
+          }
+
+          # Every non-merge exit must leave neither native auto-merge nor a
+          # merge-queue entry armed. GitHub would otherwise merge later
+          # without re-running Gates 0-3.
+          disarm_deferred_merge() {
+            local pr="$1" rc=0
+            revoke_auto_merge "$pr" || rc=1
+            dequeue_merge_queue "$pr" || rc=1
+            return "$rc"
+          }
+
+          # Hold when the base clearly has a merge queue. Detected via
+          # mergeStateStatus=QUEUED, isInMergeQueue, or repository.mergeQueue
+          # for this branch. A GraphQL miss is NOT a hold (no false positives);
+          # the post-merge re-read still refuses enrollment.
+          hold_if_merge_queue() {
+            local pr="$1" branch="$2" why="$3" status qid in_queue
+            status=$(gh pr view "$pr" --repo "$REPO" --json mergeStateStatus \
+                     --jq '.mergeStateStatus' 2>/dev/null || echo "")
+            qid=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -f branch="$branch" \
+              -f query='query($owner:String!,$name:String!,$branch:String!){
+                repository(owner:$owner,name:$name){ mergeQueue(branch:$branch){ id } } }' \
+              --jq '.data.repository.mergeQueue.id // empty' 2>/dev/null || echo "")
+            in_queue=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$pr" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){ isInMergeQueue } } }' \
+              --jq '.data.repository.pullRequest.isInMergeQueue' 2>/dev/null || echo "")
+            if [ "$status" = "QUEUED" ] || [ "$in_queue" = "true" ] \
+               || { [ -n "$qid" ] && [ "$qid" != "null" ]; }; then
+              echo "::notice::PR #$pr held — base $branch requires a merge queue ($why; status=${status:-unknown}). This workflow will not enroll; humans use aaa-merge."
+              disarm_deferred_merge "$pr" || return 1
+              return 1
+            fi
+            return 0
+          }
+
           # Gate 0: hold a PR whose effective diff edits reviewer/gate config.
           # Reads filename AND previous_filename so a rename cannot dodge it.
           # Fail CLOSED on an unreadable OR incomplete file list (GitHub caps
@@ -421,8 +492,9 @@ jobs:
 
             # Before ANY gate. Every exit below - checks pending, checks failed,
             # missing review, unresolved findings, unreadable gate - must not
-            # leave a queued native merge armed behind it.
-            revoke_auto_merge "$PR_NUMBER" || continue
+            # leave a queued native merge or merge-queue entry armed behind it.
+            disarm_deferred_merge "$PR_NUMBER" || continue
+            hold_if_merge_queue "$PR_NUMBER" "$BASE_REF" "initial" || continue
 
             # ── Gate 0: never auto-merge a PR that edits the reviewer ────────
             # These files are instructions to the reviewer, or to this gate.
@@ -614,6 +686,7 @@ jobs:
               echo "::notice::PR #$PR_NUMBER base moved since Gate 0 ($BASE_REF@$BASE -> $BASE_REF_NOW@$BASE_NOW) — holding; next sweep re-evaluates against the new base."
               continue
             fi
+            hold_if_merge_queue "$PR_NUMBER" "$BASE_REF" "pre-merge" || continue
             gate0_hold_if_guarded "$PR_NUMBER" "pre-merge" "$PR_PRE" || continue
             echo "Merging PR #$PR_NUMBER (Gate 0 revalidated)..."
             # Last head+base re-read. Local jq only between here and merge.
@@ -634,12 +707,42 @@ jobs:
               continue
             fi
 
-            if gh pr merge "$PR_NUMBER" --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO"; then
+            # gh pr merge exit 0 is provisional: a merge-queue base enqueues
+            # or enables auto-merge without merging. Re-read immediately.
+            # Enrollment is not a merge; disarm and fail closed.
+            merge_rc=0
+            gh pr merge "$PR_NUMBER" --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO" || merge_rc=$?
+            if ! POST=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
+              echo "::error::Could not re-read PR #$PR_NUMBER after merge command — refusing to treat as merged."
+              disarm_deferred_merge "$PR_NUMBER" || true
+              GATE0_RACE=1
+              continue
+            fi
+            POST_MERGED=$(echo "$POST" | jq -r '.merged')
+            POST_SHA=$(echo "$POST" | jq -r '.merge_commit_sha')
+            if [ "$POST_MERGED" = "true" ] && [ -n "$POST_SHA" ] && [ "$POST_SHA" != "null" ]; then
               if ! verify_squash_parent "$PR_NUMBER" "$BASE" "$BASE_REF"; then
                 GATE0_RACE=1
               fi
               continue
             fi
+            POST_ARMED=$(echo "$POST" | jq '(.auto_merge != null)' 2>/dev/null || echo unknown)
+            POST_STATUS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeStateStatus \
+                          --jq '.mergeStateStatus' 2>/dev/null || echo "")
+            POST_QUEUE=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){ isInMergeQueue } } }' \
+              --jq '.data.repository.pullRequest.isInMergeQueue' 2>/dev/null || echo "")
+            if [ "$merge_rc" -eq 0 ] || [ "$POST_ARMED" = "true" ] \
+               || [ "$POST_QUEUE" = "true" ] || [ "$POST_STATUS" = "QUEUED" ]; then
+              echo "::error::PR #$PR_NUMBER: gh pr merge exited $merge_rc but merged=$POST_MERGED — enrollment (auto-merge / merge queue) is not a merge. GitHub would land this later without Gates 0-3. Disarming; humans use aaa-merge."
+              disarm_deferred_merge "$PR_NUMBER" || true
+              GATE0_RACE=1
+              continue
+            fi
+            disarm_deferred_merge "$PR_NUMBER" || continue
             # Deliberately NO `--auto` fallback. Queuing native auto-merge hands
             # the decision to GitHub, which merges once the blocking requirement
             # clears WITHOUT re-running anything here - Gates 0-3 and the head
@@ -650,6 +753,6 @@ jobs:
           done
 
           if [ "$GATE0_RACE" -ne 0 ]; then
-            echo "::error::One or more squash merges landed without a verified Gate 0 base pin."
+            echo "::error::One or more merges failed Gate 0 post-checks (base-race or merge-queue/auto-merge enrollment without a merge)."
             exit 1
           fi
