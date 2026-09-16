@@ -310,7 +310,9 @@ jobs:
 
           # Dequeue a merge-queue entry. Mutation input is pullRequestId (the
           # PR node id), not id. Fail CLOSED: mutation errors are not
-          # swallowed, and only an explicit isInMergeQueue==false is success.
+          # swallowed, and only an explicit post-read isInMergeQueue==false
+          # is success. An unreadable pre-read still attempts dequeue — it
+          # must not skip the mutation and leave a queued PR armed.
           dequeue_merge_queue() {
             local pr="$1" node_id in_queue mut_json mut_rc mut_err
             in_queue=$(read_is_in_merge_queue "$pr")
@@ -318,8 +320,7 @@ jobs:
               return 0
             fi
             if [ "$in_queue" != "true" ]; then
-              echo "::error::Could not read isInMergeQueue for #$pr — refusing to treat as dequeued."
-              return 1
+              echo "::error::Could not read isInMergeQueue for #$pr before dequeue — attempting dequeuePullRequest anyway."
             fi
 
             node_id=$(gh api "/repos/$REPO/pulls/$pr" --jq '.node_id' 2>/dev/null || true)
