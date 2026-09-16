@@ -4,6 +4,21 @@ name: Auto-Merge when Checks Green and Reviews In
 # required reviewer has reviewed. A PR whose required review is missing is
 # HELD. It is never merged unreviewed.
 #
+# ── Gate 0: never auto-merge a PR that edits the reviewer (2026-09-16) ────
+# Ported from the aaa-client-dashboard pilot (#235) for AAA-711 / .github#31.
+# These files instruct the reviewer or this gate. A PR that changes them can
+# suppress the review judging it: an added "scope restrictions" section in
+# CLAUDE.md/AGENTS.md is a demonstrated way to silence a finding, and Greptile
+# imports those files as review context. A PR editing auto-merge.yml is the
+# same problem one level up. Humans merge these, deliberately, via aaa-merge.
+#
+# Guarded paths: CLAUDE.md, AGENTS.md, .cursorrules, .claude/, .greptile/,
+# and .github/workflows/auto-merge.yml. Matched on both the new and previous
+# filename so a rename cannot dodge it (AGENTS.md -> docs/notes.md otherwise
+# shows only its unguarded destination). Fail CLOSED if the file list is
+# unreadable: masking a gh/API failure as "no guarded files" would let
+# exactly the PR this gate exists for through.
+#
 # ── Gate 2 is the reviewer's CHECK on the head SHA (2026-09-13) ────────────
 # Greptile (the org-wide `greptile-apps` GitHub App) replaced PR Autopilot as
 # the reviewer on 2026-09-13, and Gate 2 now requires its check-run, named
@@ -47,9 +62,51 @@ name: Auto-Merge when Checks Green and Reviews In
 # the git history for why it was removed).
 #
 # BE CLEAR ABOUT WHAT THIS GUARANTEES: an automated reviewer examined this
-# exact commit and raised nothing, and no unresolved thread remains. It is
-# NOT human approval. A genuine approval requirement belongs in branch
-# protection.
+# exact COMMIT (not necessarily this PR's diff against this base — see the
+# accepted residual below) and raised nothing, and no unresolved thread
+# remains. It is NOT human approval. A genuine approval requirement belongs
+# in branch protection.
+#
+# ── ACCEPTED residual: the check binds to a commit, not a PR (AAA-711) ────
+# Gate 2's check signal is publisher-verified (`.app.slug`) and pinned to the
+# head SHA. It is NOT bound to this pull request or its base. Decision
+# recorded 2026-09-16 on AAA-711 / .github#31: accept that gap and write it
+# down. Do not "fix" it with the substitutes below; they already failed.
+#
+# A check-run attaches to a commit. Greptile reviews a diff against a base.
+# The same head SHA can sit in two PRs with different bases — a small one
+# against a feature branch, reviewed clean, and a second against `main`
+# carrying far more — and the check earned by the first satisfies Gate 2 on
+# the second. Gate 3 does not catch it: it queries only the second PR's
+# threads. Greptile skipping reviews at an org flex-usage cap makes "the
+# second PR was never reviewed" a state that occurs on its own.
+#
+# The obvious fix does not work. Requiring the check's `.pull_requests` to
+# contain this PR number rejects every genuine signal — that array is empty
+# in practice for this App (measured on aaa-client-dashboard#237:
+# app=greptile-apps, conclusion=success, pull_requests=[]).
+#
+# Substitutes attempted and withdrawn on aaa-client-dashboard#238:
+#   - Check alone: binds to a commit, not a PR or base.
+#   - Greptile reaction on the PR: binds to a PR, not a commit or a point in
+#     time; survives later pushes and base changes.
+#   - Both together: correlates nothing — a reaction from an earlier head
+#     plus a check from another PR still reads as "reviewed".
+#   - Codex comment naming a ~10-hex prefix: too little binding; the comment
+#     survives pushes.
+#
+# Other options considered the same day, and not taken:
+#   - Require a review object only (what the dashboard pilot does now).
+#     Sound, but a clean review leaves no review object, so clean PRs never
+#     auto-merge and take aaa-merge instead.
+#   - Enable Greptile Auto-approve, which emits the missing artifact
+#     (commit-pinned, PR-scoped, author-verified). Rejected for AAA on
+#     2026-09-16 (aaa-runbooks#137): branch protection counts bot approvals
+#     as real ones.
+#
+# Exploitation needs two PRs sharing a head with different bases. That is
+# the residual. The next real fix is a review object from a clean pass,
+# which Auto-approve would emit and which AAA has declined.
 #
 # ── Why Gate 3 exists ──────────────────────────────────────────────────────
 # Gate 2 asks "did the reviewer show up", which is not the same question as
@@ -97,7 +154,7 @@ name: Auto-Merge when Checks Green and Reviews In
 # whatever the repo's ruleset requires. Admin bypass lives in aaa-merge and
 # other operator-explicit flows, never here. Note the corollary: on a repo
 # whose ruleset requires no reviews, "respects the ruleset" constrains nothing,
-# and Gates 1-3 below are the only thing standing between a PR and main.
+# and Gates 0-3 below are the only thing standing between a PR and main.
 #
 # There is deliberately NO `--auto` fallback. Queuing native auto-merge hands
 # the decision to GitHub, which merges once the blocking requirement clears
@@ -234,6 +291,32 @@ jobs:
             # leave a queued native merge armed behind it.
             revoke_auto_merge "$PR_NUMBER" || continue
 
+            # ── Gate 0: never auto-merge a PR that edits the reviewer ────────
+            # These files are instructions to the reviewer, or to this gate.
+            # A PR that changes them can suppress the review judging it: an
+            # added "scope restrictions" section in CLAUDE.md/AGENTS.md is a
+            # demonstrated way to silence a finding, and Greptile imports those
+            # files as review context. A PR editing auto-merge.yml is the same
+            # problem one level up. Humans merge these, deliberately.
+            # Fail CLOSED if the file list is unreadable: `|| true` on the whole
+            # pipeline would mask a gh/API failure as "no guarded files" and let
+            # exactly the PR this gate exists for through. Suppress only grep's
+            # no-match status, and read `previous_filename` too — a rename away
+            # from a guarded path (AGENTS.md -> docs/notes.md) otherwise shows
+            # only its unguarded destination.
+            if ! CHANGED=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/files" --paginate \
+                 --jq '.[] | .filename, (.previous_filename // empty)'); then
+              echo "::error::Could not read changed files for #$PR_NUMBER — refusing to merge."
+              continue
+            fi
+            GUARDED=$(printf '%s\n' "$CHANGED" \
+              | grep -Ei '(^|/)(CLAUDE\.md|AGENTS\.md|\.cursorrules)$|(^|/)\.claude/|(^|/)\.greptile/|(^|/)\.github/workflows/auto-merge\.yml$' || true)
+            if [ -n "$GUARDED" ]; then
+              echo "::notice::PR #$PR_NUMBER held — edits reviewer/gate configuration, needs a human merge:"
+              echo "$GUARDED" | sed 's/^/  - /'
+              continue
+            fi
+
             # ── Gate 1: check-runs on the current head ──────────────────────
             CHECKS=$(gh api "/repos/$REPO/commits/$SHA/check-runs" --paginate --jq '.check_runs[]' | jq -s '.')
             TOTAL=$(echo "$CHECKS"   | jq 'length')
@@ -288,6 +371,10 @@ jobs:
             fi
 
             # Signal 1: the reviewer's check on this head, from THAT app.
+            # ACCEPTED residual (AAA-711): this check is bound to $SHA, not to
+            # this PR or its base. `.pull_requests` is empty for this App, so
+            # we cannot close that. See the header. Do not "fix" this by also
+            # requiring a reaction, a Codex comment, or `.pull_requests`.
             REVIEW_OK=$(echo "$CHECKS" | jq --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
               '[.[] | select(.name == $n and .app.slug == $a
                              and .status == "completed" and .conclusion == "success")] | length')
@@ -383,7 +470,7 @@ jobs:
             gh pr merge "$PR_NUMBER" --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO" && continue
             # Deliberately NO `--auto` fallback. Queuing native auto-merge hands
             # the decision to GitHub, which merges once the blocking requirement
-            # clears WITHOUT re-running anything here - Gates 1-3 and the head
+            # clears WITHOUT re-running anything here - Gates 0-3 and the head
             # pin are all bypassed. The */10 sweep retries instead, re-evaluating
             # every gate against the head as it is at that moment. A blocked PR
             # waits; it does not slip through.
