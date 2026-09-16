@@ -19,12 +19,34 @@ name: Auto-Merge when Checks Green and Reviews In
 # unreadable: masking a gh/API failure as "no guarded files" would let
 # exactly the PR this gate exists for through.
 #
+# The list-PR-files endpoint returns at most 3000 files. `gh --paginate`
+# stops when GitHub reports no further pages, so a truncated set still
+# looks like a successful complete list. Gate 0 therefore compares the
+# returned object count to `.changed_files` and HOLDS if they differ, and
+# HOLDS at `changed_files >= 3000` even when the counts match — we cannot
+# tell a complete 3000-file PR from a truncated larger one. A truncated
+# list is never treated as "no guarded paths".
+#
 # Bound to BOTH head and base. The file list is the effective diff against
-# the PR's current base; `gh pr merge --match-head-commit` only pins the
-# head. Immediately before merge the base SHA is re-fetched and Gate 0 is
-# run again. A retarget (or any other base SHA change) HOLDS — the next
-# sweep re-evaluates from scratch against the new base. Do not merge on a
-# stale Gate 0 result.
+# the PR's current base. GitHub's merge API has no expectedBaseOid;
+# `gh pr merge --match-head-commit` only pins the head. Pinning the base
+# by a local squash + `git push --force-with-lease=refs/heads/<base>:<sha>`
+# is deliberately NOT used: this workflow is the org-wide canonical
+# auto-merge, it must not --admin, and a direct push to the default branch
+# would bypass per-repo rulesets (required PRs, required checks).
+#
+# Strongest close that still respects those rulesets:
+#   1. Last head+base re-read and Gate 0 re-check run immediately before
+#      merge, with no unrelated work between them.
+#   2. After a successful squash, confirm the new commit's parent is the
+#      locked base SHA. A mismatch is a hard ::error:: (retarget or base
+#      movement between lock and merge). This job then fails. We cannot
+#      unmerge.
+#
+# Residual TOCTOU (accepted, detected after the fact): between the merge
+# RPC and GitHub applying it, a retarget can still land. There is no API
+# to prevent that. Detection is the post-merge parent check. Do not
+# "fix" this with --admin, a force-push to main, or native --auto merge.
 #
 # ── Gate 2 is the reviewer's CHECK on the head SHA (2026-09-13) ────────────
 # Greptile (the org-wide `greptile-apps` GitHub App) replaced PR Autopilot as
@@ -262,27 +284,98 @@ jobs:
 
           # Gate 0: hold a PR whose effective diff edits reviewer/gate config.
           # Reads filename AND previous_filename so a rename cannot dodge it.
-          # Fail CLOSED on an unreadable file list. Used at the start of
-          # evaluation AND immediately before merge (the file list is against
-          # the current base; merge only pins the head SHA).
+          # Fail CLOSED on an unreadable OR incomplete file list (GitHub caps
+          # list-PR-files at 3000). $3 is the PR JSON that supplied
+          # changed_files — do not re-fetch it here, so the count and the
+          # file list stay on one snapshot. Used at evaluation start AND
+          # immediately before merge.
           GATE0_RE='(^|/)(CLAUDE\.md|AGENTS\.md|\.cursorrules)$|(^|/)\.claude/|(^|/)\.greptile/|(^|/)\.github/workflows/auto-merge\.yml$'
+          GATE0_FILE_CAP=3000
+          GATE0_RACE=0
           gate0_hold_if_guarded() {
-            local pr="$1" why="$2" changed guarded
+            local pr="$1" why="$2" pr_json="$3"
+            local changed_files files_json n_listed guarded
             if [ -z "${GATE0_RE}" ]; then
               echo "::error::GATE0_RE is empty — refusing to merge."
               return 1
             fi
-            if ! changed=$(gh api "/repos/$REPO/pulls/$pr/files" --paginate \
-                 --jq '.[] | .filename, (.previous_filename // empty)'); then
+            if [ -z "$pr_json" ]; then
+              echo "::error::Gate 0 ($why) missing PR payload for #$pr — refusing to merge."
+              return 1
+            fi
+            changed_files=$(echo "$pr_json" | jq -r '.changed_files')
+            case "$changed_files" in
+              ''|*[!0-9]*)
+                echo "::error::Could not read changed_files for #$pr ($why) — refusing to merge."
+                return 1
+                ;;
+            esac
+            # A truncated page chain still looks like success. Hold at the
+            # cap even when listed == 3000: that cannot be distinguished
+            # from a truncated larger PR.
+            if [ "$changed_files" -ge "$GATE0_FILE_CAP" ]; then
+              echo "::error::PR #$pr has $changed_files changed files, at or above the ${GATE0_FILE_CAP}-file list cap ($why) — refusing to merge."
+              return 1
+            fi
+            if ! files_json=$(gh api "/repos/$REPO/pulls/$pr/files" --paginate --jq '.[]' | jq -s '.'); then
               echo "::error::Could not read changed files for #$pr ($why) — refusing to merge."
               return 1
             fi
-            guarded=$(printf '%s\n' "$changed" | grep -Ei "$GATE0_RE" || true)
+            if ! echo "$files_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+              echo "::error::Unreadable changed-file list for #$pr ($why) — refusing to merge."
+              return 1
+            fi
+            n_listed=$(echo "$files_json" | jq 'length')
+            case "$n_listed" in
+              ''|*[!0-9]*)
+                echo "::error::Could not count changed files for #$pr ($why) — refusing to merge."
+                return 1
+                ;;
+            esac
+            if [ "$n_listed" -ne "$changed_files" ]; then
+              echo "::error::PR #$pr changed-file list incomplete (listed=$n_listed changed_files=$changed_files, $why) — refusing to merge."
+              return 1
+            fi
+            guarded=$(echo "$files_json" | jq -r '.[] | .filename, (.previous_filename // empty)' \
+              | grep -Ei "$GATE0_RE" || true)
             if [ -n "$guarded" ]; then
               echo "::notice::PR #$pr held — edits reviewer/gate configuration, needs a human merge:"
               echo "$guarded" | sed 's/^/  - /'
               return 1
             fi
+            return 0
+          }
+
+          # After a squash merge, the new tip must parent the base SHA we
+          # locked. GitHub has no expectedBaseOid; this is the detect-after
+          # close for a retarget between lock and merge. Cannot unmerge.
+          verify_squash_parent() {
+            local pr="$1" locked_base="$2" locked_ref="$3"
+            local merged_json merge_sha parent merged
+            if ! merged_json=$(gh api "/repos/$REPO/pulls/$pr"); then
+              echo "::error::Could not re-read PR #$pr after merge — cannot verify Gate 0 base pin."
+              return 1
+            fi
+            merged=$(echo "$merged_json" | jq -r '.merged')
+            merge_sha=$(echo "$merged_json" | jq -r '.merge_commit_sha')
+            if [ "$merged" != "true" ] || [ -z "$merge_sha" ] || [ "$merge_sha" = "null" ]; then
+              echo "::error::PR #$pr merge reported success but merge commit is missing — cannot verify Gate 0 base pin."
+              return 1
+            fi
+            if ! parent=$(gh api "/repos/$REPO/commits/$merge_sha" --jq '.parents[0].sha'); then
+              echo "::error::Could not read squash parent of $merge_sha for #$pr — cannot verify Gate 0 base pin."
+              return 1
+            fi
+            if [ -z "$parent" ] || [ "$parent" = "null" ]; then
+              echo "::error::Squash $merge_sha for #$pr has no parent — cannot verify Gate 0 base pin."
+              return 1
+            fi
+            if [ "$parent" != "$locked_base" ]; then
+              echo "::error::Gate 0 base-race on #$pr: squash $merge_sha parent $parent is not locked base $locked_base (ref $locked_ref). A retarget or base movement between lock and merge can put guarded config into the landed diff. Manual inspection required; this workflow cannot unmerge."
+              return 1
+            fi
+            printf 'Gate 0 post-merge OK: squash %s parents locked %s (%s).\n' \
+              "${merge_sha:0:7}" "${locked_base:0:7}" "$locked_ref"
             return 0
           }
 
@@ -309,6 +402,7 @@ jobs:
             PR=$(gh api "/repos/$REPO/pulls/$PR_NUMBER")
             SHA=$(echo "$PR"    | jq -r '.head.sha')
             BASE=$(echo "$PR"   | jq -r '.base.sha')
+            BASE_REF=$(echo "$PR" | jq -r '.base.ref')
             STATE=$(echo "$PR"  | jq -r '.state')
             DRAFT=$(echo "$PR"  | jq -r '.draft')
             PENDING_REVIEWERS=$(echo "$PR" | jq '([.requested_reviewers[]?.login] + [.requested_teams[]?.slug]) | length')
@@ -317,8 +411,9 @@ jobs:
               echo "::error::Could not resolve HEAD SHA for #$PR_NUMBER — skipping."
               continue
             fi
-            if [ -z "$BASE" ] || [ "$BASE" = "null" ]; then
-              echo "::error::Could not resolve base SHA for #$PR_NUMBER — refusing to merge."
+            if [ -z "$BASE" ] || [ "$BASE" = "null" ] \
+               || [ -z "$BASE_REF" ] || [ "$BASE_REF" = "null" ]; then
+              echo "::error::Could not resolve base SHA/ref for #$PR_NUMBER — refusing to merge."
               continue
             fi
             [ "$STATE" != "open" ] && { echo "state=$STATE — skip."; continue; }
@@ -342,7 +437,7 @@ jobs:
             # no-match status, and read `previous_filename` too — a rename away
             # from a guarded path (AGENTS.md -> docs/notes.md) otherwise shows
             # only its unguarded destination.
-            gate0_hold_if_guarded "$PR_NUMBER" "initial" || continue
+            gate0_hold_if_guarded "$PR_NUMBER" "initial" "$PR" || continue
 
             # ── Gate 1: check-runs on the current head ──────────────────────
             CHECKS=$(gh api "/repos/$REPO/commits/$SHA/check-runs" --paginate --jq '.check_runs[]' | jq -s '.')
@@ -493,49 +588,58 @@ jobs:
             fi
             echo "Gate 3 OK: no unresolved review findings."
 
-            # Revalidate Gate 0 against the CURRENT base immediately before
-            # merge. Greptile P1 on #32: the first file-list query is against
-            # whatever base the PR had then, but merge only pins the head.
-            # A retarget after that query can put guarded config into the
-            # effective diff while --match-head-commit still succeeds.
-            # Fail CLOSED if the PR or file list cannot be re-read. A changed
-            # base HOLDS (next sweep re-evaluates from scratch). Guarded paths
-            # on the re-read HOLD for a human merge.
-            if ! PR_NOW=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
+            # Merge-time Gate 0. Order is load-bearing: files check first,
+            # then the last head+base re-read, then merge with nothing else
+            # in between. GitHub has no expectedBaseOid; --match-head-commit
+            # only pins the head. A retarget after the lock is detected by
+            # verify_squash_parent (squash parent must be $BASE).
+            if ! PR_PRE=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
               echo "::error::Could not re-read PR #$PR_NUMBER before merge — refusing to merge."
               continue
             fi
-            SHA_NOW=$(echo "$PR_NOW"  | jq -r '.head.sha')
-            BASE_NOW=$(echo "$PR_NOW" | jq -r '.base.sha')
+            SHA_NOW=$(echo "$PR_PRE"  | jq -r '.head.sha')
+            BASE_NOW=$(echo "$PR_PRE" | jq -r '.base.sha')
+            BASE_REF_NOW=$(echo "$PR_PRE" | jq -r '.base.ref')
             if [ -z "$SHA_NOW" ] || [ "$SHA_NOW" = "null" ] \
-               || [ -z "$BASE_NOW" ] || [ "$BASE_NOW" = "null" ]; then
-              echo "::error::Could not resolve head/base SHA for #$PR_NUMBER before merge — refusing to merge."
+               || [ -z "$BASE_NOW" ] || [ "$BASE_NOW" = "null" ] \
+               || [ -z "$BASE_REF_NOW" ] || [ "$BASE_REF_NOW" = "null" ]; then
+              echo "::error::Could not resolve head/base for #$PR_NUMBER before merge — refusing to merge."
               continue
             fi
             if [ "$SHA_NOW" != "$SHA" ]; then
               echo "::notice::PR #$PR_NUMBER head moved since evaluation — leaving it for the next sweep."
               continue
             fi
-            if [ "$BASE_NOW" != "$BASE" ]; then
-              echo "::notice::PR #$PR_NUMBER base moved since Gate 0 ($BASE -> $BASE_NOW) — holding; next sweep re-evaluates against the new base."
+            if [ "$BASE_NOW" != "$BASE" ] || [ "$BASE_REF_NOW" != "$BASE_REF" ]; then
+              echo "::notice::PR #$PR_NUMBER base moved since Gate 0 ($BASE_REF@$BASE -> $BASE_REF_NOW@$BASE_NOW) — holding; next sweep re-evaluates against the new base."
               continue
             fi
-            gate0_hold_if_guarded "$PR_NUMBER" "pre-merge" || continue
-            # The file list is computed against whatever base the PR has at
-            # query time. Re-read head+base after that query so a retarget
-            # during the check cannot slip through --match-head-commit.
+            gate0_hold_if_guarded "$PR_NUMBER" "pre-merge" "$PR_PRE" || continue
+            echo "Merging PR #$PR_NUMBER (Gate 0 revalidated)..."
+            # Last head+base re-read. Local jq only between here and merge.
             if ! PR_LOCK=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
               echo "::error::Could not re-read PR #$PR_NUMBER before merge — refusing to merge."
               continue
             fi
             if [ "$(echo "$PR_LOCK" | jq -r '.head.sha')" != "$SHA" ] \
-               || [ "$(echo "$PR_LOCK" | jq -r '.base.sha')" != "$BASE" ]; then
+               || [ "$(echo "$PR_LOCK" | jq -r '.base.sha')" != "$BASE" ] \
+               || [ "$(echo "$PR_LOCK" | jq -r '.base.ref')" != "$BASE_REF" ]; then
               echo "::notice::PR #$PR_NUMBER head/base changed during Gate 0 revalidation — holding."
               continue
             fi
+            PRE_N=$(echo "$PR_PRE"  | jq -r '.changed_files')
+            LOCK_N=$(echo "$PR_LOCK" | jq -r '.changed_files')
+            if [ "$PRE_N" != "$LOCK_N" ]; then
+              echo "::notice::PR #$PR_NUMBER changed_files moved during Gate 0 ($PRE_N -> $LOCK_N) — holding."
+              continue
+            fi
 
-            echo "Merging PR #$PR_NUMBER..."
-            gh pr merge "$PR_NUMBER" --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO" && continue
+            if gh pr merge "$PR_NUMBER" --squash --match-head-commit "$SHA" --delete-branch --repo "$REPO"; then
+              if ! verify_squash_parent "$PR_NUMBER" "$BASE" "$BASE_REF"; then
+                GATE0_RACE=1
+              fi
+              continue
+            fi
             # Deliberately NO `--auto` fallback. Queuing native auto-merge hands
             # the decision to GitHub, which merges once the blocking requirement
             # clears WITHOUT re-running anything here - Gates 0-3 and the head
@@ -544,3 +648,8 @@ jobs:
             # waits; it does not slip through.
             echo "::notice::PR #$PR_NUMBER not mergeable yet - leaving it for the next sweep."
           done
+
+          if [ "$GATE0_RACE" -ne 0 ]; then
+            echo "::error::One or more squash merges landed without a verified Gate 0 base pin."
+            exit 1
+          fi
