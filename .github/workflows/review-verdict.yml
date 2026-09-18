@@ -18,6 +18,15 @@ name: Review verdict
 # The author of the last push is never evidence for that head. Skip notices
 # never count.
 #
+# RESIDUAL (evidence 2 only): a Greptile check binds to a commit, not a PR.
+# If two PRs share a head and BOTH were open when the check started, and one
+# is then closed, the check is credited to the survivor although it may have
+# reviewed the other PR's diff against a different base. Requiring the check
+# to START after this PR opened closes the case where the other PR came first
+# (Codex, .github#34). The both-open-at-start case is not detectable here:
+# GitHub lists only OPEN PRs for a commit not yet on the default branch.
+# Evidence 1 (a PR-scoped review object) has no such gap.
+#
 # ── Three things changed from the advisory pilot, all load-bearing ─────────
 # 1. NO EVIDENCE IS `action_required`, NEVER `neutral`. GitHub treats neutral,
 #    skipped and success as passing a required check; the pilot's neutral
@@ -383,9 +392,13 @@ jobs:
               return 1
             fi
 
-            completed=$(echo "$latest" | jq -r '.completed_at // empty')
+            # Bind to THIS PR in time: the check must have STARTED after this PR
+            # existed, not merely completed after. Otherwise a review Greptile began
+            # for another PR at the same head (since closed) counts here (Codex on
+            # .github#34). See the RESIDUAL note in the header.
+            completed=$(echo "$latest" | jq -r '.started_at // empty')
             if [ -z "$completed" ]; then
-              fail_closed_reason "${REQUIRED_REVIEW_CHECK} has no completed_at, so it cannot be shown to post-date this pull request"
+              fail_closed_reason "${REQUIRED_REVIEW_CHECK} has no started_at, so it cannot be shown to post-date this pull request"
               return 1
             fi
             # -r is load-bearing: without it jq prints "before" WITH quotes, the
@@ -400,11 +413,11 @@ jobs:
                 elif $cc >= $pp then "ok"
                 else "before" end')
             if [ "$pr_created_ok" = "unreadable" ]; then
-              fail_closed_reason "could not compare ${REQUIRED_REVIEW_CHECK} completed_at with the pull request created_at"
+              fail_closed_reason "could not compare ${REQUIRED_REVIEW_CHECK} started_at with the pull request created_at"
               return 1
             fi
             if [ "$pr_created_ok" = "before" ]; then
-              fail_closed_reason "${REQUIRED_REVIEW_CHECK} completed before this pull request existed, so it cannot have been a review of this PR"
+              fail_closed_reason "${REQUIRED_REVIEW_CHECK} started before this pull request existed, so it cannot be attributed to this PR"
               return 1
             fi
             # Fail closed on anything but an explicit "ok".
@@ -413,7 +426,7 @@ jobs:
               return 1
             fi
 
-            EVIDENCE="a successful ${REQUIRED_REVIEW_CHECK} check on this head, published by the ${REQUIRED_REVIEW_APP} app and attributable to this pull request (this is the only open PR with that head, and the check completed after the PR opened). Reactions were ignored"
+            EVIDENCE="a successful ${REQUIRED_REVIEW_CHECK} check on this head, published by the ${REQUIRED_REVIEW_APP} app and attributable to this pull request (this is the only open PR with that head, and the check started after the PR opened). Reactions were ignored"
             return 0
           }
 
