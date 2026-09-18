@@ -3,11 +3,27 @@
   "target": "branch",
   "enforcement": "active",
   "conditions": {
-    "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] },
-    "repository_name": { "include": ["aaa-client-dashboard", "opportunity-builder"], "exclude": [], "protected": false }
+    "ref_name": {
+      "include": [
+        "~DEFAULT_BRANCH"
+      ],
+      "exclude": []
+    },
+    "repository_name": {
+      "include": [
+        "aaa-client-dashboard",
+        "opportunity-builder"
+      ],
+      "exclude": [],
+      "protected": false
+    }
   },
   "bypass_actors": [
-    { "actor_id": null, "actor_type": "OrganizationAdmin", "bypass_mode": "pull_request" }
+    {
+      "actor_id": null,
+      "actor_type": "OrganizationAdmin",
+      "bypass_mode": "pull_request"
+    }
   ],
   "rules": [
     {
@@ -15,7 +31,12 @@
       "parameters": {
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
-        "required_status_checks": [ { "context": "review/verdict", "integration_id": 15368 } ]
+        "required_status_checks": [
+          {
+            "context": "review/verdict",
+            "integration_id": 15368
+          }
+        ]
       }
     },
     {
@@ -26,14 +47,30 @@
         "require_code_owner_review": false,
         "require_last_push_approval": false,
         "required_review_thread_resolution": true,
-        "allowed_merge_methods": ["squash"],
+        "allowed_merge_methods": [
+          "squash"
+        ],
         "required_reviewers": [
           {
-            "reviewer": { "id": 17698930, "type": "Team" },
+            "reviewer": {
+              "id": 17698930,
+              "type": "Team"
+            },
             "minimum_approvals": 1,
-            "file_patterns": [".github/**", "CLAUDE.md", "**/CLAUDE.md", "AGENTS.md", "**/AGENTS.md", ".cursorrules", ".claude/**", ".greptile/**", "greptile.json"]
+            "file_patterns": [
+              ".github/**",
+              "CLAUDE.md",
+              "**/CLAUDE.md",
+              "AGENTS.md",
+              "**/AGENTS.md",
+              ".cursorrules",
+              ".claude/**",
+              ".greptile/**",
+              "greptile.json"
+            ]
           }
-        ]
+        ],
+        "require_extra_approval_for_unattributed_changes": true
       }
     }
   ]
