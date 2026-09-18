@@ -51,7 +51,7 @@ name: Review verdict
 #                         the reviewer, exiting early once evidence appears.
 #   pull_request_review — a review landed; re-evaluate immediately.
 #   check_run           — Greptile finished; re-evaluate immediately.
-#   workflow_dispatch   — re-evaluate one PR by number.
+#   workflow_dispatch   — re-evaluate one PR: pr_number AND its head_sha.
 # A new head always gets a new check. Re-runs POST a fresh completed run of
 # the same name; the latest one is what GitHub uses.
 
@@ -66,6 +66,10 @@ on:
     inputs:
       pr_number:
         description: PR number to evaluate
+        required: true
+        type: string
+      head_sha:
+        description: Full head SHA of that PR (joins that commit's concurrency group; a run for a superseded SHA publishes nothing useful)
         required: true
         type: string
 
@@ -93,9 +97,11 @@ concurrency:
   # #36 round 1 re-read the current head in an old run (published outside its
   # group); round 2 let skipped check_runs cancel publishers. All Codex finds.
   #
-  # workflow_dispatch carries no head SHA and is keyed by PR number: an
-  # operator action, not serialized with the event-driven runs.
-  group: review-verdict-${{ github.repository }}-${{ ((github.event_name != 'check_run' || (github.event.check_run.name == 'Greptile Review' && github.event.check_run.app.slug == 'greptile-apps')) && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.check_run.head_sha || format('dispatch-pr-{0}', github.event.inputs.pr_number)) || format('skipped-{0}', github.run_id) }}
+  # workflow_dispatch must name the head SHA (input `head_sha`), so a manual
+  # run joins that commit's group and is pinned to it like every other run
+  # (Codex on opportunity-builder#165 / aaa-client-dashboard#243: keyed by PR
+  # number it could publish a stale `success` after a dismissal).
+  group: review-verdict-${{ github.repository }}-${{ ((github.event_name != 'check_run' || (github.event.check_run.name == 'Greptile Review' && github.event.check_run.app.slug == 'greptile-apps')) && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.check_run.head_sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -124,7 +130,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           PR_ACTION: ${{ github.event.action }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number || '' }}
-          HEAD_SHA: ${{ github.event.check_run.head_sha || github.event.pull_request.head.sha || '' }}
+          HEAD_SHA: ${{ github.event.check_run.head_sha || github.event.pull_request.head.sha || github.event.inputs.head_sha || '' }}
           DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           # Any one of these satisfies evidence 1. claude[bot] stays out: its
           # reviews have been skip notices.
