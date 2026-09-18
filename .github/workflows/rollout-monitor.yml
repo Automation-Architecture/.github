@@ -32,6 +32,7 @@ name: Rollout PR Monitor
 #   feat/auto-merge-workflow      → auto-merge.yml      (legacy single-file)
 #   feat/dashboard-sync-workflow  → dashboard-sync.yml
 #   feat/sentry-release-workflow  → sentry-release.yml
+#   feat/review-verdict-workflow  → review-verdict.yml (required by the aaa-merge-gates ruleset)
 
 on:
   schedule:
@@ -76,6 +77,7 @@ jobs:
               "feat/auto-merge-workflow":     [AM],
               "feat/dashboard-sync-workflow": [".github/workflows/dashboard-sync.yml"],
               "feat/sentry-release-workflow": [".github/workflows/sentry-release.yml"],
+              "feat/review-verdict-workflow": [".github/workflows/review-verdict.yml"],
           }
 
           _FAILING = frozenset({"failure", "timed_out", "cancelled", "action_required"})

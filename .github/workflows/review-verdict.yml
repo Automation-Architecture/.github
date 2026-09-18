@@ -1,0 +1,559 @@
+name: Review verdict
+
+# CANONICAL COPY (Automation-Architecture/.github). Edit here, never in a repo.
+# Promoted from the aaa-client-dashboard advisory pilot (AAA-730) per the ADR
+# "the merge gate consumes a verdict we own" (aaa-runbooks
+# reference/pr-review-verdict-adr.md, AAA-728).
+#
+# Publishes one check-run named `review/verdict` on the PR head. The
+# `aaa-merge-gates` org ruleset requires it (source: GitHub Actions) on the
+# repos it targets; GitHub then enforces it at merge time, with native
+# auto-merge doing the merging.
+#
+# Evidence counted (nothing else, reactions never):
+#   1. a review by a trusted reviewer whose commit_id is this head;
+#   2. a successful `Greptile Review` check on this head from greptile-apps,
+#      attributable to this PR (only open PR at the head; completed after the
+#      PR was opened).
+# The author of the last push is never evidence for that head. Skip notices
+# never count.
+#
+# ── Three things changed from the advisory pilot, all load-bearing ─────────
+# 1. NO EVIDENCE IS `action_required`, NEVER `neutral`. GitHub treats neutral,
+#    skipped and success as passing a required check; the pilot's neutral
+#    "No trusted evidence" would have let an unreviewed PR through.
+# 2. `pull_request_target`, not `pull_request`, so this file and its script
+#    come from the DEFAULT BRANCH, not the PR. Safe because nothing here checks
+#    out or executes PR code: it only reads the API. Do not add a checkout of
+#    the PR head to this workflow.
+# 3. The script is inline, so there is one file to roll out and no script a PR
+#    could swap under a trusted workflow.
+#
+# ── What this does NOT defend against, and what does ─────────────────────
+# `pull_request_review` runs the workflow from the PR's merge ref, and every
+# workflow posts checks as the same GitHub Actions app, so a PR that edits
+# `.github/workflows/` can publish its own `review/verdict`. A dedicated App
+# does not change that: a same-repo PR's workflows can read its key from the
+# repo secrets. The defence is the ruleset's path rule: a PR touching
+# `.github/**` (and the other reviewer-config paths) needs a human.
+#
+# Triggers:
+#   pull_request_target — PR opened/pushed/edited; waits up to WAIT_SECONDS for
+#                         the reviewer, exiting early once evidence appears.
+#   pull_request_review — a review landed; re-evaluate immediately.
+#   check_run           — Greptile finished; re-evaluate immediately.
+#   workflow_dispatch   — re-evaluate one PR by number.
+# A new head always gets a new check. Re-runs POST a fresh completed run of
+# the same name; the latest one is what GitHub uses.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  pull_request_review:
+    types: [submitted, dismissed]
+  check_run:
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to evaluate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+
+concurrency:
+  group: review-verdict-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.event.check_run.head_sha || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: >
+      github.event_name != 'check_run' ||
+      (github.event.check_run.name == 'Greptile Review' &&
+       github.event.check_run.app.slug == 'greptile-apps')
+    runs-on: ubuntu-latest
+    steps:
+      # No checkout: this job reads the GitHub API only. Keep it that way;
+      # under pull_request_target a checkout of the PR head would run
+      # untrusted code with a write token.
+      - name: Evaluate and publish review/verdict
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number || '' }}
+          HEAD_SHA: ${{ github.event.check_run.head_sha || github.event.pull_request.head.sha || '' }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # Any one of these satisfies evidence 1. claude[bot] stays out: its
+          # reviews have been skip notices.
+          TRUSTED_REVIEWERS: "greptile-apps[bot],chatgpt-codex-connector[bot]"
+          REQUIRED_REVIEW_CHECK: "Greptile Review"
+          REQUIRED_REVIEW_APP: "greptile-apps"
+          # Same string as auto-merge.yml's REVIEW_SKIP_PATTERN. Keep in step.
+          REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit"
+          # Greptile lands ~2-11 min after a push. Other events evaluate once.
+          WAIT_SECONDS: ${{ github.event_name == 'pull_request_target' && '600' || '0' }}
+          PUBLISH: "1"
+        run: |
+          # review/verdict adapter (AAA-728 / AAA-730), canonical copy.
+          #
+          # Reads reviewer output for one PR at one head and publishes a check-run named
+          # `review/verdict` on that head. The `aaa-merge-gates` org ruleset requires it
+          # on the repos it targets. The adapter judges no code; Greptile remains the
+          # reviewer.
+          #
+          # Evidence, strongest first (nothing else counts; reactions never count):
+          #   1. a review object by a trusted reviewer whose commit_id is the head;
+          #   2. a successful `Greptile Review` check on the head from greptile-apps,
+          #      attributable to this PR.
+          #
+          # Fails closed: no evidence means no successful verdict. A vendor renaming a
+          # check or rewording a comment can cost a verdict; it can never buy one.
+          set -euo pipefail
+
+          REPO="${REPO:?REPO is required}"
+          EVENT="${EVENT:-workflow_dispatch}"
+          PR_NUMBER="${PR_NUMBER:-}"
+          HEAD_SHA_HINT="${HEAD_SHA:-}"
+          PR_ACTION="${PR_ACTION:-}"
+          PUBLISH="${PUBLISH:-1}"
+          WAIT_SECONDS="${WAIT_SECONDS:-0}"
+          TRUSTED_REVIEWERS="${TRUSTED_REVIEWERS:-greptile-apps[bot],chatgpt-codex-connector[bot]}"
+          REQUIRED_REVIEW_CHECK="${REQUIRED_REVIEW_CHECK:-Greptile Review}"
+          REQUIRED_REVIEW_APP="${REQUIRED_REVIEW_APP:-greptile-apps}"
+          # Canonical copy: Automation-Architecture/.github .github/workflows/auto-merge.yml
+          # (AAA-711: the better idea; skip notices are status, not a verdict).
+          REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit}"
+
+          CHECK_NAME="review/verdict"
+
+          HEAD_SHA=""
+          BASE_REF=""
+          BASE_SHA=""
+          PR_CREATED=""
+          PR_STATE=""
+          EVIDENCE=""
+          MISSING_REASONS=()
+          # NEVER "neutral": GitHub counts neutral, skipped and success as passing a
+          # required check, so a neutral "no evidence" verdict would let an unreviewed
+          # PR through the ruleset. action_required is completed but not passing.
+          CONCLUSION="action_required"
+          TITLE="Waiting for a trusted review"
+
+          fail_closed_reason() {
+            MISSING_REASONS+=("$1")
+          }
+
+          require_config() {
+            if [ -z "${TRUSTED_REVIEWERS// /}" ] || [ -z "${REVIEW_SKIP_PATTERN// /}" ] \
+               || [ -z "${REQUIRED_REVIEW_CHECK// /}" ] || [ -z "${REQUIRED_REVIEW_APP// /}" ]; then
+              echo "::error::TRUSTED_REVIEWERS / REVIEW_SKIP_PATTERN / required check name or app is empty — refusing a successful verdict."
+              fail_closed_reason "adapter configuration is empty, so no verdict can be issued"
+              return 1
+            fi
+            return 0
+          }
+
+          # Resolve the PR this run is about. pull_request / pull_request_review /
+          # workflow_dispatch bind by construction. check_run must look the SHA up, and
+          # refuses when two open PRs share the head (the leak AAA-711 recorded).
+          resolve_pr() {
+            if [ -n "$PR_NUMBER" ]; then
+              return 0
+            fi
+            if [ -z "$HEAD_SHA_HINT" ]; then
+              fail_closed_reason "no pull request number and no head SHA were provided"
+              return 1
+            fi
+            local associated
+            if ! associated=$(gh api --paginate "/repos/$REPO/commits/$HEAD_SHA_HINT/pulls"); then
+              fail_closed_reason "could not list pull requests for head $HEAD_SHA_HINT"
+              return 1
+            fi
+            local open_at_head
+            open_at_head=$(echo "$associated" | jq --arg sha "$HEAD_SHA_HINT" \
+              '[.[] | select(.state == "open" and .head.sha == $sha)]')
+            local n
+            n=$(echo "$open_at_head" | jq 'length')
+            if [ "$n" -eq 1 ]; then
+              PR_NUMBER=$(echo "$open_at_head" | jq -r '.[0].number')
+              return 0
+            fi
+            if [ "$n" -eq 0 ]; then
+              fail_closed_reason "no open pull request currently has head $HEAD_SHA_HINT"
+              HEAD_SHA="$HEAD_SHA_HINT"
+              return 1
+            fi
+            local listed
+            listed=$(echo "$open_at_head" | jq -r '[.[].number] | map("#\(.)") | join(", ")')
+            fail_closed_reason "head $HEAD_SHA_HINT is in multiple open PRs ($listed), so a check on this commit cannot be attributed to one of them"
+            HEAD_SHA="$HEAD_SHA_HINT"
+            return 1
+          }
+
+          load_pr() {
+            local pr_json
+            if ! pr_json=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
+              fail_closed_reason "could not read pull request #$PR_NUMBER"
+              return 1
+            fi
+            HEAD_SHA=$(echo "$pr_json" | jq -r '.head.sha // empty')
+            BASE_REF=$(echo "$pr_json" | jq -r '.base.ref // empty')
+            BASE_SHA=$(echo "$pr_json" | jq -r '.base.sha // empty')
+            PR_CREATED=$(echo "$pr_json" | jq -r '.created_at // empty')
+            PR_STATE=$(echo "$pr_json" | jq -r '.state // empty')
+            if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ] \
+               || [ -z "$BASE_REF" ] || [ -z "$BASE_SHA" ] || [ -z "$PR_CREATED" ]; then
+              fail_closed_reason "pull request #$PR_NUMBER is missing head SHA, base ref, base SHA, or created_at"
+              return 1
+            fi
+            return 0
+          }
+
+          # GitHub users who produced the head commit. A fixer (or anyone) is not
+          # trusted evidence for a head they just pushed — independence is load-bearing.
+          last_push_logins_json() {
+            local commit
+            if ! commit=$(gh api "/repos/$REPO/commits/$HEAD_SHA"); then
+              return 1
+            fi
+            echo "$commit" | jq '[.author.login // empty, .committer.login // empty] | map(select(length > 0)) | unique'
+          }
+
+          trusted_json() {
+            printf '%s\n' "$TRUSTED_REVIEWERS" \
+              | jq -R 'split(",") | map(sub("^\\s+";"") | sub("\\s+$";"")) | map(select(length > 0))'
+          }
+
+          # Evidence 1: review object, commit-pinned, PR-scoped, skip-notice excluded.
+          evidence_from_reviews() {
+            local reviews trusted pushers review_jq matched
+            if ! reviews=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews"); then
+              fail_closed_reason "could not read reviews for #$PR_NUMBER"
+              return 1
+            fi
+            trusted=$(trusted_json)
+            local pushers
+            if ! pushers=$(last_push_logins_json); then
+              fail_closed_reason "could not read the author of head $HEAD_SHA"
+              return 1
+            fi
+
+            review_jq='
+              [.[]
+                | select(
+                    (.user.login as $l | $t | index($l))
+                    and .commit_id == $sha
+                    and (.state | IN("PENDING", "DISMISSED") | not)
+                    and (((.body // "") | test($skip; "i")) | not)
+                    and ((.user.login as $l | $p | index($l)) | not)
+                  )
+              ]'
+
+            if ! matched=$(echo "$reviews" | jq --argjson t "$trusted" --argjson p "$pushers" \
+                  --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" "$review_jq"); then
+              fail_closed_reason "could not evaluate reviews against the skip pattern"
+              return 1
+            fi
+
+            local n logins
+            n=$(echo "$matched" | jq 'length')
+            if [ "$n" -gt 0 ]; then
+              logins=$(echo "$matched" | jq -r '[.[].user.login] | unique | join(", ")')
+              EVIDENCE="a trusted review of this head by ${logins}, pinned to commit ${HEAD_SHA:0:7} via the review's commit_id"
+              return 0
+            fi
+
+            # Explain why nothing counted, in plain words, so a held PR explains itself.
+            # Bind $l once: `as` does not leak into a sibling `and` clause.
+            local why
+            if ! why=$(echo "$reviews" | jq --argjson t "$trusted" --argjson p "$pushers" \
+              --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" '
+              def trusted: .user.login as $l | $t | index($l);
+              {
+                any:    [.[] | select(trusted)] | length,
+                skip:   [.[] | select(trusted and ((.body // "") | test($skip; "i")))] | length,
+                pusher: [.[] | select(trusted and .commit_id == $sha and (.user.login as $l | $p | index($l)))] | length,
+                stale:  [.[] | select(trusted and .commit_id != $sha)] | length
+              }'); then
+              fail_closed_reason "could not summarise reviews for #$PR_NUMBER"
+              return 1
+            fi
+            local any_trusted skip_hits pusher_hits stale
+            any_trusted=$(echo "$why" | jq -r '.any')
+            skip_hits=$(echo "$why" | jq -r '.skip')
+            pusher_hits=$(echo "$why" | jq -r '.pusher')
+            stale=$(echo "$why" | jq -r '.stale')
+
+            if [ "$any_trusted" -eq 0 ]; then
+              fail_closed_reason "no trusted reviewer ($(echo "$trusted" | jq -r 'join(", ")')) has submitted a review on this pull request"
+            else
+              [ "$stale" -gt 0 ] && fail_closed_reason "trusted review(s) exist but they cover an earlier commit, not this head"
+              [ "$skip_hits" -gt 0 ] && fail_closed_reason "trusted review(s) on this PR are skip notices (rate limit / quota / skipped) and never count"
+              [ "$pusher_hits" -gt 0 ] && fail_closed_reason "the author of the last push is not trusted evidence for this head"
+              if [ "$stale" -eq 0 ] && [ "$skip_hits" -eq 0 ] && [ "$pusher_hits" -eq 0 ]; then
+                fail_closed_reason "no trusted review of this head (dismissed or pending reviews do not count)"
+              fi
+            fi
+            return 1
+          }
+
+          # Evidence 2: Greptile's check on this commit, publisher-verified, then bound
+          # to THIS PR by the three tests in the ADR (unambiguous head attribution,
+          # recorded base, check completed after this PR existed). `.pull_requests` on
+          # the check is empty in practice for this App and is never consulted.
+          evidence_from_greptile_check() {
+            local checks greptile n associated open_at_head other_open completed pr_created_ok output_blob
+            if ! checks=$(gh api --paginate "/repos/$REPO/commits/$HEAD_SHA/check-runs" --jq '.check_runs[]' | jq -s '.'); then
+              fail_closed_reason "could not read check-runs on head $HEAD_SHA"
+              return 1
+            fi
+
+            greptile=$(echo "$checks" | jq --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
+              '[.[] | select(.name == $n and .app.slug == $a and .status == "completed")]
+               | sort_by(.completed_at // "") | reverse')
+
+            n=$(echo "$greptile" | jq 'length')
+            if [ "$n" -eq 0 ]; then
+              local named other
+              named=$(echo "$checks" | jq --arg n "$REQUIRED_REVIEW_CHECK" '[.[] | select(.name == $n)]')
+              if [ "$(echo "$named" | jq 'length')" -eq 0 ]; then
+                fail_closed_reason "no ${REQUIRED_REVIEW_CHECK} check on this head"
+              else
+                other=$(echo "$named" | jq -r '[.[].app.slug // "unknown"] | unique | join(", ")')
+                fail_closed_reason "${REQUIRED_REVIEW_CHECK} on this head was produced by ${other}, not ${REQUIRED_REVIEW_APP}"
+              fi
+              return 1
+            fi
+
+            local latest conclusion
+            latest=$(echo "$greptile" | jq '.[0]')
+            conclusion=$(echo "$latest" | jq -r '.conclusion // empty')
+            if [ "$conclusion" != "success" ]; then
+              fail_closed_reason "${REQUIRED_REVIEW_CHECK} from ${REQUIRED_REVIEW_APP} on this head concluded ${conclusion:-unknown}, not success"
+              return 1
+            fi
+
+            output_blob=$(echo "$latest" | jq -r '[.output.title // "", .output.summary // "", .output.text // ""] | join("\n")')
+            if echo "$output_blob" | grep -Eiq "$REVIEW_SKIP_PATTERN"; then
+              fail_closed_reason "${REQUIRED_REVIEW_CHECK} output is a skip notice and never counts"
+              return 1
+            fi
+
+            local pushers
+            if ! pushers=$(last_push_logins_json); then
+              fail_closed_reason "could not read the author of head $HEAD_SHA"
+              return 1
+            fi
+            if echo "$pushers" | jq -e --arg bot "greptile-apps[bot]" 'index($bot)' >/dev/null; then
+              fail_closed_reason "the author of the last push is greptile-apps[bot], who is not trusted evidence for this head"
+              return 1
+            fi
+
+            if ! associated=$(gh api --paginate "/repos/$REPO/commits/$HEAD_SHA/pulls"); then
+              fail_closed_reason "could not list pull requests associated with this head, so the check cannot be attributed"
+              return 1
+            fi
+
+            # Unambiguous attribution: PRs whose HEAD is this SHA. Counting every PR
+            # that merely *contains* the commit would refuse stacked PRs (fail closed
+            # that way is safe but noisier than we need). Two open PRs with the same
+            # head is the leak; stacked PRs have different heads.
+            open_at_head=$(echo "$associated" | jq --arg sha "$HEAD_SHA" \
+              '[.[] | select(.state == "open" and .head.sha == $sha)]')
+            other_open=$(echo "$open_at_head" | jq --argjson pr "$PR_NUMBER" \
+              '[.[] | select(.number != $pr)] | length')
+            local this_listed
+            this_listed=$(echo "$associated" | jq --argjson pr "$PR_NUMBER" \
+              '[.[] | select(.number == $pr)] | length')
+
+            if [ "$this_listed" -lt 1 ]; then
+              fail_closed_reason "GitHub does not list #$PR_NUMBER as a pull request for this head, so the check cannot be attributed to it"
+              return 1
+            fi
+            if [ "$other_open" -gt 0 ]; then
+              local listed
+              listed=$(echo "$open_at_head" | jq -r '[.[].number] | map("#\(.)") | join(", ")')
+              fail_closed_reason "this head is also the head of another open PR ($listed); a commit-scoped check cannot be attributed to one of them"
+              return 1
+            fi
+
+            completed=$(echo "$latest" | jq -r '.completed_at // empty')
+            if [ -z "$completed" ]; then
+              fail_closed_reason "${REQUIRED_REVIEW_CHECK} has no completed_at, so it cannot be shown to post-date this pull request"
+              return 1
+            fi
+            # -r is load-bearing: without it jq prints "before" WITH quotes, the
+            # string tests below never match, and a check from before this PR
+            # existed is accepted (the advisory pilot shipped exactly that).
+            pr_created_ok=$(jq -rn --arg c "$completed" --arg p "$PR_CREATED" '
+              def parse:
+                sub("\\.[0-9]+";"") | sub("\\+00:00$";"Z") | fromdateiso8601;
+              (try ($c | parse) catch null) as $cc
+              | (try ($p | parse) catch null) as $pp
+              | if $cc == null or $pp == null then "unreadable"
+                elif $cc >= $pp then "ok"
+                else "before" end')
+            if [ "$pr_created_ok" = "unreadable" ]; then
+              fail_closed_reason "could not compare ${REQUIRED_REVIEW_CHECK} completed_at with the pull request created_at"
+              return 1
+            fi
+            if [ "$pr_created_ok" = "before" ]; then
+              fail_closed_reason "${REQUIRED_REVIEW_CHECK} completed before this pull request existed, so it cannot have been a review of this PR"
+              return 1
+            fi
+            # Fail closed on anything but an explicit "ok".
+            if [ "$pr_created_ok" != "ok" ]; then
+              fail_closed_reason "could not establish that ${REQUIRED_REVIEW_CHECK} post-dates this pull request (got: ${pr_created_ok:-empty})"
+              return 1
+            fi
+
+            EVIDENCE="a successful ${REQUIRED_REVIEW_CHECK} check on this head, published by the ${REQUIRED_REVIEW_APP} app and attributable to this pull request (this is the only open PR with that head, and the check completed after the PR opened). Reactions were ignored"
+            return 0
+          }
+
+          evaluate_once() {
+            EVIDENCE=""
+            MISSING_REASONS=()
+            CONCLUSION="action_required"
+            TITLE="Waiting for a trusted review"
+
+            # Identity first so a fail-closed verdict can still land on the head SHA.
+            if ! resolve_pr; then
+              return 0
+            fi
+            if ! load_pr; then
+              return 0
+            fi
+
+            require_config || true
+            if [ ${#MISSING_REASONS[@]} -gt 0 ]; then
+              return 0
+            fi
+
+            if [ "$PR_STATE" != "open" ]; then
+              if [ "$PUBLISH" = "1" ]; then
+                fail_closed_reason "pull request #$PR_NUMBER is $PR_STATE"
+                return 0
+              fi
+              echo "::notice::#$PR_NUMBER is $PR_STATE — evaluating anyway because PUBLISH=0."
+            fi
+
+            if evidence_from_reviews; then
+              CONCLUSION="success"
+              TITLE="Reviewed"
+              return 0
+            fi
+            if evidence_from_greptile_check; then
+              CONCLUSION="success"
+              TITLE="Reviewed"
+              return 0
+            fi
+            fail_closed_reason "reactions never count, and nothing else is accepted as evidence"
+            return 0
+          }
+
+          build_summary() {
+            local evidence_text missing_text
+            if [ -n "$EVIDENCE" ]; then
+              evidence_text="$EVIDENCE"
+            else
+              if [ ${#MISSING_REASONS[@]} -eq 0 ]; then
+                missing_text="no trusted evidence was found"
+              else
+                missing_text=$(printf '%s; ' "${MISSING_REASONS[@]}" | sed 's/; $//')
+              fi
+              evidence_text="no successful verdict. ${missing_text}"
+            fi
+
+            cat <<EOF
+          \`review/verdict\` (AAA-728). Required by the \`aaa-merge-gates\` ruleset on the repos it targets.
+
+          - **PR:** #${PR_NUMBER:-unknown}
+          - **Base-ref:** ${BASE_REF:-unknown}
+          - **Base-sha:** ${BASE_SHA:-unknown}
+          - **Head-sha:** ${HEAD_SHA:-unknown}
+          - **Evidence:** ${evidence_text}
+
+          PR: ${PR_NUMBER:-}
+          Base-ref: ${BASE_REF:-}
+          Base-sha: ${BASE_SHA:-}
+          Head-sha: ${HEAD_SHA:-}
+          Evidence: ${evidence_text}
+          EOF
+          }
+
+          publish_check() {
+            local summary title conclusion sha
+            sha="${HEAD_SHA:-$HEAD_SHA_HINT}"
+            if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+              echo "::error::No head SHA to publish $CHECK_NAME on."
+              return 1
+            fi
+            summary=$(build_summary)
+            title="$TITLE"
+            conclusion="$CONCLUSION"
+            if [ ${#title} -gt 240 ]; then
+              title="${title:0:237}..."
+            fi
+
+            echo "Publishing $CHECK_NAME on ${sha:0:7} conclusion=$conclusion"
+            echo "$summary"
+
+            if [ "$PUBLISH" != "1" ]; then
+              echo "PUBLISH=0 — not writing a check-run."
+              return 0
+            fi
+
+            local payload
+            payload=$(jq -n \
+              --arg name "$CHECK_NAME" \
+              --arg sha "$sha" \
+              --arg conclusion "$conclusion" \
+              --arg title "$title" \
+              --arg summary "$summary" \
+              --arg details "${DETAILS_URL:-https://github.com/$REPO/pull/${PR_NUMBER:-}}" \
+              '{
+                name: $name,
+                head_sha: $sha,
+                status: "completed",
+                conclusion: $conclusion,
+                details_url: $details,
+                output: { title: $title, summary: $summary }
+              }')
+            echo "$payload" | gh api -X POST "/repos/$REPO/check-runs" --input - >/dev/null
+          }
+
+          # On pull_request_target we may arrive before Greptile has published. Wait (and exit
+          # early once evidence appears) so a verdict lands within a minute of the
+          # reviewer finishing even before this workflow exists on default-branch
+          # check_run / pull_request_review triggers.
+          if [ "$WAIT_SECONDS" -gt 0 ] && [ "$EVENT" = "pull_request_target" ] && [ "$PR_ACTION" != "edited" ]; then
+            :
+          else
+            WAIT_SECONDS=0
+          fi
+
+          deadline=$((SECONDS + WAIT_SECONDS))
+          while true; do
+            evaluate_once
+            if [ -n "$EVIDENCE" ] || [ "$SECONDS" -ge "$deadline" ]; then
+              break
+            fi
+            printf 'No evidence yet; waiting for a trusted review or %s — up to %ss.\n' \
+              "$REQUIRED_REVIEW_CHECK" "$WAIT_SECONDS"
+            sleep 20
+          done
+
+          publish_check
+          if [ -n "$EVIDENCE" ]; then
+            printf 'Verdict: success — %s\n' "$EVIDENCE"
+          else
+            missing_text="${MISSING_REASONS[*]}"
+            printf 'Verdict: no successful verdict — %s\n' "${missing_text:-nothing recorded}"
+          fi
