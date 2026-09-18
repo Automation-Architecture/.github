@@ -75,12 +75,27 @@ permissions:
   pull-requests: read
 
 concurrency:
-  # The event name is part of the group so a pull_request_review run can no
-  # longer cancel the write-capable pull_request_target poll for the same PR
-  # (Codex on aaa-client-dashboard#242). Runs of different events may overlap;
-  # evidence for a head only accumulates, so a later run reaches the same or
-  # a better verdict and the latest completed check is the one GitHub uses.
-  group: review-verdict-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.event.check_run.head_sha || github.run_id }}
+  # INVARIANT: only a run that will publish may enter the shared group. Every
+  # such run re-evaluates from scratch, so whatever it cancels is replaced by
+  # a fresh verdict. A run the job `if` skips (a non-Greptile check_run, a
+  # read-only review on a fork/Dependabot PR) gets a throwaway group, because
+  # workflow-level concurrency is applied BEFORE the job `if`: in the shared
+  # group it could cancel a publisher, notably a dismissal re-evaluation, and
+  # publish nothing, leaving a stale `success` as the latest check.
+  # The first operand below MUST equal the job `if` exactly. Change both.
+  #
+  # Shared key = the head SHA, and a run publishes only that SHA (see
+  # load_pr), so key and publish target always agree. Evidence for a head is
+  # not monotonic (a dismissed review revokes it), which is why publishers are
+  # serialized with cancel-in-progress rather than allowed to overlap.
+  #
+  # History: .github#35 keyed on the event name (fail-open on dismissal);
+  # #36 round 1 re-read the current head in an old run (published outside its
+  # group); round 2 let skipped check_runs cancel publishers. All Codex finds.
+  #
+  # workflow_dispatch carries no head SHA and is keyed by PR number: an
+  # operator action, not serialized with the event-driven runs.
+  group: review-verdict-${{ github.repository }}-${{ ((github.event_name != 'check_run' || (github.event.check_run.name == 'Greptile Review' && github.event.check_run.app.slug == 'greptile-apps')) && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.check_run.head_sha || format('dispatch-pr-{0}', github.event.inputs.pr_number)) || format('skipped-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -155,6 +170,7 @@ jobs:
           CHECK_NAME="review/verdict"
 
           HEAD_SHA=""
+          SUPERSEDED=0
           BASE_REF=""
           BASE_SHA=""
           PR_CREATED=""
@@ -232,6 +248,19 @@ jobs:
             if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ] \
                || [ -z "$BASE_REF" ] || [ -z "$BASE_SHA" ] || [ -z "$PR_CREATED" ]; then
               fail_closed_reason "pull request #$PR_NUMBER is missing head SHA, base ref, base SHA, or created_at"
+              return 1
+            fi
+            # A run evaluates and publishes ONLY the commit it was triggered for,
+            # which is the commit its concurrency group is keyed on. If the PR has
+            # moved on, the newer head belongs to a newer run in its own group; this
+            # run must not evaluate or publish there (Codex on .github#36: an old
+            # poll re-reading the current head published outside that head's group).
+            # It publishes action_required on its own, now-superseded commit, which
+            # no longer decides anything, and stops polling.
+            if [ -n "$HEAD_SHA_HINT" ] && [ "$HEAD_SHA" != "$HEAD_SHA_HINT" ]; then
+              fail_closed_reason "this run was triggered for ${HEAD_SHA_HINT:0:7}, but the PR head is now ${HEAD_SHA:0:7}; the newer head is evaluated by its own run"
+              HEAD_SHA="$HEAD_SHA_HINT"
+              SUPERSEDED=1
               return 1
             fi
             return 0
@@ -568,7 +597,7 @@ jobs:
           deadline=$((SECONDS + WAIT_SECONDS))
           while true; do
             evaluate_once
-            if [ -n "$EVIDENCE" ] || [ "$SECONDS" -ge "$deadline" ]; then
+            if [ -n "$EVIDENCE" ] || [ "$SUPERSEDED" = "1" ] || [ "$SECONDS" -ge "$deadline" ]; then
               break
             fi
             printf 'No evidence yet; waiting for a trusted review or %s — up to %ss.\n' \
