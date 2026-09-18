@@ -75,15 +75,28 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: review-verdict-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.event.check_run.head_sha || github.run_id }}
+  # The event name is part of the group so a pull_request_review run can no
+  # longer cancel the write-capable pull_request_target poll for the same PR
+  # (Codex on aaa-client-dashboard#242). Runs of different events may overlap;
+  # evidence for a head only accumulates, so a later run reaches the same or
+  # a better verdict and the latest completed check is the one GitHub uses.
+  group: review-verdict-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.event.check_run.head_sha || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   publish:
+    # pull_request_review on a fork or Dependabot PR gets a READ-ONLY token, so
+    # it cannot publish; skip it rather than fail. Those PRs get their verdict
+    # from the pull_request_target poll (up to WAIT_SECONDS), a Greptile
+    # check_run, or a workflow_dispatch. Never a pass: a skipped run publishes
+    # nothing, and the head keeps its action_required verdict until then.
     if: >
-      github.event_name != 'check_run' ||
-      (github.event.check_run.name == 'Greptile Review' &&
-       github.event.check_run.app.slug == 'greptile-apps')
+      (github.event_name != 'check_run' ||
+       (github.event.check_run.name == 'Greptile Review' &&
+        github.event.check_run.app.slug == 'greptile-apps')) &&
+      (github.event_name != 'pull_request_review' ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login != 'dependabot[bot]'))
     runs-on: ubuntu-latest
     steps:
       # No checkout: this job reads the GitHub API only. Keep it that way;
