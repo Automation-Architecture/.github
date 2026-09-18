@@ -165,6 +165,7 @@ jobs:
           CHECK_NAME="review/verdict"
 
           HEAD_SHA=""
+          SUPERSEDED=0
           BASE_REF=""
           BASE_SHA=""
           PR_CREATED=""
@@ -242,6 +243,19 @@ jobs:
             if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ] \
                || [ -z "$BASE_REF" ] || [ -z "$BASE_SHA" ] || [ -z "$PR_CREATED" ]; then
               fail_closed_reason "pull request #$PR_NUMBER is missing head SHA, base ref, base SHA, or created_at"
+              return 1
+            fi
+            # A run evaluates and publishes ONLY the commit it was triggered for,
+            # which is the commit its concurrency group is keyed on. If the PR has
+            # moved on, the newer head belongs to a newer run in its own group; this
+            # run must not evaluate or publish there (Codex on .github#36: an old
+            # poll re-reading the current head published outside that head's group).
+            # It publishes action_required on its own, now-superseded commit, which
+            # no longer decides anything, and stops polling.
+            if [ -n "$HEAD_SHA_HINT" ] && [ "$HEAD_SHA" != "$HEAD_SHA_HINT" ]; then
+              fail_closed_reason "this run was triggered for ${HEAD_SHA_HINT:0:7}, but the PR head is now ${HEAD_SHA:0:7}; the newer head is evaluated by its own run"
+              HEAD_SHA="$HEAD_SHA_HINT"
+              SUPERSEDED=1
               return 1
             fi
             return 0
@@ -578,7 +592,7 @@ jobs:
           deadline=$((SECONDS + WAIT_SECONDS))
           while true; do
             evaluate_once
-            if [ -n "$EVIDENCE" ] || [ "$SECONDS" -ge "$deadline" ]; then
+            if [ -n "$EVIDENCE" ] || [ "$SUPERSEDED" = "1" ] || [ "$SECONDS" -ge "$deadline" ]; then
               break
             fi
             printf 'No evidence yet; waiting for a trusted review or %s — up to %ss.\n' \
