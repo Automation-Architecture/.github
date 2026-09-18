@@ -36,8 +36,11 @@ name: Auto-Merge when Checks Green and Reviews In
 # would bypass per-repo rulesets (required PRs, required checks).
 #
 # Strongest close that still respects those rulesets:
-#   1. Last head+base re-read and Gate 0 re-check run immediately before
-#      merge, with no unrelated work between them.
+#   1. Last head+base re-read and Gate 0 re-check run just before merge.
+#      Only the review re-read (2026-09-18, below) sits between the lock
+#      and the merge: reviews have no pin and no after-the-fact detection,
+#      so they take the closest slot, and a base move in that window is
+#      still caught by check 2.
 #   2. After a successful squash, confirm the new commit's parent is the
 #      locked base SHA. A mismatch is a hard ::error:: (retarget or base
 #      movement between lock and merge). This job then fails. We cannot
@@ -185,9 +188,15 @@ name: Auto-Merge when Checks Green and Reviews In
 # found this on opportunity-builder#143: event-specific concurrency groups
 # let a pull_request_review run and a workflow_run for the same PR overlap.
 # The latest-decision CHANGES_REQUESTED count and the unresolved-thread
-# count are therefore re-read after the pre-merge Gate 0 check, as close to
-# the merge as the lock sequence allows. The remaining window is the final
-# PR_LOCK read, which is local jq only.
+# count are therefore re-read LAST, after the final PR_LOCK read.
+#
+# No order closes every window: GitHub has no merge-if-unchanged call, so
+# some API read always sits between a check and the merge. Order by what
+# else protects each check. The head is pinned by --match-head-commit. A
+# base move is detected after the merge by verify_squash_parent. A review
+# has neither, so it goes last. The residual is the review-read round trip
+# itself (two API calls) plus the merge RPC: a review submitted during it
+# is not seen. Accepted; do not move PR_LOCK back after the review read.
 #
 # ── Triggers ───────────────────────────────────────────────────────────────
 #   workflow_run          — CI finished. Usually BEFORE the review bots submit.
@@ -760,8 +769,8 @@ jobs:
             echo "Gate 3 OK: no unresolved review findings."
 
             # Merge-time Gate 0. Order is load-bearing: files check first,
-            # then the last head+base re-read, then merge with nothing else
-            # in between. GitHub has no expectedBaseOid; --match-head-commit
+            # then the last head+base re-read, then the review re-read, then
+            # merge. GitHub has no expectedBaseOid; --match-head-commit
             # only pins the head. A retarget after the lock is detected by
             # verify_squash_parent (squash parent must be $BASE).
             if ! PR_PRE=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
@@ -788,9 +797,33 @@ jobs:
             hold_if_merge_queue "$PR_NUMBER" "$BASE_REF" "pre-merge" || continue
             gate0_hold_if_guarded "$PR_NUMBER" "pre-merge" "$PR_PRE" || continue
 
-            # Re-read Gates 2-3's review state: a review landing since Gate 3
-            # does not move the head, so nothing above would see it. See the
-            # header. Fail closed on any unreadable answer.
+            # Last head+base re-read. After it: local jq, then the review
+            # re-read (two API reads), then merge. See the header for why the
+            # reviews, not head/base, sit closest to the merge.
+            if ! PR_LOCK=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
+              echo "::error::Could not re-read PR #$PR_NUMBER before merge — refusing to merge."
+              continue
+            fi
+            if [ "$(echo "$PR_LOCK" | jq -r '.head.sha')" != "$SHA" ] \
+               || [ "$(echo "$PR_LOCK" | jq -r '.base.sha')" != "$BASE" ] \
+               || [ "$(echo "$PR_LOCK" | jq -r '.base.ref')" != "$BASE_REF" ]; then
+              echo "::notice::PR #$PR_NUMBER head/base changed during Gate 0 revalidation — holding."
+              continue
+            fi
+            PRE_N=$(echo "$PR_PRE"  | jq -r '.changed_files')
+            LOCK_N=$(echo "$PR_LOCK" | jq -r '.changed_files')
+            if [ "$PRE_N" != "$LOCK_N" ]; then
+              echo "::notice::PR #$PR_NUMBER changed_files moved during Gate 0 ($PRE_N -> $LOCK_N) — holding."
+              continue
+            fi
+            hold_if_labelled "$PR_NUMBER" "$PR_LOCK" "merge-lock" || continue
+
+            # Re-read Gates 2-3's review state LAST, after the lock. A review
+            # landing since Gate 3 does not move the head, and nothing pins or
+            # detects it at merge time, so it gets the closest position. Head
+            # stays pinned by --match-head-commit; a base move in this window
+            # is caught by verify_squash_parent. See the header. Fail closed
+            # on any unreadable answer.
             if ! REVIEWS_NOW=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate --jq '.[]' | jq -s '.'); then
               echo "::error::Could not re-read reviews for #$PR_NUMBER before merge — refusing to merge."
               continue
@@ -809,25 +842,7 @@ jobs:
               echo "::warning::PR #$PR_NUMBER NOT merged — review finding(s) opened since Gate 3."
               continue
             fi
-            echo "Merging PR #$PR_NUMBER (Gate 0 and reviews revalidated)..."
-            # Last head+base re-read. Local jq only between here and merge.
-            if ! PR_LOCK=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
-              echo "::error::Could not re-read PR #$PR_NUMBER before merge — refusing to merge."
-              continue
-            fi
-            if [ "$(echo "$PR_LOCK" | jq -r '.head.sha')" != "$SHA" ] \
-               || [ "$(echo "$PR_LOCK" | jq -r '.base.sha')" != "$BASE" ] \
-               || [ "$(echo "$PR_LOCK" | jq -r '.base.ref')" != "$BASE_REF" ]; then
-              echo "::notice::PR #$PR_NUMBER head/base changed during Gate 0 revalidation — holding."
-              continue
-            fi
-            PRE_N=$(echo "$PR_PRE"  | jq -r '.changed_files')
-            LOCK_N=$(echo "$PR_LOCK" | jq -r '.changed_files')
-            if [ "$PRE_N" != "$LOCK_N" ]; then
-              echo "::notice::PR #$PR_NUMBER changed_files moved during Gate 0 ($PRE_N -> $LOCK_N) — holding."
-              continue
-            fi
-            hold_if_labelled "$PR_NUMBER" "$PR_LOCK" "merge-lock" || continue
+            echo "Merging PR #$PR_NUMBER (Gate 0, labels and reviews revalidated)..."
 
             # gh pr merge exit 0 is provisional: a merge-queue base enqueues
             # or enables auto-merge without merging. Re-read immediately.
