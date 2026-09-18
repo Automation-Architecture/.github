@@ -37,10 +37,10 @@ name: Auto-Merge when Checks Green and Reviews In
 #
 # Strongest close that still respects those rulesets:
 #   1. Last head+base re-read and Gate 0 re-check run just before merge.
-#      Only the review re-read (2026-09-18, below) sits between the lock
-#      and the merge: reviews have no pin and no after-the-fact detection,
-#      so they take the closest slot, and a base move in that window is
-#      still caught by check 2.
+#      Only the final snapshot (2026-09-18, below) sits between the lock
+#      and the merge: it reads the signals that have no pin and no
+#      after-the-fact detection, and a base move in that window is still
+#      caught by check 2.
 #   2. After a successful squash, confirm the new commit's parent is the
 #      locked base SHA. A mismatch is a hard ::error:: (retarget or base
 #      movement between lock and merge). This job then fails. We cannot
@@ -178,25 +178,38 @@ name: Auto-Merge when Checks Green and Reviews In
 # its monthly dependency-lock PR). A workflow that opens a PR which must
 # never auto-merge applies this label instead.
 #
-# Read twice: at the start of evaluation, and again from the final PR_LOCK
-# re-read immediately before `gh pr merge`, so a label added mid-evaluation
-# still holds. Fail CLOSED: a PR whose labels cannot be read is held.
+# Read twice: at the start of evaluation, and again in the final snapshot
+# immediately before `gh pr merge` (see below), so a label added
+# mid-evaluation still holds. Fail CLOSED: a PR whose labels cannot be read
+# is held.
 #
-# ── Reviews are re-read before the merge (2026-09-18) ─────────────────────
+# ── The final snapshot: one read, last, for everything unpinned (2026-09-18)
 # Gates 2-3 run minutes before the merge call, and a review arriving in that
 # window does not move the head SHA, so the head pin cannot see it. Codex
 # found this on opportunity-builder#143: event-specific concurrency groups
 # let a pull_request_review run and a workflow_run for the same PR overlap.
-# The latest-decision CHANGES_REQUESTED count and the unresolved-thread
-# count are therefore re-read LAST, after the final PR_LOCK read.
+# The hold label has the same property, and adding a label triggers no run.
 #
-# No order closes every window: GitHub has no merge-if-unchanged call, so
-# some API read always sits between a check and the merge. Order by what
-# else protects each check. The head is pinned by --match-head-commit. A
-# base move is detected after the merge by verify_squash_parent. A review
-# has neither, so it goes last. The residual is the review-read round trip
-# itself (two API calls) plus the merge RPC: a review submitted during it
-# is not seen. Accepted; do not move PR_LOCK back after the review read.
+# GitHub has no merge-if-unchanged call, so some read always sits between a
+# check and the merge, and a check made in a separate read before another
+# one leaves a gap for the other. Two review rounds on .github#33 proved
+# it: re-reading reviews before PR_LOCK left reviews exposed during that
+# fetch; moving them after PR_LOCK left the label exposed during the review
+# reads. Reordering only moves the gap.
+#
+# So every signal that nothing pins is read in ONE GraphQL query, after the
+# PR_LOCK re-read and immediately before `gh pr merge`: the head OID, the
+# labels, the latest 100 reviews (reduced to each reviewer's latest
+# decision exactly as Gate 2 does) and the first 100 review threads. The
+# head is additionally pinned by --match-head-commit, and a base move is
+# detected after the merge by verify_squash_parent, so head/base stay in
+# the REST PR_LOCK read before it.
+#
+# Residual (accepted): that one round trip plus the merge RPC. A review or
+# label that lands inside it is not seen. That is the smallest window the
+# API allows. Two fallbacks widen it, both rare: a PR with more than 100
+# reviews or more than 100 threads is re-read with the full paginated
+# reads; a PR with more than 100 labels is held.
 #
 # ── Triggers ───────────────────────────────────────────────────────────────
 #   workflow_run          — CI finished. Usually BEFORE the review bots submit.
@@ -602,6 +615,95 @@ jobs:
             done
           }
 
+          # The final snapshot (see the header): head OID, labels, reviews and
+          # threads in ONE GraphQL read, immediately before the merge. Returns
+          # 0 only when the PR may merge; every other path holds (return 1),
+          # including any unreadable or malformed answer.
+          final_snapshot_hold() {
+            local pr="$1" sha="$2" snap head held n_labels n_reviews more_threads reviews cr
+            if [ -z "${HOLD_LABEL// /}" ]; then
+              echo "::error::HOLD_LABEL is empty - refusing to merge #$pr."
+              return 1
+            fi
+            snap=$(gh api graphql \
+              -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$pr" \
+              -f query='query($owner:String!,$name:String!,$number:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$number){
+                    headRefOid
+                    labels(first:100){ totalCount nodes{ name } }
+                    reviews(last:100){ totalCount nodes{ state submittedAt author{ login } } }
+                    reviewThreads(first:100){ pageInfo{ hasNextPage }
+                      nodes{ isResolved isOutdated
+                        comments(first:1){ nodes{ author{ login } path } } } } } } }' \
+              2>/dev/null) || snap=""
+            if [ -z "$snap" ] || ! echo "$snap" | jq -e '
+                 ((.errors // []) | length) == 0
+                 and (.data.repository.pullRequest as $p
+                   | ($p.headRefOid | type == "string")
+                     and ($p.labels.totalCount | type == "number")
+                     and ($p.labels.nodes | type == "array")
+                     and ($p.reviews.totalCount | type == "number")
+                     and ($p.reviews.nodes | type == "array")
+                     and ($p.reviewThreads.pageInfo.hasNextPage | type == "boolean")
+                     and ($p.reviewThreads.nodes | type == "array"))' >/dev/null 2>&1; then
+              echo "::error::Could not read the final snapshot for #$pr — refusing to merge."
+              return 1
+            fi
+            head=$(echo "$snap" | jq -r '.data.repository.pullRequest.headRefOid')
+            if [ "$head" != "$sha" ]; then
+              echo "::notice::PR #$pr head moved before merge (${head:0:7}) — holding."
+              return 1
+            fi
+
+            n_labels=$(echo "$snap" | jq '.data.repository.pullRequest.labels.totalCount')
+            if [ "$n_labels" -gt 100 ]; then
+              echo "::error::PR #$pr has $n_labels labels; cannot read them all in one snapshot — refusing to merge."
+              return 1
+            fi
+            held=$(echo "$snap" | jq -r --arg l "$HOLD_LABEL" \
+                     '[.data.repository.pullRequest.labels.nodes[].name] | index($l) != null')
+            if [ "$held" != "false" ]; then
+              echo "::notice::PR #$pr held (final snapshot) - labelled '$HOLD_LABEL'; a human merges it."
+              return 1
+            fi
+
+            n_reviews=$(echo "$snap" | jq '.data.repository.pullRequest.reviews.totalCount')
+            if [ "$n_reviews" -le 100 ]; then
+              reviews=$(echo "$snap" | jq '[.data.repository.pullRequest.reviews.nodes[]
+                         | {state, submitted_at: .submittedAt, user: {login: (.author.login // "ghost")}}]')
+            else
+              echo "::notice::PR #$pr has $n_reviews reviews; re-reading them all (wider window, see header)."
+              if ! reviews=$(gh api "/repos/$REPO/pulls/$pr/reviews" --paginate --jq '.[]' | jq -s '.'); then
+                echo "::error::Could not re-read reviews for #$pr before merge — refusing to merge."
+                return 1
+              fi
+            fi
+            cr=$(count_changes_requested "$reviews" 2>/dev/null || echo "")
+            if ! [[ "$cr" =~ ^[0-9]+$ ]]; then
+              echo "::error::Could not evaluate review decisions for #$pr before merge — refusing to merge."
+              return 1
+            fi
+            if [ "$cr" -gt 0 ]; then
+              echo "::notice::PR #$pr changes requested since Gate 2 — holding."
+              return 1
+            fi
+
+            more_threads=$(echo "$snap" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
+            if [ "$more_threads" = "true" ]; then
+              echo "::notice::PR #$pr has over 100 review threads; re-reading them all (wider window, see header)."
+              read_open_threads "$pr" || return 1
+            else
+              OPEN_THREADS=$(echo "$snap" | jq '[.data.repository.pullRequest.reviewThreads.nodes[]
+                               | select(.isResolved == false and .isOutdated == false)]')
+            fi
+            if [ "$(echo "$OPEN_THREADS" | jq 'length')" -gt 0 ]; then
+              echo "::warning::PR #$pr NOT merged — review finding(s) opened since Gate 3."
+              return 1
+            fi
+            return 0
+          }
+
           case "$EVENT" in
             pull_request_review|pull_request_review_thread) PR_LIST="$PRR_PR" ;;
             workflow_run)        PR_LIST="$WR_PR" ;;
@@ -769,7 +871,7 @@ jobs:
             echo "Gate 3 OK: no unresolved review findings."
 
             # Merge-time Gate 0. Order is load-bearing: files check first,
-            # then the last head+base re-read, then the review re-read, then
+            # then the last head+base re-read, then the final snapshot, then
             # merge. GitHub has no expectedBaseOid; --match-head-commit
             # only pins the head. A retarget after the lock is detected by
             # verify_squash_parent (squash parent must be $BASE).
@@ -797,9 +899,8 @@ jobs:
             hold_if_merge_queue "$PR_NUMBER" "$BASE_REF" "pre-merge" || continue
             gate0_hold_if_guarded "$PR_NUMBER" "pre-merge" "$PR_PRE" || continue
 
-            # Last head+base re-read. After it: local jq, then the review
-            # re-read (two API reads), then merge. See the header for why the
-            # reviews, not head/base, sit closest to the merge.
+            # Last head+base re-read. After it: local jq, then the final
+            # snapshot (one GraphQL read), then merge. See the header.
             if ! PR_LOCK=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
               echo "::error::Could not re-read PR #$PR_NUMBER before merge — refusing to merge."
               continue
@@ -816,33 +917,11 @@ jobs:
               echo "::notice::PR #$PR_NUMBER changed_files moved during Gate 0 ($PRE_N -> $LOCK_N) — holding."
               continue
             fi
-            hold_if_labelled "$PR_NUMBER" "$PR_LOCK" "merge-lock" || continue
-
-            # Re-read Gates 2-3's review state LAST, after the lock. A review
-            # landing since Gate 3 does not move the head, and nothing pins or
-            # detects it at merge time, so it gets the closest position. Head
-            # stays pinned by --match-head-commit; a base move in this window
-            # is caught by verify_squash_parent. See the header. Fail closed
-            # on any unreadable answer.
-            if ! REVIEWS_NOW=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate --jq '.[]' | jq -s '.'); then
-              echo "::error::Could not re-read reviews for #$PR_NUMBER before merge — refusing to merge."
-              continue
-            fi
-            CR_NOW=$(count_changes_requested "$REVIEWS_NOW" 2>/dev/null || echo "")
-            if ! [[ "$CR_NOW" =~ ^[0-9]+$ ]]; then
-              echo "::error::Could not evaluate review decisions for #$PR_NUMBER before merge — refusing to merge."
-              continue
-            fi
-            if [ "$CR_NOW" -gt 0 ]; then
-              echo "::notice::PR #$PR_NUMBER changes requested since Gate 2 — holding."
-              continue
-            fi
-            read_open_threads "$PR_NUMBER" || continue
-            if [ "$(echo "$OPEN_THREADS" | jq 'length')" -gt 0 ]; then
-              echo "::warning::PR #$PR_NUMBER NOT merged — review finding(s) opened since Gate 3."
-              continue
-            fi
-            echo "Merging PR #$PR_NUMBER (Gate 0, labels and reviews revalidated)..."
+            # Last: one read of everything unpinned (head OID, labels, reviews,
+            # threads). See the header. Nothing but local jq between it and the
+            # merge call.
+            final_snapshot_hold "$PR_NUMBER" "$SHA" || continue
+            echo "Merging PR #$PR_NUMBER (Gate 0 and final snapshot revalidated)..."
 
             # gh pr merge exit 0 is provisional: a merge-queue base enqueues
             # or enables auto-merge without merging. Re-read immediately.
