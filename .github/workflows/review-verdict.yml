@@ -75,12 +75,22 @@ permissions:
   pull-requests: read
 
 concurrency:
-  # The event name is part of the group so a pull_request_review run can no
-  # longer cancel the write-capable pull_request_target poll for the same PR
-  # (Codex on aaa-client-dashboard#242). Runs of different events may overlap;
-  # evidence for a head only accumulates, so a later run reaches the same or
-  # a better verdict and the latest completed check is the one GitHub uses.
-  group: review-verdict-${{ github.repository }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.inputs.pr_number || github.event.check_run.head_sha || github.run_id }}
+  # ONE group per head SHA for every run that can publish, so those runs are
+  # serialized and cancel-in-progress lets only the newest evaluation publish.
+  # Evidence for a head is NOT monotonic: a dismissed review revokes it, so two
+  # overlapping publishers can land a stale `success` after a dismissal
+  # (Codex, opportunity-builder#165 / aaa-client-dashboard#243 — the bug
+  # .github#35 introduced by keying the group on the event name).
+  #
+  # The one exception: a pull_request_review on a fork or Dependabot PR has a
+  # read-only token and is skipped by the job `if` below. It gets a throwaway
+  # group of its own, so it can neither cancel the write-capable poll (Codex,
+  # aaa-client-dashboard#242) nor be cancelled into a stale state.
+  #
+  # workflow_dispatch has no head SHA in its payload and is keyed by PR number,
+  # so a manual run is not serialized with the event-driven ones. It is an
+  # operator action; re-run it after the others settle if in doubt.
+  group: review-verdict-${{ github.repository }}-${{ (github.event_name == 'pull_request_review' && (github.event.pull_request.head.repo.full_name != github.repository || github.event.pull_request.user.login == 'dependabot[bot]')) && format('readonly-{0}', github.run_id) || (github.event.pull_request.head.sha || github.event.check_run.head_sha || format('dispatch-pr-{0}', github.event.inputs.pr_number)) }}
   cancel-in-progress: true
 
 jobs:
