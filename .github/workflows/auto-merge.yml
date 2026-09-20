@@ -355,8 +355,10 @@ jobs:
               else empty end' 2>/dev/null || true
           }
 
-          # Dequeue a merge-queue entry. Mutation input is pullRequestId (the
-          # PR node id), not id. Fail CLOSED: mutation errors are not
+          # Dequeue a merge-queue entry. Mutation input is `id` (the PR node
+          # id), NOT `pullRequestId` — this comment said the opposite until
+          # 2026-09-20 while the code matched it, and every dequeue failed
+          # schema validation. Fail CLOSED: mutation errors are not
           # swallowed, and only an explicit post-read isInMergeQueue==false
           # is success. An unreadable pre-read still attempts dequeue — it
           # must not skip the mutation and leave a queued PR armed.
