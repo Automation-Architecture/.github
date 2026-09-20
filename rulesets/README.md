@@ -5,7 +5,7 @@ copy; this file is what it should match.
 
 | File | Ruleset | State |
 |---|---|---|
-| `aaa-merge-gates.json` | `aaa-merge-gates` | **Active since 2026-09-18, id `23649946`.** Pilot on aaa-client-dashboard and opportunity-builder; `auto-merge.yml` disabled on both. |
+| `aaa-merge-gates.json` | `aaa-merge-gates` | **Active since 2026-09-18, id `23649946`.** Covers aaa-client-dashboard, opportunity-builder and (since 2026-09-20) aaa-coffee; `auto-merge.yml` disabled on all three. |
 
 ## aaa-merge-gates
 
@@ -32,9 +32,20 @@ native auto-merge.
 gh api -X POST orgs/Automation-Architecture/rulesets --input rulesets/aaa-merge-gates.json
 ```
 
-Rollback: `gh api -X PUT orgs/Automation-Architecture/rulesets/23649946 -f enforcement=disabled`,
-then `gh workflow enable auto-merge.yml -R Automation-Architecture/opportunity-builder`
-(aaa-client-dashboard's copy was already disabled before the pilot).
+Rollback: disable enforcement, then re-enable the workflow gate on every repo whose
+`auto-merge.yml` was disabled FOR this ruleset. Disabling enforcement alone leaves those
+repos with no gate at all: the ruleset stops requiring `review/verdict`, and the workflow
+that would otherwise hold the PR is still off.
+
+```bash
+gh api -X PUT orgs/Automation-Architecture/rulesets/23649946 -f enforcement=disabled
+gh workflow enable auto-merge.yml -R Automation-Architecture/opportunity-builder
+gh workflow enable auto-merge.yml -R Automation-Architecture/aaa-coffee
+```
+
+aaa-client-dashboard is deliberately absent: its copy was already disabled before the
+pilot, so re-enabling it would restore a state this ruleset never took away. Add a line
+here whenever a repo joins, in the same change that disables its workflow.
 
 **Keep the live ruleset and this file in step.** An edit made in the GitHub UI is not
 reflected here; after any change, compare:
