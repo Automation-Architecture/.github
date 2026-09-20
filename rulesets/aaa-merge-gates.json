@@ -12,7 +12,8 @@
     "repository_name": {
       "include": [
         "aaa-client-dashboard",
-        "opportunity-builder"
+        "opportunity-builder",
+        "aaa-coffee"
       ],
       "exclude": [],
       "protected": false
