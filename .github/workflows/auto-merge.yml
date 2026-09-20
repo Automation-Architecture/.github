@@ -797,15 +797,26 @@ jobs:
             CHECKS=$(gh api "/repos/$REPO/commits/$SHA/check-runs" --paginate --jq '.check_runs[]' | jq -s '.')
             TOTAL=$(echo "$CHECKS"   | jq 'length')
             PENDING=$(echo "$CHECKS" | jq '[.[] | select(.status != "completed")] | length')
-            FAILED=$(echo "$CHECKS"  | jq '[.[] | select(
-              .conclusion == "failure" or .conclusion == "timed_out" or
-              .conclusion == "cancelled" or .conclusion == "action_required"
+            # ACCEPT-LIST, not a deny-list. Listing the failure conclusions let
+            # everything else through, so `startup_failure` (the job never ran:
+            # bad YAML, an unresolvable action) and `stale` (GitHub abandoned
+            # the run) both counted as green. A check that never executed is not
+            # a passed check. Found on aaa-clients#28. `neutral` and `skipped`
+            # DO pass: that is how a conditional job and an advisory check say
+            # "nothing to do here". Anything else, including a conclusion GitHub
+            # adds later, holds.
+            BLOCKED=$(echo "$CHECKS"  | jq '[.[] | select(
+              (.conclusion // "") | IN("success", "neutral", "skipped") | not
             )] | length')
 
             [ "$TOTAL" -eq 0 ]   && { echo "no check-runs — skip."; continue; }
             [ "$PENDING" -gt 0 ] && { echo "$PENDING check(s) pending — skip."; continue; }
-            [ "$FAILED" -gt 0 ]  && { echo "$FAILED check(s) failed — skip."; continue; }
-            echo "Gate 1 OK: $TOTAL check-run(s) green."
+            if [ "$BLOCKED" -gt 0 ]; then
+              echo "$CHECKS" | jq -r '.[] | select((.conclusion // "") | IN("success", "neutral", "skipped") | not) | "  - \(.name): \(.conclusion // "no conclusion")"'
+              echo "$BLOCKED check(s) not passing — skip."
+              continue
+            fi
+            echo "Gate 1 OK: $TOTAL check-run(s) accepted (success/neutral/skipped)."
 
             # ── Gate 2: the review check on THIS head (hard hold) ────────────
             # The check-run, not the reviews API — see the header: a clean
