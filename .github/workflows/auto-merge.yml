@@ -374,8 +374,10 @@ jobs:
               else empty end' 2>/dev/null || true
           }
 
-          # Dequeue a merge-queue entry. Mutation input is pullRequestId (the
-          # PR node id), not id. Fail CLOSED: mutation errors are not
+          # Dequeue a merge-queue entry. Mutation input is `id` (the PR node
+          # id), NOT `pullRequestId` — this comment said the opposite until
+          # 2026-09-20 while the code matched it, and every dequeue failed
+          # schema validation. Fail CLOSED: mutation errors are not
           # swallowed, and only an explicit post-read isInMergeQueue==false
           # is success. An unreadable pre-read still attempts dequeue — it
           # must not skip the mutation and leave a queued PR armed.
@@ -396,9 +398,15 @@ jobs:
             fi
 
             mut_rc=0
-            mut_json=$(gh api graphql -f pullRequestId="$node_id" \
-              -f query='mutation($pullRequestId:ID!){
-                dequeuePullRequest(input:{pullRequestId:$pullRequestId}){ clientMutationId } }' \
+            # The input field is `id`, NOT `pullRequestId`. Verified against
+            # the live schema: DequeuePullRequestInput exposes exactly
+            # { clientMutationId, id }. The wrong name fails schema validation
+            # every time, which left the queue entry armed while this workflow
+            # believed it had disarmed it — GitHub could then merge the PR
+            # later without re-running Gates 0-3.
+            mut_json=$(gh api graphql -f id="$node_id" \
+              -f query='mutation($id:ID!){
+                dequeuePullRequest(input:{id:$id}){ clientMutationId } }' \
               2>/dev/null) || mut_rc=$?
             mut_err=$(printf '%s' "$mut_json" | jq -r '.errors[]?.message // empty' 2>/dev/null | tr '\n' ';' | sed 's/;$//')
             if [ "$mut_rc" -ne 0 ] || [ -n "$mut_err" ]; then
