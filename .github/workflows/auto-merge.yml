@@ -251,11 +251,28 @@ on:
     # 12 repos, "PR Autopilot" in 4, as of 2026-09-09). Naming a workflow a
     # repo does not have is harmless - it simply never fires there.
     #
-    # This trigger is a LATENCY optimisation, not a correctness requirement:
-    # the */10 sweep below re-evaluates every open PR regardless of what a
-    # repo calls its CI workflow, so a repo using neither name still merges,
-    # just up to 10 minutes later. Do not add repo-specific names here; let
-    # the sweep cover them.
+    # This trigger is a LATENCY optimisation. A repo whose CI workflow is
+    # named neither of these relies entirely on the ORG-LEVEL sweep
+    # (auto-merge-sweep.yml in Automation-Architecture/.github, */30), which
+    # dispatches this workflow per repo. Do not add repo-specific names here.
+    #
+    # THAT FALLBACK IS CONDITIONAL, so check it before trusting it. The sweep
+    # covers a PR only when ALL of: the sweep workflow is enabled; this
+    # workflow exists and is enabled in the repo; and the PR is open,
+    # non-draft and not in an archived repo. It was `disabled_manually` on
+    # 2026-09-18 during the aaa-merge-gates ruleset pilot (AAA-732), so as
+    # written nothing retries on a schedule anywhere:
+    #
+    #   gh api repos/Automation-Architecture/.github/actions/workflows \
+    #     --jq '.workflows[]|select(.name|startswith("Auto-Merge Sweep"))|.state'
+    #
+    # `active` means the paragraph above holds; anything else means the only
+    # recovery is `gh workflow run auto-merge.yml -R <org>/<repo>`.
+    #
+    # There is no `schedule:` in this file. A per-repo cron across ~62 repos
+    # cost ~268k runner-minutes a month against 3,000 included, which is why
+    # the sweep moved to one org-level job (.github#28). Do not restore it
+    # here.
     workflows: ["CI", "PR Autopilot"]
     types: [completed]
   pull_request_review:
@@ -263,7 +280,9 @@ on:
   # NOTE: no `pull_request_review_thread` trigger. GitHub rejects it at parse
   # time ("Unexpected value 'pull_request_review_thread'"), which turns the
   # whole workflow into a failed push-run and disables every other trigger.
-  # Resolving a finding therefore releases the merge on the next */10 sweep.
+  # Resolving a finding therefore releases the merge only when something
+  # dispatches this workflow again: the org sweep if it is enabled (see
+  # above), otherwise `gh workflow run auto-merge.yml` by hand.
   workflow_dispatch:
 
 permissions:
@@ -962,9 +981,11 @@ jobs:
             # Deliberately NO `--auto` fallback. Queuing native auto-merge hands
             # the decision to GitHub, which merges once the blocking requirement
             # clears WITHOUT re-running anything here - Gates 0-3 and the head
-            # pin are all bypassed. The */10 sweep retries instead, re-evaluating
-            # every gate against the head as it is at that moment. A blocked PR
-            # waits; it does not slip through.
+            # pin are all bypassed. A later dispatch re-evaluates every gate
+            # against the head as it is at that moment: the org sweep while it
+            # is enabled, otherwise a manual run. A blocked PR waits; it does
+            # not slip through — but if nothing dispatches, it waits forever,
+            # so the notice below is not a promise that anything will retry.
             echo "::notice::PR #$PR_NUMBER not mergeable yet - leaving it for the next sweep."
           done
 
