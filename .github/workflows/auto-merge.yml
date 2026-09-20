@@ -252,10 +252,15 @@ on:
     # repo does not have is harmless - it simply never fires there.
     #
     # This trigger is a LATENCY optimisation, not a correctness requirement:
-    # the */10 sweep below re-evaluates every open PR regardless of what a
-    # repo calls its CI workflow, so a repo using neither name still merges,
-    # just up to 10 minutes later. Do not add repo-specific names here; let
-    # the sweep cover them.
+    # the ORG-LEVEL sweep (auto-merge-sweep.yml in Automation-Architecture/
+    # .github, */30) dispatches this workflow for every repo with an open PR,
+    # regardless of what a repo calls its CI workflow, so a repo using neither
+    # name still merges, just up to half an hour later. Do not add
+    # repo-specific names here; let the sweep cover them.
+    #
+    # There is no `schedule:` in this file. A per-repo cron across ~62 repos
+    # cost ~268k runner-minutes a month against 3,000 included, which is why
+    # the sweep moved to one org-level job (.github#28).
     workflows: ["CI", "PR Autopilot"]
     types: [completed]
   pull_request_review:
@@ -263,7 +268,8 @@ on:
   # NOTE: no `pull_request_review_thread` trigger. GitHub rejects it at parse
   # time ("Unexpected value 'pull_request_review_thread'"), which turns the
   # whole workflow into a failed push-run and disables every other trigger.
-  # Resolving a finding therefore releases the merge on the next */10 sweep.
+  # Resolving a finding therefore releases the merge on the next org sweep
+  # (*/30), or immediately on a manual `gh workflow run auto-merge.yml`.
   workflow_dispatch:
 
 permissions:
@@ -962,9 +968,9 @@ jobs:
             # Deliberately NO `--auto` fallback. Queuing native auto-merge hands
             # the decision to GitHub, which merges once the blocking requirement
             # clears WITHOUT re-running anything here - Gates 0-3 and the head
-            # pin are all bypassed. The */10 sweep retries instead, re-evaluating
-            # every gate against the head as it is at that moment. A blocked PR
-            # waits; it does not slip through.
+            # pin are all bypassed. The org sweep retries instead (*/30),
+            # re-evaluating every gate against the head as it is at that
+            # moment. A blocked PR waits; it does not slip through.
             echo "::notice::PR #$PR_NUMBER not mergeable yet - leaving it for the next sweep."
           done
 
