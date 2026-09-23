@@ -199,8 +199,18 @@ name: Auto-Merge when Checks Green and Reviews In
 #
 # So every signal that nothing pins is read in ONE GraphQL query, after the
 # PR_LOCK re-read and immediately before `gh pr merge`: the head OID, the
-# labels, the latest 100 reviews (reduced to each reviewer's latest
-# decision exactly as Gate 2 does) and the first 100 review threads. The
+# labels, pending review requests, the latest 100 reviews (reduced to each
+# reviewer's latest decision exactly as Gate 2 does) and the first 100
+# review threads.
+#
+# Gate 2 is re-run from that read too (.github#43, 2026-09-23): a reviewer
+# requested after evaluation started holds, and when the head review (not
+# the check) is what cleared Gate 2, it must still qualify, so dismissing it
+# mid-run holds. That needs each review's commit and body, and a login
+# compared with and without `[bot]`, which GraphQL drops, but only for an
+# author whose type is Bot, so a user account named like the app never counts. Not re-read: the
+# review CHECK. A completed check-run on a pinned SHA is not edited in place;
+# a re-run appears as a new run, which is a residual this read does not close. The
 # head is additionally pinned by --match-head-commit, and a base move is
 # detected after the merge by verify_squash_parent, so head/base stay in
 # the REST PR_LOCK read before it.
@@ -594,6 +604,28 @@ jobs:
               | length'
           }
 
+          # Gate 2 signal 2: how many reviews by REQUIRED_REVIEW_BOT on $2 (the
+          # head SHA) count as a verdict. DISMISSED and CHANGES_REQUESTED do
+          # not, nor does a body matching REVIEW_SKIP_PATTERN. Takes the
+          # REST reviews shape ({user.login, user.type, commit_id, state,
+          # body}). The login is compared with and without the `[bot]`
+          # suffix: REST says `greptile-apps[bot]`, GraphQL says
+          # `greptile-apps` for the same review (measured on
+          # claude-skills-shelf#70), and the final snapshot reads GraphQL.
+          # The author must also BE a bot (REST user.type, GraphQL
+          # __typename): without that, a user account registered as
+          # `greptile-apps` would match the suffixed name. A missing type
+          # does not match. Prints nothing on a jq failure; callers must
+          # treat a non-number as unreadable and hold.
+          count_review_on_head() {
+            echo "$1" | jq --arg u "$REQUIRED_REVIEW_BOT" --arg s "$2" --arg skip "$REVIEW_SKIP_PATTERN" \
+              '[.[] | select(.user.type == "Bot"
+                             and (.user.login == $u or (.user.login + "[bot]") == $u)
+                             and .commit_id == $s
+                             and (.state | IN("DISMISSED", "CHANGES_REQUESTED") | not)
+                             and (((.body // "") | test($skip; "i")) | not))] | length' 2>/dev/null
+          }
+
           # Collect every unresolved, non-outdated review thread into
           # OPEN_THREADS. Returns 1 (after an ::error::) when the answer cannot
           # be read; the caller must hold. Threads are paged 100 at a time and
@@ -647,9 +679,13 @@ jobs:
           # 0 only when the PR may merge; every other path holds (return 1),
           # including any unreadable or malformed answer.
           final_snapshot_hold() {
-            local pr="$1" sha="$2" snap head held n_labels n_reviews more_threads reviews cr
+            local pr="$1" sha="$2" via="$3" snap head held n_labels n_reviews n_requests more_threads reviews cr on_head
             if [ -z "${HOLD_LABEL// /}" ]; then
               echo "::error::HOLD_LABEL is empty - refusing to merge #$pr."
+              return 1
+            fi
+            if [ "$via" != "check" ] && [ "$via" != "review" ]; then
+              echo "::error::Final snapshot for #$pr has no Gate 2 signal ('$via') - refusing to merge."
               return 1
             fi
             snap=$(gh api graphql \
@@ -659,7 +695,8 @@ jobs:
                   pullRequest(number:$number){
                     headRefOid
                     labels(first:100){ totalCount nodes{ name } }
-                    reviews(last:100){ totalCount nodes{ state submittedAt author{ login } } }
+                    reviewRequests(first:1){ totalCount }
+                    reviews(last:100){ totalCount nodes{ state submittedAt body commit{ oid } author{ __typename login } } }
                     reviewThreads(first:100){ pageInfo{ hasNextPage }
                       nodes{ isResolved isOutdated
                         comments(first:1){ nodes{ author{ login } path } } } } } } }' \
@@ -670,6 +707,7 @@ jobs:
                    | ($p.headRefOid | type == "string")
                      and ($p.labels.totalCount | type == "number")
                      and ($p.labels.nodes | type == "array")
+                     and ($p.reviewRequests.totalCount | type == "number")
                      and ($p.reviews.totalCount | type == "number")
                      and ($p.reviews.nodes | type == "array")
                      and ($p.reviewThreads.pageInfo.hasNextPage | type == "boolean")
@@ -695,10 +733,22 @@ jobs:
               return 1
             fi
 
+            # Gate 2's pending-request hold, re-read. A reviewer or team
+            # requested after the evaluation-start read would otherwise go
+            # unseen (.github#43). reviewRequests covers users and teams, as
+            # requested_reviewers + requested_teams do in REST.
+            n_requests=$(echo "$snap" | jq '.data.repository.pullRequest.reviewRequests.totalCount')
+            if [ "$n_requests" -gt 0 ]; then
+              echo "::notice::PR #$pr held (final snapshot) - $n_requests requested reviewer(s)/team(s) still pending."
+              return 1
+            fi
+
             n_reviews=$(echo "$snap" | jq '.data.repository.pullRequest.reviews.totalCount')
             if [ "$n_reviews" -le 100 ]; then
               reviews=$(echo "$snap" | jq '[.data.repository.pullRequest.reviews.nodes[]
-                         | {state, submitted_at: .submittedAt, user: {login: (.author.login // "ghost")}}]')
+                         | {state, submitted_at: .submittedAt, body: (.body // ""),
+                            commit_id: (.commit.oid // ""),
+                            user: {login: (.author.login // "ghost"), type: (.author.__typename // "")}}]')
             else
               echo "::notice::PR #$pr has $n_reviews reviews; re-reading them all (wider window, see header)."
               if ! reviews=$(gh api "/repos/$REPO/pulls/$pr/reviews" --paginate --jq '.[]' | jq -s '.'); then
@@ -714,6 +764,22 @@ jobs:
             if [ "$cr" -gt 0 ]; then
               echo "::notice::PR #$pr changes requested since Gate 2 — holding."
               return 1
+            fi
+
+            # Gate 2 signal 2, re-run. When the review on this head is what
+            # cleared Gate 2, it must still qualify now: dismissing it, or it
+            # turning out to be the only one, must hold (.github#43). Signal
+            # 1 (the check) is not re-read here; see the header.
+            if [ "$via" = "review" ]; then
+              on_head=$(count_review_on_head "$reviews" "$sha")
+              if ! [[ "$on_head" =~ ^[0-9]+$ ]]; then
+                echo "::error::Could not re-check the review on head for #$pr before merge — refusing to merge."
+                return 1
+              fi
+              if [ "$on_head" -lt 1 ]; then
+                echo "::notice::PR #$pr held (final snapshot) - the review that cleared Gate 2 no longer qualifies."
+                return 1
+              fi
             fi
 
             more_threads=$(echo "$snap" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
@@ -859,6 +925,7 @@ jobs:
             REVIEW_OK=$(echo "$CHECKS" | jq --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
               '[.[] | select(.name == $n and .app.slug == $a
                              and .status == "completed" and .conclusion == "success")] | length')
+            GATE2_VIA=check
 
             # Signal 2: a review the app submitted on this exact SHA. DISMISSED
             # and CHANGES_REQUESTED do not count; CHANGES_REQUESTED is already
@@ -866,15 +933,12 @@ jobs:
             # than a verdict — see REVIEW_SKIP_PATTERN. Fail closed if the
             # reviews read fails.
             if [ "${REVIEW_OK:-0}" -lt 1 ]; then
-              REVIEW_ON_HEAD=$(echo "$REVIEWS" | jq --arg u "$REQUIRED_REVIEW_BOT" --arg s "$SHA" --arg skip "$REVIEW_SKIP_PATTERN" \
-                '[.[] | select(.user.login == $u and .commit_id == $s
-                               and (.state | IN("DISMISSED", "CHANGES_REQUESTED") | not)
-                               and (((.body // "") | test($skip; "i")) | not))] | length' 2>/dev/null)
-              if [ -z "$REVIEW_ON_HEAD" ]; then
+              REVIEW_ON_HEAD=$(count_review_on_head "$REVIEWS" "$SHA")
+              if ! [[ "$REVIEW_ON_HEAD" =~ ^[0-9]+$ ]]; then
                 echo "::error::PR #$PR_NUMBER held - could not read reviews."
                 continue
               fi
-              [ "$REVIEW_ON_HEAD" -ge 1 ] && REVIEW_OK=1
+              [ "$REVIEW_ON_HEAD" -ge 1 ] && { REVIEW_OK=1; GATE2_VIA=review; }
             fi
 
             if [ "${REVIEW_OK:-0}" -lt 1 ]; then
@@ -958,7 +1022,7 @@ jobs:
             # Last: one read of everything unpinned (head OID, labels, reviews,
             # threads). See the header. Nothing but local jq between it and the
             # merge call.
-            final_snapshot_hold "$PR_NUMBER" "$SHA" || continue
+            final_snapshot_hold "$PR_NUMBER" "$SHA" "$GATE2_VIA" || continue
             echo "Merging PR #$PR_NUMBER (Gate 0 and final snapshot revalidated)..."
 
             # gh pr merge exit 0 is provisional: a merge-queue base enqueues
