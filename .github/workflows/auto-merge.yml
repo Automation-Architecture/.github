@@ -207,7 +207,8 @@ name: Auto-Merge when Checks Green and Reviews In
 # requested after evaluation started holds, and when the head review (not
 # the check) is what cleared Gate 2, it must still qualify, so dismissing it
 # mid-run holds. That needs each review's commit and body, and a login
-# compared with and without `[bot]`, which GraphQL drops. Not re-read: the
+# compared with and without `[bot]`, which GraphQL drops, but only for an
+# author whose type is Bot, so a user account named like the app never counts. Not re-read: the
 # review CHECK. A completed check-run on a pinned SHA is not edited in place;
 # a re-run appears as a new run, which is a residual this read does not close. The
 # head is additionally pinned by --match-head-commit, and a base move is
@@ -606,15 +607,20 @@ jobs:
           # Gate 2 signal 2: how many reviews by REQUIRED_REVIEW_BOT on $2 (the
           # head SHA) count as a verdict. DISMISSED and CHANGES_REQUESTED do
           # not, nor does a body matching REVIEW_SKIP_PATTERN. Takes the
-          # REST reviews shape ({user.login, commit_id, state, body}). The
-          # login is compared with and without the `[bot]` suffix: REST says
-          # `greptile-apps[bot]`, GraphQL says `greptile-apps` for the same
-          # review (measured on claude-skills-shelf#70), and the final
-          # snapshot reads GraphQL. Prints nothing on a jq failure; callers
-          # must treat a non-number as unreadable and hold.
+          # REST reviews shape ({user.login, user.type, commit_id, state,
+          # body}). The login is compared with and without the `[bot]`
+          # suffix: REST says `greptile-apps[bot]`, GraphQL says
+          # `greptile-apps` for the same review (measured on
+          # claude-skills-shelf#70), and the final snapshot reads GraphQL.
+          # The author must also BE a bot (REST user.type, GraphQL
+          # __typename): without that, a user account registered as
+          # `greptile-apps` would match the suffixed name. A missing type
+          # does not match. Prints nothing on a jq failure; callers must
+          # treat a non-number as unreadable and hold.
           count_review_on_head() {
             echo "$1" | jq --arg u "$REQUIRED_REVIEW_BOT" --arg s "$2" --arg skip "$REVIEW_SKIP_PATTERN" \
-              '[.[] | select((.user.login == $u or (.user.login + "[bot]") == $u)
+              '[.[] | select(.user.type == "Bot"
+                             and (.user.login == $u or (.user.login + "[bot]") == $u)
                              and .commit_id == $s
                              and (.state | IN("DISMISSED", "CHANGES_REQUESTED") | not)
                              and (((.body // "") | test($skip; "i")) | not))] | length' 2>/dev/null
@@ -690,7 +696,7 @@ jobs:
                     headRefOid
                     labels(first:100){ totalCount nodes{ name } }
                     reviewRequests(first:1){ totalCount }
-                    reviews(last:100){ totalCount nodes{ state submittedAt body commit{ oid } author{ login } } }
+                    reviews(last:100){ totalCount nodes{ state submittedAt body commit{ oid } author{ __typename login } } }
                     reviewThreads(first:100){ pageInfo{ hasNextPage }
                       nodes{ isResolved isOutdated
                         comments(first:1){ nodes{ author{ login } path } } } } } } }' \
@@ -742,7 +748,7 @@ jobs:
               reviews=$(echo "$snap" | jq '[.data.repository.pullRequest.reviews.nodes[]
                          | {state, submitted_at: .submittedAt, body: (.body // ""),
                             commit_id: (.commit.oid // ""),
-                            user: {login: (.author.login // "ghost")}}]')
+                            user: {login: (.author.login // "ghost"), type: (.author.__typename // "")}}]')
             else
               echo "::notice::PR #$pr has $n_reviews reviews; re-reading them all (wider window, see header)."
               if ! reviews=$(gh api "/repos/$REPO/pulls/$pr/reviews" --paginate --jq '.[]' | jq -s '.'); then
