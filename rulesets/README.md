@@ -1,11 +1,18 @@
 # Org rulesets
 
-Source of truth for the org rulesets this repo manages. GitHub holds the live
-copy; this file is what it should match.
+> **Coffee rename audit (2026-09-26):** The historical JSON and rollback command
+> below still name `aaa-coffee`. GitHub now names the repository `aios-coffee`,
+> and its effective `main` rulesets are `aaa-default-branch-protection`
+> (`16125109`) and the repository-specific `agency-delivery-gate-pilot`
+> (`23773361`). Do not apply this JSON or use the Coffee rollback command
+> until the live organization ruleset and this file have been reconciled.
+
+Intended configuration for the org rulesets this repo manages. GitHub holds the live
+copy; the Coffee target in this file requires reconciliation before reuse.
 
 | File | Ruleset | State |
 |---|---|---|
-| `aaa-merge-gates.json` | `aaa-merge-gates` | **Active since 2026-09-18, id `23649946`.** Covers aaa-client-dashboard, opportunity-builder and (since 2026-09-20) aaa-coffee; `auto-merge.yml` disabled on all three. |
+| `aaa-merge-gates.json` | `aaa-merge-gates` | **Historical configuration, id `23649946`.** Coffee was added as `aaa-coffee` on 2026-09-20; its current effective rulesets are listed above. Confirm live org configuration before applying this file. |
 
 ## aaa-merge-gates
 
