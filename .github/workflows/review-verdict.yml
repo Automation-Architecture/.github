@@ -51,6 +51,13 @@ name: Review verdict
 # commit list), A's late clean comment passes B. Every step must hold at once
 # (Codex P1 on .github#50 and opportunity-builder#178).
 #
+# RESIDUAL, accepted: a review on a fork or Dependabot PR runs with a
+# READ-ONLY token, so `publish` skips it. If Codex submits a findings review
+# on such a head AFTER a clean pass there was published, nothing re-runs and
+# the pass stands until the next push, edit, Codex comment or manual
+# dispatch (Codex P1 on .github#55). A workflow_run relay would close it but
+# must live in a second workflow file: this one cannot listen to itself.
+#
 # ── Three things changed from the advisory pilot, all load-bearing ─────────
 # 1. NO EVIDENCE IS `action_required`, NEVER `neutral`. GitHub treats neutral,
 #    skipped and success as passing a required check; the pilot's neutral
@@ -84,21 +91,9 @@ name: Review verdict
 #                         which evaluates and publishes like any other run.
 #                         GITHUB_TOKEN may trigger workflow_dispatch (the
 #                         documented exception to its no-recursion rule).
-#   workflow_run        — this workflow's own pull_request_review run finished.
-#                         A review on a fork or Dependabot PR gets a READ-ONLY
-#                         token, so that run can neither publish nor dispatch;
-#                         a Codex findings review there would leave an earlier
-#                         `success` standing (Codex P1 on .github#55).
-#                         workflow_run always runs from the default branch
-#                         with a write token, so its `relay-review` job finds
-#                         the PR by head SHA and dispatches a re-evaluation,
-#                         like the issue_comment relay. It never publishes and
-#                         trusts nothing from the triggering run but its head
-#                         SHA, which only selects which PR to re-evaluate.
-#                         Residual: the pull_request_review run uses the PR's
-#                         own copy of this file, so a PR that renames the
-#                         workflow suppresses the relay; that is the same
-#                         accepted `.github/**` gap described above.
+#   (no workflow_run: GitHub rejects the whole file with "Workflow 'Review
+#   verdict' cannot listen to itself", which stopped every verdict on
+#   2026-09-29. See the fork-review RESIDUAL above.)
 #   push                — this file changed on the default branch. The
 #                         `sweep` job dispatches a re-evaluation for every open
 #                         PR's head, so a verdict published under an older
@@ -117,12 +112,6 @@ on:
     types: [created, edited, deleted]
   push:
     paths: [.github/workflows/review-verdict.yml]
-  workflow_run:
-    # Must equal this file's `name:`. Runs of the relay itself also complete
-    # and re-trigger this event; the job `if` skips them, and GitHub stops
-    # workflow_run chains after three levels.
-    workflows: [Review verdict]
-    types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -144,7 +133,7 @@ concurrency:
   # INVARIANT: only a run that will publish may enter the shared group. Every
   # such run re-evaluates from scratch, so whatever it cancels is replaced by
   # a fresh verdict. A run the job `if` skips (a read-only review on a
-  # fork/Dependabot PR, any issue_comment, workflow_run or push, which only
+  # fork/Dependabot PR, any issue_comment or push, which only
   # relay) gets a
   # throwaway group, because
   # workflow-level concurrency is applied BEFORE the job `if`: in the shared
@@ -165,7 +154,7 @@ concurrency:
   # run joins that commit's group and is pinned to it like every other run
   # (Codex on opportunity-builder#165 / aaa-client-dashboard#243: keyed by PR
   # number it could publish a stale `success` after a dismissal).
-  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'workflow_run' && github.event_name != 'push' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
+  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'push' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -212,49 +201,6 @@ jobs:
           gh workflow run "$wf" --repo "$REPO" --ref "$DEFAULT_BRANCH" \
             -f pr_number="$PR_NUMBER" -f head_sha="$head"
 
-  # workflow_run only, for a finished pull_request_review run of this
-  # workflow. Re-evaluates the PR whose head is that run's head SHA, so a
-  # review a read-only fork/Dependabot run could not act on still revokes a
-  # pass. Same-repo reviews are relayed too (a harmless second evaluation).
-  # No checkout; no event text is interpolated into the script.
-  relay-review:
-    if: >
-      github.event_name == 'workflow_run' &&
-      github.event.workflow_run.event == 'pull_request_review'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-      pull-requests: read
-    steps:
-      - name: Dispatch review/verdict for the reviewed PR's current head
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          RUN_HEAD: ${{ github.event.workflow_run.head_sha }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          if ! [[ "$RUN_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::The triggering run has no head SHA."
-            exit 1
-          fi
-          # Fork PRs are not listed by /commits/{sha}/pulls, so match open
-          # PRs on head SHA directly.
-          prs=$(gh api --paginate "/repos/$REPO/pulls?state=open&per_page=100" \
-            --jq ".[] | select(.head.sha == \"$RUN_HEAD\") | .number")
-          if [ -z "$prs" ]; then
-            echo "No open PR has head ${RUN_HEAD:0:7} any more; its newer head is evaluated by its own run."
-            exit 0
-          fi
-          # GITHUB_WORKFLOW_REF = owner/repo/.github/workflows/<file>@<ref>
-          wf="${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
-          wf="${wf%@*}"
-          for pr in $prs; do
-            echo "Dispatching $wf on $DEFAULT_BRANCH for #$pr at ${RUN_HEAD:0:7}"
-            gh workflow run "$wf" --repo "$REPO" --ref "$DEFAULT_BRANCH" \
-              -f pr_number="$pr" -f head_sha="$RUN_HEAD"
-          done
-
   # push only: this file changed on the default branch. Re-evaluate every
   # open PR's current head under the new rules. Pushes to other branches
   # (including PR branches) are ignored.
@@ -289,13 +235,11 @@ jobs:
     # pull_request_review on a fork or Dependabot PR gets a READ-ONLY token, so
     # it cannot publish; skip it rather than fail. Those PRs get their verdict
     # from the pull_request_target poll (up to WAIT_SECONDS) or a
-    # workflow_dispatch (the Codex comment relay, or the review relay in
-    # `relay-review`). Never a pass: a skipped run
+    # workflow_dispatch (the Codex comment relay). Never a pass: a skipped run
     # publishes nothing, and the head keeps its action_required verdict until
     # then.
     if: >
       github.event_name != 'issue_comment' &&
-      github.event_name != 'workflow_run' &&
       github.event_name != 'push' &&
       (github.event_name != 'pull_request_review' ||
        (github.event.pull_request.head.repo.full_name == github.repository &&

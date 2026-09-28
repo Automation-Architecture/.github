@@ -317,6 +317,14 @@ case("clean Codex comment for an older head only, Greptile success on head", "fa
 
 def main():
     wf = yaml.safe_load(WORKFLOW.read_text())
+    # GitHub rejects the WHOLE file if it lists itself under workflow_run
+    # ("cannot listen to itself"), so no event runs and no verdict is ever
+    # published. Shipped once, 2026-09-29 (.github#55); actionlint misses it.
+    on = wf.get("on", wf.get(True, {})) or {}
+    listened = (on.get("workflow_run") or {}).get("workflows", []) if isinstance(on, dict) else []
+    if wf.get("name") in listened:
+        print(f"FAIL  workflow listens to itself via workflow_run ({wf.get('name')!r})")
+        return 1
     step = wf["jobs"]["publish"]["steps"][0]
     static_env = {k: str(v) for k, v in step["env"].items() if "${{" not in str(v)}
     failures = 0
