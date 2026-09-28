@@ -92,10 +92,16 @@ name: Auto-Merge when Checks Green and Reviews In
 # No other reviewer is evidence: not Greptile, not a human approval.
 # Fails closed: unreadable reviews or comments hold.
 #
-# RESIDUAL, accepted: the clean-pass comment names a head, not a base; if the
-# PR is retargeted while Codex reviews, the pass lands for a diff Codex did not
-# see. The ruleset-gated repos' `review/verdict` binds to the latest retarget;
-# this gate does not. It needs write access and a retarget mid-review.
+# Both signals must also be newer than the PR's latest retarget or head
+# force-push (Codex P1s on .github#57), so evidence for another base, or for
+# a head a force-push replaced, never carries over. An unreadable history
+# holds the PR.
+#
+# RESIDUAL, accepted: a clean-pass comment names a head, not a base; if the
+# PR is retargeted WHILE Codex reviews, the pass lands after the retarget for
+# a diff Codex did not see. Nothing records when a review started. It needs
+# write access and a retarget mid-review (the same residual review-verdict
+# documents).
 #
 # ── Gate 3: open P0/P1 Codex findings block ────────────────────────────────
 # Gate 2 proves Codex looked; Gate 3 reads what it said. An unresolved review
@@ -546,28 +552,32 @@ jobs:
 
           # Gate 2: did Codex review head $4? $1 reviews (REST shape: user.login,
           # user.type, commit_id, state, body), $2 issue comments normalised to
-          # {login, type, body, edited}, $3 the PR's commit SHAs as a JSON array,
-          # or `null` when they could not all be read (then no clean-pass
-          # comment counts). Logins are compared with and without `[bot]`
+          # {login, type, body, edited, created_at}, $3 the PR's commit SHAs as a
+          # JSON array, or `null` when they could not all be read (then no
+          # clean-pass comment counts), $5 the latest retarget or head
+          # force-push (ISO time, or empty): evidence must be strictly newer. Logins are compared with and without `[bot]`
           # (GraphQL drops it) and the author must BE a Bot, so a user account
           # named like the app never counts. Prints `review`, `comment` or
           # `none`; prints nothing on a jq failure, which callers must hold on.
           codex_reviewed_head() {
             local n
-            n=$(echo "$1" | jq --arg u "$CODEX_BOT" --arg s "$4" --arg skip "$REVIEW_SKIP_PATTERN" \
-              '[.[] | select(.user.type == "Bot"
+            n=$(echo "$1" | jq --arg u "$CODEX_BOT" --arg s "$4" --arg skip "$REVIEW_SKIP_PATTERN" --arg cut "${5:-}" \
+              "$AFTER_CUTOFF_JQ"'
+              [.[] | select(.user.type == "Bot"
                              and (.user.login == $u or (.user.login + "[bot]") == $u)
                              and .commit_id == $s
+                             and ((.submitted_at // "") | after_cutoff)
                              and (.state | IN("DISMISSED", "PENDING") | not)
                              and (((.body // "") | test($skip; "i")) | not))] | length' 2>/dev/null) || return 0
             [[ "$n" =~ ^[0-9]+$ ]] || return 0
             if [ "$n" -gt 0 ]; then echo review; return 0; fi
             n=$(echo "$2" | jq --arg u "$CODEX_BOT" --arg s "$4" --arg skip "$REVIEW_SKIP_PATTERN" \
-                   --argjson commits "$3" '
+                   --argjson commits "$3" --arg cut "${5:-}" "$AFTER_CUTOFF_JQ"'
               def reviewed: [scan("\\*\\*Reviewed commit:\\*\\* `([0-9a-f]{10,40})`") | .[0]];
               [.[] | select(.type == "Bot"
                             and (.login == $u or (.login + "[bot]") == $u)
                             and (.edited == false)
+                            and ((.created_at // "") | after_cutoff)
                             and ((.body // "") | test("\\ACodex Review: Didn.t find any major issues"))
                             and (((.body // "") | test($skip; "i")) | not)
                             and ((.body // "") | reviewed | length == 1)
@@ -580,28 +590,52 @@ jobs:
             if [ "$n" -gt 0 ]; then echo comment; else echo none; fi
           }
 
-          # Every commit a head force-push on PR $1 replaced, plus each one's
-          # history past base $2, as a JSON array of SHAs. Returns 1 when any
-          # part is unreadable or incomplete (then no clean-pass comment
-          # counts). Reads the last 100 force-push events; more refuses.
-          replaced_heads_json() {
-            local pr="$1" base="$2" timeline replaced oid history all="[]"
+          # jq helper: is this ISO time strictly after $cut (empty = no cutoff)?
+          # An unparseable time is never after it.
+          AFTER_CUTOFF_JQ='
+            def parse_time: sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601;
+            def after_cutoff: . as $t
+              | if $cut == "" then ($t | type == "string" and length > 0)
+                else ((try ($t | parse_time) catch null) as $x
+                      | (try ($cut | parse_time) catch null) as $c
+                      | $x != null and $c != null and $x > $c) end;'
+
+          # PR $1's retarget and head force-push history. Sets CUTOFF (the
+          # latest such event, ISO time, or empty) and REPLACED (every commit a
+          # head force-push replaced, plus each one's history past base $2, as
+          # a JSON array). Codex evidence posted before CUTOFF may cover a
+          # different base or a replaced head, so it does not count (Codex P1s
+          # on .github#57); a late clean pass for a replaced head A must not
+          # count for a colliding current head B. Returns 1 when any part is
+          # unreadable or incomplete; the caller holds. Reads the last 100
+          # events; more refuses. Same rules as review-verdict.
+          load_history() {
+            local pr="$1" base="$2" timeline replaced oid history
+            CUTOFF=""
+            REPLACED="[]"
             if ! timeline=$(gh api graphql \
                   -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$pr" \
                   -f query='query($owner:String!,$name:String!,$number:Int!){
                     repository(owner:$owner,name:$name){ pullRequest(number:$number){
-                      timelineItems(last:100, itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){
+                      timelineItems(last:100, itemTypes:[BASE_REF_CHANGED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]){
                         pageInfo{ hasPreviousPage }
-                        nodes{ ... on HeadRefForcePushedEvent { beforeCommit{ oid } } } } } } }' 2>/dev/null); then
+                        nodes{ __typename
+                          ... on BaseRefChangedEvent { createdAt }
+                          ... on HeadRefForcePushedEvent { createdAt beforeCommit{ oid } } } } } } }' 2>/dev/null); then
               return 1
             fi
-            # -r, not -e: no force-push at all is a valid, empty answer; error()
+            # -r, not -e: no event at all is a valid, empty answer; error()
             # still exits non-zero.
-            if ! replaced=$(echo "$timeline" | jq -r '
+            if ! CUTOFF=$(echo "$timeline" | jq -r '
                 .data.repository.pullRequest.timelineItems
                 | if .pageInfo.hasPreviousPage != false then error("more than 100 events") else .nodes end
                 | if type != "array" then error("no timeline") else . end
-                | [.[] | (.beforeCommit.oid // error("force-push without a before commit"))] | unique | .[]' 2>/dev/null); then
+                | map(.createdAt // error("event without createdAt")) | max // ""' 2>/dev/null) \
+               || ! replaced=$(echo "$timeline" | jq -r '
+                [.data.repository.pullRequest.timelineItems.nodes[]
+                  | select(.__typename == "HeadRefForcePushedEvent")
+                  | (.beforeCommit.oid // error("force-push without a before commit"))] | unique | .[]' 2>/dev/null); then
+              CUTOFF=""
               return 1
             fi
             for oid in $replaced; do
@@ -612,9 +646,9 @@ jobs:
                       | if ($s | length) == .[0].total_commits then [$oid] + $s else error("incomplete") end' 2>/dev/null); then
                 return 1
               fi
-              all=$(jq -n --argjson a "$all" --argjson b "$history" '$a + $b | unique')
+              REPLACED=$(jq -n --argjson a "$REPLACED" --argjson b "$history" '$a + $b | unique')
             done
-            echo "$all"
+            return 0
           }
 
           # Gate 3's rule, one jq filter used by both reads (evaluation and the
@@ -690,7 +724,7 @@ jobs:
           # merge; every other path holds (return 1), including any
           # unreadable or malformed answer.
           final_snapshot_hold() {
-            local pr="$1" sha="$2" commits="$3" snap head held n_labels n_reviews more_threads reviews comments cr via
+            local pr="$1" sha="$2" commits="$3" cutoff="$4" snap head held n_labels n_reviews more_threads reviews comments cr via
             if [ -z "${HOLD_LABEL// /}" ]; then
               echo "::error::HOLD_LABEL is empty - refusing to merge #$pr."
               return 1
@@ -703,7 +737,7 @@ jobs:
                     headRefOid
                     labels(first:100){ totalCount nodes{ name } }
                     reviews(last:100){ totalCount nodes{ state submittedAt body commit{ oid } author{ __typename login } } }
-                    comments(last:100){ nodes{ body lastEditedAt author{ __typename login } } }
+                    comments(last:100){ nodes{ body createdAt lastEditedAt author{ __typename login } } }
                     reviewThreads(first:100){ pageInfo{ hasNextPage }
                       nodes{ isResolved isOutdated
                         comments(first:1){ nodes{ author{ __typename login } path body } } } } } } }' \
@@ -767,8 +801,8 @@ jobs:
             # still qualify now (dismissed, edited or deleted mid-run holds).
             comments=$(echo "$snap" | jq '[.data.repository.pullRequest.comments.nodes[]
                          | {login: (.author.login // "ghost"), type: (.author.__typename // ""),
-                            body: (.body // ""), edited: (.lastEditedAt != null)}]')
-            via=$(codex_reviewed_head "$reviews" "$comments" "$commits" "$sha")
+                            body: (.body // ""), edited: (.lastEditedAt != null), created_at: (.createdAt // "")}]')
+            via=$(codex_reviewed_head "$reviews" "$comments" "$commits" "$sha" "$cutoff")
             case "$via" in
               review|comment) ;;
               none) echo "::notice::PR #$pr held (final snapshot) - Codex's review of this head no longer qualifies."
@@ -917,10 +951,10 @@ jobs:
                   -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" \
                   -f query='query($owner:String!,$name:String!,$number:Int!){
                     repository(owner:$owner,name:$name){ pullRequest(number:$number){
-                      comments(last:100){ nodes{ body lastEditedAt author{ __typename login } } } } } }' \
+                      comments(last:100){ nodes{ body createdAt lastEditedAt author{ __typename login } } } } } }' \
                   --jq '[.data.repository.pullRequest.comments.nodes[]
                          | {login: (.author.login // "ghost"), type: (.author.__typename // ""),
-                            body: (.body // ""), edited: (.lastEditedAt != null)}]' 2>/dev/null) \
+                            body: (.body // ""), edited: (.lastEditedAt != null), created_at: (.createdAt // "")}]' 2>/dev/null) \
                || ! echo "$COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
               echo "::error::PR #$PR_NUMBER held - could not read comments."
               continue
@@ -929,21 +963,21 @@ jobs:
             # Every commit this PR carries, so a Reviewed-commit prefix is shown
             # to name only this head. The endpoint stops at 250; beyond that,
             # or if unreadable, no clean-pass comment counts (`null`).
+            # Retarget / force-push history: sets CUTOFF and REPLACED. Evidence
+            # older than CUTOFF may cover another base or a replaced head.
+            if ! load_history "$PR_NUMBER" "$BASE"; then
+              echo "::error::PR #$PR_NUMBER held - could not read its retarget and force-push history."
+              continue
+            fi
             COMMITS=null
             if [[ "$N_COMMITS" =~ ^[0-9]+$ ]] && [ "$N_COMMITS" -le 250 ]; then
               if C=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/commits" --paginate --jq '.[].sha' | jq -Rs 'split("\n") | map(select(length > 0))') \
                  && [ "$(echo "$C" | jq 'length')" = "$N_COMMITS" ]; then
-                # Plus every head a force-push replaced, and its history past
-                # the base: a late clean pass for a replaced head A must not
-                # count for a colliding current head B (Codex P1 on .github#57;
-                # review-verdict has the same rule).
-                if R=$(replaced_heads_json "$PR_NUMBER" "$BASE"); then
-                  COMMITS=$(jq -n --argjson a "$C" --argjson b "$R" '$a + $b | unique')
-                fi
+                COMMITS=$(jq -n --argjson a "$C" --argjson b "$REPLACED" '$a + $b | unique')
               fi
             fi
 
-            GATE2_VIA=$(codex_reviewed_head "$REVIEWS" "$COMMENTS" "$COMMITS" "$SHA")
+            GATE2_VIA=$(codex_reviewed_head "$REVIEWS" "$COMMENTS" "$COMMITS" "$SHA" "$CUTOFF")
             case "$GATE2_VIA" in
               review|comment) ;;
               none)
@@ -1020,7 +1054,7 @@ jobs:
             # Last: one read of everything unpinned (head OID, labels, reviews,
             # threads). See the header. Nothing but local jq between it and the
             # merge call.
-            final_snapshot_hold "$PR_NUMBER" "$SHA" "$COMMITS" || continue
+            final_snapshot_hold "$PR_NUMBER" "$SHA" "$COMMITS" "$CUTOFF" || continue
             echo "Merging PR #$PR_NUMBER (Gate 0 and final snapshot revalidated)..."
 
             # gh pr merge exit 0 is provisional: a merge-queue base enqueues

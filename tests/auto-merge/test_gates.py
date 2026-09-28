@@ -109,8 +109,8 @@ def review(login, state, commit=HEAD, utype="User"):
             "body": "", "submitted_at": "2026-09-29T01:00:00Z"}
 
 
-def comment(body, login="chatgpt-codex-connector", typename="Bot", edited=False):
-    return {"body": body, "lastEditedAt": "2026-09-29T02:00:00Z" if edited else None,
+def comment(body, login="chatgpt-codex-connector", typename="Bot", edited=False, at="2026-09-29T01:00:00Z"):
+    return {"body": body, "createdAt": at, "lastEditedAt": "2026-09-29T02:00:00Z" if edited else None,
             "author": {"__typename": typename, "login": login}}
 
 
@@ -127,7 +127,7 @@ def check(name, conclusion="success", status="completed", app="github-actions"):
 
 def build(reviews=(), comments=(), threads=(), checks=(check("CI"),), labels=(), draft=False,
           commits=(OLD, HEAD), files=("src/a.py",), snap_threads=None, snap_reviews=None,
-          snap_comments=None, requested=(), drop=(), replaced=(), histories=None):
+          snap_comments=None, requested=(), drop=(), replaced=(), histories=None, retargets=()):
     pr = {"number": PR, "state": "open", "draft": draft, "head": {"sha": HEAD},
           "base": {"sha": BASE, "ref": "main"}, "changed_files": len(files), "commits": len(commits),
           "labels": [{"name": l} for l in labels], "node_id": "PR_1",
@@ -155,7 +155,9 @@ def build(reviews=(), comments=(), threads=(), checks=(check("CI"),), labels=(),
         "graphql": {
             "timelineItems": {"data": {"repository": {"pullRequest": {"timelineItems": {
                 "pageInfo": {"hasPreviousPage": False},
-                "nodes": [{"beforeCommit": {"oid": oid}} for oid in replaced]}}}}},
+                "nodes": [{"__typename": "HeadRefForcePushedEvent", "createdAt": "2026-09-28T00:00:00Z",
+                           "beforeCommit": {"oid": oid}} for oid in replaced]
+                         + [{"__typename": "BaseRefChangedEvent", "createdAt": at} for at in retargets]}}}}},
             "comments(last:100)": {"data": {"repository": {"pullRequest": {"comments": {"nodes": list(comments)}}}}},
             "reviewThreads(first:100, after": {"data": {"repository": {"pullRequest": {"reviewThreads": {
                 "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": list(threads)}}}}},
@@ -212,8 +214,29 @@ case("replaced head's history unreadable: no comment evidence", "hold",
      build(comments=[CLEAN_HEAD], replaced=[OLD], drop=[("rest", f"/compare/{BASE}...{OLD}")]))
 case("force-push history unreadable: no comment evidence", "hold",
      build(comments=[CLEAN_HEAD], drop=[("graphql", "timelineItems")]))
-case("force-push history unreadable, Codex review on head still counts", "merge",
+case("retarget/force-push history unreadable: hold even with a Codex review", "hold",
      build(reviews=[codex_review()], drop=[("graphql", "timelineItems")]))
+# Evidence must postdate the latest retarget or head force-push (Codex P1 on .github#57).
+case("Codex review on head predates a retarget", "hold",
+     build(reviews=[codex_review()], retargets=["2026-09-29T01:30:00Z"]))
+case("Codex review on head after a retarget", "merge",
+     build(reviews=[codex_review()], retargets=["2026-09-29T00:30:00Z"]))
+case("clean comment predates a retarget", "hold",
+     build(comments=[CLEAN_HEAD], retargets=["2026-09-29T01:30:00Z"]))
+case("clean comment after a retarget", "merge",
+     build(comments=[CLEAN_HEAD], retargets=["2026-09-29T00:30:00Z"]))
+case("clean comment in the same second as a retarget", "hold",
+     build(comments=[CLEAN_HEAD], retargets=["2026-09-29T01:00:00Z"]))
+case("clean comment predates a head force-push", "hold",
+     build(comments=[comment(CLEAN.format(sha=HEAD[:10]), at="2026-09-27T00:00:00Z")], replaced=[OLD]))
+def old_review():
+    r = codex_review()
+    r["submitted_at"] = "2026-09-29T00:00:00Z"
+    return r
+
+
+case("final snapshot applies the retarget cutoff too", "hold",
+     build(reviews=[codex_review()], snap_reviews=[old_review()], retargets=["2026-09-29T00:30:00Z"]))
 case("comments unreadable", "hold",
      build(reviews=[codex_review()], drop=[("graphql", "comments(last:100)")]))
 case("Codex review on head dismissed", "hold", build(reviews=[codex_review(state="DISMISSED")]))
