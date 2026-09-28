@@ -1,15 +1,22 @@
 name: Auto-Merge when Checks Green and Reviews In
 
-# Squash-merges a PR once check-runs on the HEAD SHA are green AND every
-# required reviewer has reviewed. A PR whose required review is missing is
-# HELD. It is never merged unreviewed.
+# Squash-merges a PR once check-runs on the HEAD SHA are green, Codex has
+# reviewed THAT head, and no P0/P1 Codex finding is open. A PR Codex has not
+# reviewed at its current head is HELD. It is never merged unreviewed.
+#
+# ── POLICY (Brad, 2026-09-29) ──────────────────────────────────────────────
+# Codex is the one reviewer. Greptile is outside the merge policy: its check
+# is ignored by Gate 1, it is never Gate 2 evidence, and its threads never
+# block. No human approval is required anywhere, and human review threads
+# never block. The merge threshold: Codex reviewed the current head, no
+# P0/P1 Codex finding is open, CI is green. P2/P3 findings do not block.
 #
 # ── Gate 0: never auto-merge a PR that edits the reviewer (2026-09-16) ────
 # Ported from the aaa-client-dashboard pilot (#235) for AAA-711 / .github#31.
 # These files instruct the reviewer or this gate. A PR that changes them can
 # suppress the review judging it: an added "scope restrictions" section in
-# CLAUDE.md/AGENTS.md is a demonstrated way to silence a finding, and Greptile
-# imports those files as review context. A PR editing auto-merge.yml is the
+# CLAUDE.md/AGENTS.md is a demonstrated way to silence a finding, and the
+# reviewers import those files as review context. A PR editing auto-merge.yml is the
 # same problem one level up. Humans merge these, deliberately, via aaa-merge.
 #
 # Guarded paths: CLAUDE.md, AGENTS.md, .cursorrules, .claude/, .greptile/,
@@ -60,114 +67,52 @@ name: Auto-Merge when Checks Green and Reviews In
 # a hard ::error:: — enrollment is not a merge. This workflow will not
 # enroll; a branch that requires a merge queue is held for aaa-merge.
 #
-# ── Gate 2 is the reviewer's CHECK on the head SHA (2026-09-13) ────────────
-# Greptile (the org-wide `greptile-apps` GitHub App) replaced PR Autopilot as
-# the reviewer on 2026-09-13, and Gate 2 now requires its check-run, named
-# `Greptile Review`, to have concluded `success` ON THE CURRENT HEAD SHA.
+# ── Gate 1 ignores Greptile (2026-09-29) ───────────────────────────────────
+# Every check-run published by the `greptile-apps` App is dropped before Gate 1
+# counts, so a pending or failing `Greptile Review` neither holds nor passes a
+# PR. Every other check must be completed and success/neutral/skipped, and a
+# head with no other check at all still holds (fail closed on missing CI).
 #
-# THE PRODUCING APP IS VERIFIED, NOT JUST THE NAME. A display name is not an
-# identity: any app or workflow with checks:write on the repo can emit a
-# successful check called `Greptile Review`. Gate 2 therefore also requires
-# `.app.slug == greptile-apps`.
+# ── Gate 2: Codex reviewed THIS head (2026-09-29) ──────────────────────────
+# Either signal counts, and only for the current head SHA:
+#   1. a Codex review object (author chatgpt-codex-connector, a Bot) whose
+#      commit_id is the head, not DISMISSED, and not a skip notice. Codex posts
+#      one to carry findings; Gate 3 then decides whether they block.
+#   2. Codex's clean pass: an issue comment by the Codex Bot, never edited,
+#      opening "Codex Review: Didn't find any major issues" and naming exactly
+#      one "Reviewed commit" (10-40 hex) that is a prefix of the head and of no
+#      other commit this PR carries. The PR's commit list is read in full
+#      (a PR over 250 commits gets no comment evidence).
+# A review or clean pass of any EARLIER commit never counts. That closes the
+# hole the previous gates had (Codex P1 on aaa-runbooks#175): with outdated
+# threads excluded, a push could clear the findings and merge a head Codex
+# never saw. Now every push needs a fresh Codex review of the new head.
+# No other reviewer is evidence: not Greptile, not a human approval.
+# Fails closed: unreadable reviews or comments hold.
 #
-# EITHER SIGNAL ON THE HEAD COUNTS, because neither is emitted reliably.
-# Measured 2026-09-13 across five PRs:
+# RESIDUAL, accepted: the clean-pass comment names a head, not a base; if the
+# PR is retargeted while Codex reviews, the pass lands for a diff Codex did not
+# see. The ruleset-gated repos' `review/verdict` binds to the latest retarget;
+# this gate does not. It needs write access and a retarget mid-review.
 #
-#   aaa-bin#59 5395c69      check success, NO review on that SHA
-#   aaa-pr-bot#26 ab23294   check success, NO review on that SHA
-#   aaa-aiosiq#284 291805f  check success, NO review on that SHA
-#   skills-shelf#68 3222540 check success AND an APPROVED review
-#   aaa-hooks#52 abfa05a    NO check at all, a COMMENTED review on that SHA
+# ── Gate 3: open P0/P1 Codex findings block ────────────────────────────────
+# Gate 2 proves Codex looked; Gate 3 reads what it said. An unresolved review
+# thread started by the Codex Bot blocks when its severity is P0 or P1, read
+# from the badge Codex puts in the comment body (`![P1 Badge](...)`), and
+# when the thread still applies to the code (not outdated; a thread raised on
+# the current head always does). An outdated thread no longer applies, and
+# Gate 2 already requires Codex to have reviewed the new head. A Codex thread with no readable P2/P3 badge
+# counts as P0/P1 (fail closed). P2/P3 threads, and every thread started by
+# anyone else (humans, Greptile, other bots), never block. Resolving a P0/P1
+# thread is the decision to release it.
 #
-# A clean pass often posts no review, so a review-only gate hangs on it — the
-# deadlock the Codex version hit in #77 -> #78. But a check-only gate hangs
-# the other way: on aaa-hooks#52 the check-SUITE sat `queued` with zero
-# check-runs across three consecutive pushes while reviews kept arriving, so
-# the head never got a check and the PR could never have merged. The union
-# covers all five shapes; neither half alone does.
+# RESIDUAL, accepted: a writer can delete a Codex inline comment, and a
+# deleted finding has no severity left to read. Deleting another account's
+# review comment needs write access and leaves an audit trail.
 #
-# Gate 3 still reads the findings themselves, so "the reviewer spoke" and
-# "the reviewer was happy" stay separate questions.
-#
-# WHAT THIS FIXES. The old gate accepted a review of ANY commit, which is how
-# aaa-runbooks#127 merged on 2026-09-13 while a fix round was still in
-# flight: the review it counted was two commits old, and the follow-up commit
-# then landed on a closed PR and never reached main. Pinning to the head
-# closes that race without reintroducing the deadlock.
-#
-# THE RESULTING ORG POLICY IS DELIBERATE: a repo the reviewer does not cover
-# has no such check, so every PR holds and a human merges via aaa-merge. If
-# the reviewer is down or rate-limited, the PR holds too. That is correct —
-# holding is the safe direction, and nothing here may add a timer that
-# expires into an unreviewed merge (the pre-2026-09-10 version had one; see
-# the git history for why it was removed).
-#
-# BE CLEAR ABOUT WHAT THIS GUARANTEES: an automated reviewer examined this
-# exact COMMIT (not necessarily this PR's diff against this base — see the
-# accepted residual below) and raised nothing, and no unresolved thread
-# remains. It is NOT human approval. A genuine approval requirement belongs
-# in branch protection.
-#
-# ── ACCEPTED residual: the check binds to a commit, not a PR (AAA-711) ────
-# Gate 2's check signal is publisher-verified (`.app.slug`) and pinned to the
-# head SHA. It is NOT bound to this pull request or its base. Decision
-# recorded 2026-09-16 on AAA-711 / .github#31: accept that gap and write it
-# down. Do not "fix" it with the substitutes below; they already failed.
-#
-# A check-run attaches to a commit. Greptile reviews a diff against a base.
-# The same head SHA can sit in two PRs with different bases — a small one
-# against a feature branch, reviewed clean, and a second against `main`
-# carrying far more — and the check earned by the first satisfies Gate 2 on
-# the second. Gate 3 does not catch it: it queries only the second PR's
-# threads. Greptile skipping reviews at an org flex-usage cap makes "the
-# second PR was never reviewed" a state that occurs on its own.
-#
-# The obvious fix does not work. Requiring the check's `.pull_requests` to
-# contain this PR number rejects every genuine signal — that array is empty
-# in practice for this App (measured on aaa-client-dashboard#237:
-# app=greptile-apps, conclusion=success, pull_requests=[]).
-#
-# Substitutes attempted and withdrawn on aaa-client-dashboard#238:
-#   - Check alone: binds to a commit, not a PR or base.
-#   - Greptile reaction on the PR: binds to a PR, not a commit or a point in
-#     time; survives later pushes and base changes.
-#   - Both together: correlates nothing — a reaction from an earlier head
-#     plus a check from another PR still reads as "reviewed".
-#   - Codex comment naming a ~10-hex prefix: too little binding; the comment
-#     survives pushes.
-#
-# Other options considered the same day, and not taken:
-#   - Require a review object only (what the dashboard pilot does now).
-#     Sound, but a clean review leaves no review object, so clean PRs never
-#     auto-merge and take aaa-merge instead.
-#   - Enable Greptile Auto-approve, which emits the missing artifact
-#     (commit-pinned, PR-scoped, author-verified). Rejected for AAA on
-#     2026-09-16 (aaa-runbooks#137): branch protection counts bot approvals
-#     as real ones.
-#
-# Exploitation needs two PRs sharing a head with different bases. That is
-# the residual. The next real fix is a review object from a clean pass,
-# which Auto-approve would emit and which AAA has declined.
-#
-# ── Why Gate 3 exists ──────────────────────────────────────────────────────
-# Gate 2 asks "did the reviewer show up", which is not the same question as
-# "was the reviewer happy". Because Codex posts COMMENTED and never
-# CHANGES_REQUESTED, a review REPORTING DEFECTS satisfied Gate 2 exactly as
-# well as a clean one. PR #97 merged 3m35s after Codex filed two P2 findings
-# on it — the gate saw one review from the one required reviewer, called it
-# 1/1, and merged; both defects reached main and needed #98 to undo.
-#
-# So Gate 3 reads the findings themselves, not the envelope they arrived in:
-# any unresolved, non-outdated review thread blocks the merge. A thread goes
-# outdated by itself when a follow-up commit rewrites the lines it points at,
-# so pushing a fix clears the block without anyone touching the PR — this
-# does NOT reintroduce the push-deadlock that #77 -> #78 reverted. A finding
-# nobody addresses blocks until a human resolves the thread, which is the
-# intended outcome, and nothing in this file is allowed to paper over it.
-#
-# A bot that posts a "review" saying it skipped the review (claude[bot] did
-# exactly that through 2026-08-31, on an overage spend limit) can no longer
-# satisfy this gate: a check-run conclusion is not forgeable by a review body.
+# A bot "review" that says it skipped the review (claude[bot] did exactly that
+# through 2026-08-31, on an overage spend limit) never satisfies Gate 2: a body
+# matching REVIEW_SKIP_PATTERN is a status notice, not a verdict.
 #
 # ── The hold label: `no-auto-merge` (2026-09-18) ──────────────────────────
 # A PR labelled `no-auto-merge` is never merged by this workflow; a human
@@ -199,40 +144,39 @@ name: Auto-Merge when Checks Green and Reviews In
 #
 # So every signal that nothing pins is read in ONE GraphQL query, after the
 # PR_LOCK re-read and immediately before `gh pr merge`: the head OID, the
-# labels, pending review requests, the latest 100 reviews (reduced to each
-# reviewer's latest decision exactly as Gate 2 does) and the first 100
-# review threads.
+# labels, the latest 100 reviews, the latest 100 issue comments and the
+# first 100 review threads.
 #
-# Gate 2 is re-run from that read too (.github#43, 2026-09-23): a reviewer
-# requested after evaluation started holds, and when the head review (not
-# the check) is what cleared Gate 2, it must still qualify, so dismissing it
-# mid-run holds. That needs each review's commit and body, and a login
-# compared with and without `[bot]`, which GraphQL drops, but only for an
-# author whose type is Bot, so a user account named like the app never counts. Not re-read: the
-# review CHECK. A completed check-run on a pinned SHA is not edited in place;
-# a re-run appears as a new run, which is a residual this read does not close. The
-# head is additionally pinned by --match-head-commit, and a base move is
-# detected after the merge by verify_squash_parent, so head/base stay in
-# the REST PR_LOCK read before it.
+# Gates 2 and 3 are re-run from that read (.github#43, 2026-09-23): a Codex
+# review dismissed, or a clean pass edited or deleted, mid-run holds, and a
+# P0/P1 finding filed mid-run holds. GraphQL drops the `[bot]` suffix from a
+# Bot's login, so logins are compared with and without it, but only for an
+# author whose type is Bot, so a user account named like the app never
+# counts. The head is additionally pinned by --match-head-commit, and a base
+# move is detected after the merge by verify_squash_parent, so head/base stay
+# in the REST PR_LOCK read before it.
 #
 # Residual (accepted): that one round trip plus the merge RPC. A review or
 # label that lands inside it is not seen. That is the smallest window the
 # API allows. Two fallbacks widen it, both rare: a PR with more than 100
 # reviews or more than 100 threads is re-read with the full paginated
-# reads; a PR with more than 100 labels is held.
+# reads; a PR with more than 100 labels is held. Only the latest 100 issue
+# comments are read, which can only lose a clean pass (holds), never add one.
 #
 # ── Triggers ───────────────────────────────────────────────────────────────
 #   workflow_run          — CI finished. Usually BEFORE the review bots submit.
 #   pull_request_review   — a review landed; re-evaluate immediately.
 #   (pull_request_review_thread is NOT accepted by GitHub Actions; see `on:`)
-#   workflow_dispatch     — the org-level sweeper (auto-merge-sweep.yml in
-#                           Automation-Architecture/.github) dispatches this
-#                           on a schedule for every repo that has open PRs.
-#                           That is what picks up a resolved review thread,
-#                           which has no trigger of its own. There is
-#                           deliberately NO per-repo `schedule:` here: one
-#                           cron in ~62 repos bills ~62 runner-minutes per
-#                           tick whether or not anything is open.
+#   issue_comment         — Codex posted, edited or deleted a PR comment (its
+#                           clean pass is an issue comment, which fires
+#                           neither of the above). Filtered on the comment's
+#                           author in the job `if`.
+#   workflow_dispatch     — by hand: `gh workflow run auto-merge.yml`. The
+#                           org-level sweep (auto-merge-sweep.yml) was removed
+#                           in .github#54 (2026-09-29), so NOTHING retries on a
+#                           schedule. A resolved review thread has no trigger
+#                           of its own: dispatch by hand after resolving one.
+#                           There is deliberately NO per-repo `schedule:`.
 #
 # Uses workflow_run (not check_suite) because GitHub does not emit check_suite
 # events for GITHUB_TOKEN-run CI workflows. workflow_run is always emitted.
@@ -249,10 +193,14 @@ name: Auto-Merge when Checks Green and Reviews In
 # whose ruleset requires no reviews, "respects the ruleset" constrains nothing,
 # and Gates 0-3 below are the only thing standing between a PR and main.
 #
+# Rollout PRs for this file are merged by a person (Gate 0 holds them), with
+# a normal `gh pr merge --squash`, never --admin.
+#
 # There is deliberately NO `--auto` fallback. Queuing native auto-merge hands
 # the decision to GitHub, which merges once the blocking requirement clears
 # WITHOUT re-running anything here — every gate and the head pin bypassed. The
-# previous canonical did this. The org-level sweep re-dispatches instead.
+# previous canonical did this. A later event (CI, a review, a Codex comment)
+# or a manual dispatch re-evaluates instead.
 #
 
 on:
@@ -261,28 +209,12 @@ on:
     # 12 repos, "PR Autopilot" in 4, as of 2026-09-09). Naming a workflow a
     # repo does not have is harmless - it simply never fires there.
     #
-    # This trigger is a LATENCY optimisation. A repo whose CI workflow is
-    # named neither of these relies entirely on the ORG-LEVEL sweep
-    # (auto-merge-sweep.yml in Automation-Architecture/.github, */30), which
-    # dispatches this workflow per repo. Do not add repo-specific names here.
-    #
-    # THAT FALLBACK IS CONDITIONAL, so check it before trusting it. The sweep
-    # covers a PR only when ALL of: the sweep workflow is enabled; this
-    # workflow exists and is enabled in the repo; and the PR is open,
-    # non-draft and not in an archived repo. It was `disabled_manually` on
-    # 2026-09-18 during the aaa-merge-gates ruleset pilot (AAA-732), so as
-    # written nothing retries on a schedule anywhere:
-    #
-    #   gh api repos/Automation-Architecture/.github/actions/workflows \
-    #     --jq '.workflows[]|select(.name|startswith("Auto-Merge Sweep"))|.state'
-    #
-    # `active` means the paragraph above holds; anything else means the only
-    # recovery is `gh workflow run auto-merge.yml -R <org>/<repo>`.
-    #
-    # There is no `schedule:` in this file. A per-repo cron across ~62 repos
-    # cost ~268k runner-minutes a month against 3,000 included, which is why
-    # the sweep moved to one org-level job (.github#28). Do not restore it
-    # here.
+    # A repo whose CI workflow is named neither of these gets no CI-completion
+    # trigger; its PRs are evaluated on a review, a Codex comment, or a
+    # manual dispatch. The org-level sweep that used to cover this was
+    # removed in .github#54 (2026-09-29). Do not add repo-specific names here,
+    # and do not add a per-repo `schedule:` (a per-repo cron across ~62 repos
+    # cost ~268k runner-minutes a month; .github#28).
     workflows: ["CI", "PR Autopilot"]
     types: [completed]
   pull_request_review:
@@ -291,8 +223,10 @@ on:
   # time ("Unexpected value 'pull_request_review_thread'"), which turns the
   # whole workflow into a failed push-run and disables every other trigger.
   # Resolving a finding therefore releases the merge only when something
-  # dispatches this workflow again: the org sweep if it is enabled (see
-  # above), otherwise `gh workflow run auto-merge.yml` by hand.
+  # runs this workflow again: a review, a Codex comment, CI, or
+  # `gh workflow run auto-merge.yml` by hand.
+  issue_comment:
+    types: [created, edited, deleted]
   workflow_dispatch:
 
 permissions:
@@ -301,7 +235,7 @@ permissions:
   checks: read
 
 concurrency:
-  group: auto-merge-${{ github.repository }}-${{ github.event_name }}-${{ github.event.workflow_run.head_sha || github.event.pull_request.number || 'sweep' }}
+  group: auto-merge-${{ github.repository }}-${{ github.event_name }}-${{ github.event.workflow_run.head_sha || github.event.pull_request.number || github.event.issue.number || 'sweep' }}
   cancel-in-progress: false
 
 jobs:
@@ -309,6 +243,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'pull_request_review' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request &&
+       github.event.comment.user.login == 'chatgpt-codex-connector[bot]') ||
       github.event.workflow_run.pull_requests[0] != null
     runs-on: ubuntu-latest
     steps:
@@ -325,20 +261,19 @@ jobs:
           EVENT: ${{ github.event_name }}
           WR_PR: ${{ github.event.workflow_run.pull_requests[0].number }}
           PRR_PR: ${{ github.event.pull_request.number }}
-          # The review check-run that must have concluded `success` on the head
-          # SHA: its name exactly as it appears in the check-runs API, and the
-          # slug of the GitHub App that must have produced it.
-          REQUIRED_REVIEW_CHECK: "Greptile Review"
-          REQUIRED_REVIEW_APP: "greptile-apps"
-          # The same reviewer as it appears in the REVIEWS API (a login, not a slug).
-          REQUIRED_REVIEW_BOT: "greptile-apps[bot]"
+          IC_PR: ${{ github.event.issue.number }}
+          # The one reviewer. REST login (GraphQL drops the `[bot]` suffix).
+          CODEX_BOT: "chatgpt-codex-connector[bot]"
+          # Check-runs from this App are ignored by Gate 1 (Greptile is outside
+          # the merge policy). Never Gate 2 evidence, never blocking.
+          IGNORED_CHECK_APP: "greptile-apps"
           # Case-insensitive regex. A review whose BODY matches is a status
           # notice, not a verdict, and does not satisfy Gate 2. Reviewers post
           # these during outages, rate limits and spend caps: claude[bot] spent
           # 2026-08-31 posting "Code review skipped - your organization's overage
           # spend limit has been reached" AS A REVIEW. Such a review carries no
-          # findings, so Gate 3 sees nothing wrong and the PR would merge having
-          # been read by nobody. Holding is the safe direction, so this pattern
+          # findings, so Gate 3 would see nothing wrong and the PR would merge
+          # having been read by nobody. Holding is the safe direction, so this pattern
           # is deliberately broad.
           REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit"
           # A PR carrying this label is held for a human. See the header.
@@ -594,9 +529,12 @@ jobs:
 
           # Latest decision per reviewer; COMMENTED carries no decision. Prints
           # the number of reviewers whose latest decision is CHANGES_REQUESTED.
+          # A person's explicit CHANGES_REQUESTED still holds (an opt-in stop,
+          # like the label; nothing REQUIRES a human). Greptile's never does.
           count_changes_requested() {
-            echo "$1" | jq '
-              [.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")]
+            echo "$1" | jq --arg g "$IGNORED_CHECK_APP" '
+              [.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")
+                   | select((.user.login | sub("\\[bot\\]$"; "")) != $g)]
               | sort_by(.submitted_at)
               | group_by(.user.login)
               | map(last)
@@ -604,36 +542,63 @@ jobs:
               | length'
           }
 
-          # Gate 2 signal 2: how many reviews by REQUIRED_REVIEW_BOT on $2 (the
-          # head SHA) count as a verdict. DISMISSED and CHANGES_REQUESTED do
-          # not, nor does a body matching REVIEW_SKIP_PATTERN. Takes the
-          # REST reviews shape ({user.login, user.type, commit_id, state,
-          # body}). The login is compared with and without the `[bot]`
-          # suffix: REST says `greptile-apps[bot]`, GraphQL says
-          # `greptile-apps` for the same review (measured on
-          # claude-skills-shelf#70), and the final snapshot reads GraphQL.
-          # The author must also BE a bot (REST user.type, GraphQL
-          # __typename): without that, a user account registered as
-          # `greptile-apps` would match the suffixed name. A missing type
-          # does not match. Prints nothing on a jq failure; callers must
-          # treat a non-number as unreadable and hold.
-          count_review_on_head() {
-            echo "$1" | jq --arg u "$REQUIRED_REVIEW_BOT" --arg s "$2" --arg skip "$REVIEW_SKIP_PATTERN" \
+          # Gate 2: did Codex review head $4? $1 reviews (REST shape: user.login,
+          # user.type, commit_id, state, body), $2 issue comments normalised to
+          # {login, type, body, edited}, $3 the PR's commit SHAs as a JSON array,
+          # or `null` when they could not all be read (then no clean-pass
+          # comment counts). Logins are compared with and without `[bot]`
+          # (GraphQL drops it) and the author must BE a Bot, so a user account
+          # named like the app never counts. Prints `review`, `comment` or
+          # `none`; prints nothing on a jq failure, which callers must hold on.
+          codex_reviewed_head() {
+            local n
+            n=$(echo "$1" | jq --arg u "$CODEX_BOT" --arg s "$4" --arg skip "$REVIEW_SKIP_PATTERN" \
               '[.[] | select(.user.type == "Bot"
                              and (.user.login == $u or (.user.login + "[bot]") == $u)
                              and .commit_id == $s
-                             and (.state | IN("DISMISSED", "CHANGES_REQUESTED") | not)
-                             and (((.body // "") | test($skip; "i")) | not))] | length' 2>/dev/null
+                             and (.state | IN("DISMISSED", "PENDING") | not)
+                             and (((.body // "") | test($skip; "i")) | not))] | length' 2>/dev/null) || return 0
+            [[ "$n" =~ ^[0-9]+$ ]] || return 0
+            if [ "$n" -gt 0 ]; then echo review; return 0; fi
+            n=$(echo "$2" | jq --arg u "$CODEX_BOT" --arg s "$4" --arg skip "$REVIEW_SKIP_PATTERN" \
+                   --argjson commits "$3" '
+              def reviewed: [scan("\\*\\*Reviewed commit:\\*\\* `([0-9a-f]{10,40})`") | .[0]];
+              [.[] | select(.type == "Bot"
+                            and (.login == $u or (.login + "[bot]") == $u)
+                            and (.edited == false)
+                            and ((.body // "") | test("\\ACodex Review: Didn.t find any major issues"))
+                            and (((.body // "") | test($skip; "i")) | not)
+                            and ((.body // "") | reviewed | length == 1)
+                            and ((.body // "") | reviewed | .[0] as $p
+                                 | ($s | startswith($p))
+                                   and ($commits | type == "array")
+                                   and ([$commits[] | select(. != $s and startswith($p))] | length == 0)))]
+              | length' 2>/dev/null) || return 0
+            [[ "$n" =~ ^[0-9]+$ ]] || return 0
+            if [ "$n" -gt 0 ]; then echo comment; else echo none; fi
           }
 
-          # Collect every unresolved, non-outdated review thread into
-          # OPEN_THREADS. Returns 1 (after an ::error::) when the answer cannot
+          # Gate 3's rule, one jq filter used by both reads (evaluation and the
+          # final snapshot). Input: review-thread nodes with comments(first:1)
+          # {author{__typename login} path body}. Output:
+          # the threads that block. See the header.
+          BLOCKING_THREADS_JQ='
+            def sev: ((.comments.nodes[0].body // "") | [scan("!\\[P([0-3]) Badge\\]") | .[0]] | first) // "?";
+            [.[] | (.comments.nodes[0] // {}) as $c
+                 | select(.isResolved == false
+                          and ($c.author.__typename // "") == "Bot"
+                          and (($c.author.login // "") == $u or (($c.author.login // "") + "[bot]") == $u)
+                          and (sev | IN("2", "3") | not)
+                          and .isOutdated == false)]'
+
+          # Collect every BLOCKING review thread (Gate 3's rule, above) into
+          # OPEN_THREADS. $2 is the head SHA. Returns 1 (after an ::error::) when the answer cannot
           # be read; the caller must hold. Threads are paged 100 at a time and
           # NEVER leave the list - a resolved thread stays in it - so a PR that
           # ever crosses 100 threads is walked page by page. Refusing on
           # hasNextPage would make such a PR unmergeable forever.
           read_open_threads() {
-            local pr="$1" after="" page=0 page_json
+            local pr="$1" sha="$2" after="" page=0 page_json
             local -a after_arg
             OPEN_THREADS="[]"
             while :; do
@@ -651,20 +616,24 @@ jobs:
                       reviewThreads(first:100, after:$after){
                         pageInfo{ hasNextPage endCursor }
                         nodes{ isResolved isOutdated
-                          comments(first:1){ nodes{ author{ login } path } } } } } } }' \
+                          comments(first:1){ nodes{ author{ __typename login } path body } } } } } } }' \
                 --jq '.data.repository.pullRequest.reviewThreads
-                      | {more: .pageInfo.hasNextPage, cursor: .pageInfo.endCursor,
-                         open: [.nodes[] | select(.isResolved == false and .isOutdated == false)]}' 2>/dev/null) || page_json=""
+                      | {more: .pageInfo.hasNextPage, cursor: .pageInfo.endCursor, nodes: .nodes}' 2>/dev/null) || page_json=""
 
               # Fail CLOSED on every page: an unreadable answer is not an
               # empty one, and `.more` must be a real boolean — a missing
               # field must read as "cannot tell", never as "no more pages".
               if [ -z "$page_json" ] \
-                 || ! echo "$page_json" | jq -e '(.open | type == "array") and (.more | type == "boolean")' >/dev/null 2>&1; then
+                 || ! echo "$page_json" | jq -e '(.nodes | type == "array") and (.more | type == "boolean")' >/dev/null 2>&1; then
                 echo "::error::Could not read review threads (page $page) for #$pr — refusing to merge."
                 return 1
               fi
-              OPEN_THREADS=$(jq -n --argjson a "$OPEN_THREADS" --argjson b "$(echo "$page_json" | jq '.open')" '$a + $b')
+              local blocking
+              if ! blocking=$(echo "$page_json" | jq --arg u "$CODEX_BOT" --arg sha "$sha" ".nodes | $BLOCKING_THREADS_JQ"); then
+                echo "::error::Could not evaluate review threads (page $page) for #$pr — refusing to merge."
+                return 1
+              fi
+              OPEN_THREADS=$(jq -n --argjson a "$OPEN_THREADS" --argjson b "$blocking" '$a + $b')
               [ "$(echo "$page_json" | jq -r '.more')" = "true" ] || return 0
               after=$(echo "$page_json" | jq -r '.cursor // empty')
               if [ -z "$after" ]; then
@@ -674,18 +643,17 @@ jobs:
             done
           }
 
-          # The final snapshot (see the header): head OID, labels, reviews and
-          # threads in ONE GraphQL read, immediately before the merge. Returns
-          # 0 only when the PR may merge; every other path holds (return 1),
-          # including any unreadable or malformed answer.
+          # The final snapshot (see the header): head OID, labels, reviews,
+          # issue comments and threads in ONE GraphQL read, immediately before
+          # the merge. Re-runs Gates 2 and 3. $3 is the PR's commit SHAs (JSON,
+          # or null), read during evaluation; the head is re-pinned here, so
+          # the same head has the same commits. Returns 0 only when the PR may
+          # merge; every other path holds (return 1), including any
+          # unreadable or malformed answer.
           final_snapshot_hold() {
-            local pr="$1" sha="$2" via="$3" snap head held n_labels n_reviews n_requests more_threads reviews cr on_head
+            local pr="$1" sha="$2" commits="$3" snap head held n_labels n_reviews more_threads reviews comments cr via
             if [ -z "${HOLD_LABEL// /}" ]; then
               echo "::error::HOLD_LABEL is empty - refusing to merge #$pr."
-              return 1
-            fi
-            if [ "$via" != "check" ] && [ "$via" != "review" ]; then
-              echo "::error::Final snapshot for #$pr has no Gate 2 signal ('$via') - refusing to merge."
               return 1
             fi
             snap=$(gh api graphql \
@@ -695,11 +663,11 @@ jobs:
                   pullRequest(number:$number){
                     headRefOid
                     labels(first:100){ totalCount nodes{ name } }
-                    reviewRequests(first:1){ totalCount }
                     reviews(last:100){ totalCount nodes{ state submittedAt body commit{ oid } author{ __typename login } } }
+                    comments(last:100){ nodes{ body lastEditedAt author{ __typename login } } }
                     reviewThreads(first:100){ pageInfo{ hasNextPage }
                       nodes{ isResolved isOutdated
-                        comments(first:1){ nodes{ author{ login } path } } } } } } }' \
+                        comments(first:1){ nodes{ author{ __typename login } path body } } } } } } }' \
               2>/dev/null) || snap=""
             if [ -z "$snap" ] || ! echo "$snap" | jq -e '
                  ((.errors // []) | length) == 0
@@ -707,9 +675,9 @@ jobs:
                    | ($p.headRefOid | type == "string")
                      and ($p.labels.totalCount | type == "number")
                      and ($p.labels.nodes | type == "array")
-                     and ($p.reviewRequests.totalCount | type == "number")
                      and ($p.reviews.totalCount | type == "number")
                      and ($p.reviews.nodes | type == "array")
+                     and ($p.comments.nodes | type == "array")
                      and ($p.reviewThreads.pageInfo.hasNextPage | type == "boolean")
                      and ($p.reviewThreads.nodes | type == "array"))' >/dev/null 2>&1; then
               echo "::error::Could not read the final snapshot for #$pr — refusing to merge."
@@ -730,16 +698,6 @@ jobs:
                      '[.data.repository.pullRequest.labels.nodes[].name] | index($l) != null')
             if [ "$held" != "false" ]; then
               echo "::notice::PR #$pr held (final snapshot) - labelled '$HOLD_LABEL'; a human merges it."
-              return 1
-            fi
-
-            # Gate 2's pending-request hold, re-read. A reviewer or team
-            # requested after the evaluation-start read would otherwise go
-            # unseen (.github#43). reviewRequests covers users and teams, as
-            # requested_reviewers + requested_teams do in REST.
-            n_requests=$(echo "$snap" | jq '.data.repository.pullRequest.reviewRequests.totalCount')
-            if [ "$n_requests" -gt 0 ]; then
-              echo "::notice::PR #$pr held (final snapshot) - $n_requests requested reviewer(s)/team(s) still pending."
               return 1
             fi
 
@@ -766,32 +724,33 @@ jobs:
               return 1
             fi
 
-            # Gate 2 signal 2, re-run. When the review on this head is what
-            # cleared Gate 2, it must still qualify now: dismissing it, or it
-            # turning out to be the only one, must hold (.github#43). Signal
-            # 1 (the check) is not re-read here; see the header.
-            if [ "$via" = "review" ]; then
-              on_head=$(count_review_on_head "$reviews" "$sha")
-              if ! [[ "$on_head" =~ ^[0-9]+$ ]]; then
-                echo "::error::Could not re-check the review on head for #$pr before merge — refusing to merge."
-                return 1
-              fi
-              if [ "$on_head" -lt 1 ]; then
-                echo "::notice::PR #$pr held (final snapshot) - the review that cleared Gate 2 no longer qualifies."
-                return 1
-              fi
-            fi
+            # Gate 2, re-run: Codex's review or clean pass on this head must
+            # still qualify now (dismissed, edited or deleted mid-run holds).
+            comments=$(echo "$snap" | jq '[.data.repository.pullRequest.comments.nodes[]
+                         | {login: (.author.login // "ghost"), type: (.author.__typename // ""),
+                            body: (.body // ""), edited: (.lastEditedAt != null)}]')
+            via=$(codex_reviewed_head "$reviews" "$comments" "$commits" "$sha")
+            case "$via" in
+              review|comment) ;;
+              none) echo "::notice::PR #$pr held (final snapshot) - Codex's review of this head no longer qualifies."
+                    return 1 ;;
+              *)    echo "::error::Could not re-check Codex's review of head for #$pr before merge — refusing to merge."
+                    return 1 ;;
+            esac
 
             more_threads=$(echo "$snap" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage')
             if [ "$more_threads" = "true" ]; then
               echo "::notice::PR #$pr has over 100 review threads; re-reading them all (wider window, see header)."
-              read_open_threads "$pr" || return 1
+              read_open_threads "$pr" "$sha" || return 1
             else
-              OPEN_THREADS=$(echo "$snap" | jq '[.data.repository.pullRequest.reviewThreads.nodes[]
-                               | select(.isResolved == false and .isOutdated == false)]')
+              if ! OPEN_THREADS=$(echo "$snap" | jq --arg u "$CODEX_BOT" --arg sha "$sha" \
+                     ".data.repository.pullRequest.reviewThreads.nodes | $BLOCKING_THREADS_JQ"); then
+                echo "::error::Could not evaluate review threads for #$pr before merge — refusing to merge."
+                return 1
+              fi
             fi
             if [ "$(echo "$OPEN_THREADS" | jq 'length')" -gt 0 ]; then
-              echo "::warning::PR #$pr NOT merged — review finding(s) opened since Gate 3."
+              echo "::warning::PR #$pr NOT merged — P0/P1 Codex finding(s) opened since Gate 3."
               return 1
             fi
             return 0
@@ -800,6 +759,7 @@ jobs:
           case "$EVENT" in
             pull_request_review|pull_request_review_thread) PR_LIST="$PRR_PR" ;;
             workflow_run)        PR_LIST="$WR_PR" ;;
+            issue_comment)       PR_LIST="${IC_PR:-}" ;;
             # --limit is REQUIRED: `gh pr list` defaults to 30, so without it a
             # repo with more open PRs silently drops the older ones from the
             # sweep - they would never be re-evaluated, and never have a stale
@@ -823,7 +783,7 @@ jobs:
             BASE_REF=$(echo "$PR" | jq -r '.base.ref')
             STATE=$(echo "$PR"  | jq -r '.state')
             DRAFT=$(echo "$PR"  | jq -r '.draft')
-            PENDING_REVIEWERS=$(echo "$PR" | jq '([.requested_reviewers[]?.login] + [.requested_teams[]?.slug]) | length')
+            N_COMMITS=$(echo "$PR" | jq -r '.commits')
 
             if [ -z "$SHA" ] || [ "$SHA" = "null" ]; then
               echo "::error::Could not resolve HEAD SHA for #$PR_NUMBER — skipping."
@@ -848,8 +808,8 @@ jobs:
             # These files are instructions to the reviewer, or to this gate.
             # A PR that changes them can suppress the review judging it: an
             # added "scope restrictions" section in CLAUDE.md/AGENTS.md is a
-            # demonstrated way to silence a finding, and Greptile imports those
-            # files as review context. A PR editing auto-merge.yml is the same
+            # demonstrated way to silence a finding, and the reviewers import
+            # those files as review context. A PR editing auto-merge.yml is the same
             # problem one level up. Humans merge these, deliberately.
             # Fail CLOSED if the file list is unreadable: `|| true` on the whole
             # pipeline would mask a gh/API failure as "no guarded files" and let
@@ -860,7 +820,18 @@ jobs:
             gate0_hold_if_guarded "$PR_NUMBER" "initial" "$PR" || continue
 
             # ── Gate 1: check-runs on the current head ──────────────────────
-            CHECKS=$(gh api "/repos/$REPO/commits/$SHA/check-runs" --paginate --jq '.check_runs[]' | jq -s '.')
+            # Greptile's check-runs are dropped first: Greptile is outside the
+            # merge policy, so its check neither holds nor passes a PR.
+            if [ -z "${IGNORED_CHECK_APP// /}" ] || [ -z "${CODEX_BOT// /}" ] \
+               || [ -z "${REVIEW_SKIP_PATTERN// /}" ]; then
+              echo "::error::IGNORED_CHECK_APP, CODEX_BOT or REVIEW_SKIP_PATTERN is empty - refusing to merge."
+              continue
+            fi
+            if ! CHECKS=$(gh api "/repos/$REPO/commits/$SHA/check-runs" --paginate --jq '.check_runs[]' | jq -s '.'); then
+              echo "::error::Could not read check-runs for #$PR_NUMBER — refusing to merge."
+              continue
+            fi
+            CHECKS=$(echo "$CHECKS" | jq --arg g "$IGNORED_CHECK_APP" '[.[] | select((.app.slug // "") != $g)]')
             TOTAL=$(echo "$CHECKS"   | jq 'length')
             PENDING=$(echo "$CHECKS" | jq '[.[] | select(.status != "completed")] | length')
             # ACCEPT-LIST, not a deny-list. Listing the failure conclusions let
@@ -875,19 +846,20 @@ jobs:
               (.conclusion // "") | IN("success", "neutral", "skipped") | not
             )] | length')
 
-            [ "$TOTAL" -eq 0 ]   && { echo "no check-runs — skip."; continue; }
+            [ "$TOTAL" -eq 0 ]   && { echo "no check-runs (other than ${IGNORED_CHECK_APP}'s) — skip."; continue; }
             [ "$PENDING" -gt 0 ] && { echo "$PENDING check(s) pending — skip."; continue; }
             if [ "$BLOCKED" -gt 0 ]; then
               echo "$CHECKS" | jq -r '.[] | select((.conclusion // "") | IN("success", "neutral", "skipped") | not) | "  - \(.name): \(.conclusion // "no conclusion")"'
               echo "$BLOCKED check(s) not passing — skip."
               continue
             fi
-            echo "Gate 1 OK: $TOTAL check-run(s) accepted (success/neutral/skipped)."
+            echo "Gate 1 OK: $TOTAL check-run(s) accepted (success/neutral/skipped; ${IGNORED_CHECK_APP} ignored)."
 
-            # ── Gate 2: the review check on THIS head (hard hold) ────────────
-            # The check-run, not the reviews API — see the header: a clean
-            # pass posts no review at all.
-            REVIEWS=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate --jq '.[]' | jq -s '.')
+            # ── Gate 2: Codex reviewed THIS head (hard hold) ─────────────────
+            if ! REVIEWS=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/reviews" --paginate --jq '.[]' | jq -s '.'); then
+              echo "::error::PR #$PR_NUMBER held - could not read reviews."
+              continue
+            fi
 
             # Only each reviewer's LATEST decision counts. The reviews API keeps
             # every submission, so a CHANGES_REQUESTED that the same reviewer
@@ -899,78 +871,59 @@ jobs:
               continue
             fi
 
-            # Fail CLOSED: refuse unless the named check, FROM THE NAMED APP, is
-            # present and successful on $SHA. A missing name, a missing check, a
-            # check from another producer and an unreadable answer all hold.
-            # $CHECKS is the head SHA's check-runs fetched in Gate 1, so this
-            # cannot drift onto another commit.
-            if [ -z "${REQUIRED_REVIEW_CHECK// /}" ] || [ -z "${REQUIRED_REVIEW_APP// /}" ] \
-               || [ -z "${REQUIRED_REVIEW_BOT// /}" ] || [ -z "${REVIEW_SKIP_PATTERN// /}" ]; then
-              echo "::error::REQUIRED_REVIEW_CHECK/APP/BOT or REVIEW_SKIP_PATTERN is empty - refusing to merge unreviewed."
+            # Issue comments, for Codex's clean pass. GraphQL gives lastEditedAt
+            # (REST has no edit marker). The latest 100 only: a miss can only
+            # lose a clean pass, which holds.
+            if ! COMMENTS=$(gh api graphql \
+                  -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$PR_NUMBER" \
+                  -f query='query($owner:String!,$name:String!,$number:Int!){
+                    repository(owner:$owner,name:$name){ pullRequest(number:$number){
+                      comments(last:100){ nodes{ body lastEditedAt author{ __typename login } } } } } }' \
+                  --jq '[.data.repository.pullRequest.comments.nodes[]
+                         | {login: (.author.login // "ghost"), type: (.author.__typename // ""),
+                            body: (.body // ""), edited: (.lastEditedAt != null)}]' 2>/dev/null) \
+               || ! echo "$COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+              echo "::error::PR #$PR_NUMBER held - could not read comments."
               continue
             fi
 
-            # HOLD, never expire. On a repo the reviewer does not cover this
-            # holds every PR, which is the intended opt-in switch, not a defect.
-            if [ "$PENDING_REVIEWERS" -gt 0 ]; then
-              echo "::notice::PR #$PR_NUMBER held - $PENDING_REVIEWERS requested reviewer(s)/team(s) still pending."
-              continue
-            fi
-
-            # Signal 1: the reviewer's check on this head, from THAT app.
-            # ACCEPTED residual (AAA-711): this check is bound to $SHA, not to
-            # this PR or its base. `.pull_requests` is empty for this App, so
-            # we cannot close that. See the header. Do not "fix" this by also
-            # requiring a reaction, a Codex comment, or `.pull_requests`.
-            REVIEW_OK=$(echo "$CHECKS" | jq --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
-              '[.[] | select(.name == $n and .app.slug == $a
-                             and .status == "completed" and .conclusion == "success")] | length')
-            GATE2_VIA=check
-
-            # Signal 2: a review the app submitted on this exact SHA. DISMISSED
-            # and CHANGES_REQUESTED do not count; CHANGES_REQUESTED is already
-            # refused above. Neither does a body that is a status notice rather
-            # than a verdict — see REVIEW_SKIP_PATTERN. Fail closed if the
-            # reviews read fails.
-            if [ "${REVIEW_OK:-0}" -lt 1 ]; then
-              REVIEW_ON_HEAD=$(count_review_on_head "$REVIEWS" "$SHA")
-              if ! [[ "$REVIEW_ON_HEAD" =~ ^[0-9]+$ ]]; then
-                echo "::error::PR #$PR_NUMBER held - could not read reviews."
-                continue
+            # Every commit this PR carries, so a Reviewed-commit prefix is shown
+            # to name only this head. The endpoint stops at 250; beyond that,
+            # or if unreadable, no clean-pass comment counts (`null`).
+            COMMITS=null
+            if [[ "$N_COMMITS" =~ ^[0-9]+$ ]] && [ "$N_COMMITS" -le 250 ]; then
+              if C=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/commits" --paginate --jq '.[].sha' | jq -Rs 'split("\n") | map(select(length > 0))') \
+                 && [ "$(echo "$C" | jq 'length')" = "$N_COMMITS" ]; then
+                COMMITS="$C"
               fi
-              [ "$REVIEW_ON_HEAD" -ge 1 ] && { REVIEW_OK=1; GATE2_VIA=review; }
             fi
 
-            if [ "${REVIEW_OK:-0}" -lt 1 ]; then
-              SEEN_STATE=$(echo "$CHECKS" | jq -r --arg n "$REQUIRED_REVIEW_CHECK" --arg a "$REQUIRED_REVIEW_APP" \
-                '[.[] | select(.name == $n)] as $named
-                 | ($named | map(select(.app.slug == $a))) as $mine
-                 | if   ($named | length) == 0 then "absent"
-                   elif ($mine  | length) == 0 then "produced by " + ($named | map(.app.slug // "unknown") | unique | join(",")) + ", not " + $a
-                   else ($mine | map("\(.status)/\(.conclusion // "-")") | join(",")) end')
-              printf '::notice::PR #%s held - no verdict on %s: check %s is %s, and %s has not reviewed this SHA.\n' \
-                "$PR_NUMBER" "${SHA:0:7}" "$REQUIRED_REVIEW_CHECK" "$SEEN_STATE" "$REQUIRED_REVIEW_BOT"
-              continue
-            fi
-            printf 'Gate 2 OK: %s cleared %s (check or review on this head).\n' \
-              "$REQUIRED_REVIEW_APP" "${SHA:0:7}"
+            GATE2_VIA=$(codex_reviewed_head "$REVIEWS" "$COMMENTS" "$COMMITS" "$SHA")
+            case "$GATE2_VIA" in
+              review|comment) ;;
+              none)
+                printf '::notice::PR #%s held - Codex has not reviewed %s (a review or clean pass of an earlier commit does not count).\n' \
+                  "$PR_NUMBER" "${SHA:0:7}"
+                continue ;;
+              *)
+                echo "::error::PR #$PR_NUMBER held - could not evaluate Codex's review of the head."
+                continue ;;
+            esac
+            printf 'Gate 2 OK: Codex reviewed %s (%s).\n' "${SHA:0:7}" "$GATE2_VIA"
 
-            # ── Gate 3: unresolved review findings ──────────────────────────
-            # Gate 2 only proves a review was submitted. This reads what it
-            # said. Outdated threads are excluded deliberately: a follow-up
-            # commit that rewrites the lines a finding points at clears it,
-            # which is what keeps this from deadlocking on push (cf. #78).
-            # read_open_threads pages the list and fails closed; see the helper.
-            read_open_threads "$PR_NUMBER" || continue
+            # ── Gate 3: open P0/P1 Codex findings ───────────────────────────
+            # read_open_threads pages the list, applies Gate 3's rule and
+            # fails closed; see the helper and the header.
+            read_open_threads "$PR_NUMBER" "$SHA" || continue
             THREADS="$OPEN_THREADS"
 
             UNRESOLVED=$(echo "$THREADS" | jq 'length')
             if [ "$UNRESOLVED" -gt 0 ]; then
               echo "$THREADS" | jq -r '.[] | "  - \(.comments.nodes[0].path // "?") (\(.comments.nodes[0].author.login // "?"))"'
-              echo "::warning::PR #$PR_NUMBER NOT merged — $UNRESOLVED unresolved review finding(s). Address them, or resolve the thread(s) to release the merge."
+              echo "::warning::PR #$PR_NUMBER NOT merged — $UNRESOLVED open P0/P1 Codex finding(s). Fix them, or resolve the thread(s) to release the merge."
               continue
             fi
-            echo "Gate 3 OK: no unresolved review findings."
+            echo "Gate 3 OK: no open P0/P1 Codex findings."
 
             # Merge-time Gate 0. Order is load-bearing: files check first,
             # then the last head+base re-read, then the final snapshot, then
@@ -991,11 +944,11 @@ jobs:
               continue
             fi
             if [ "$SHA_NOW" != "$SHA" ]; then
-              echo "::notice::PR #$PR_NUMBER head moved since evaluation — leaving it for the next sweep."
+              echo "::notice::PR #$PR_NUMBER head moved since evaluation — leaving it for the next run."
               continue
             fi
             if [ "$BASE_NOW" != "$BASE" ] || [ "$BASE_REF_NOW" != "$BASE_REF" ]; then
-              echo "::notice::PR #$PR_NUMBER base moved since Gate 0 ($BASE_REF@$BASE -> $BASE_REF_NOW@$BASE_NOW) — holding; next sweep re-evaluates against the new base."
+              echo "::notice::PR #$PR_NUMBER base moved since Gate 0 ($BASE_REF@$BASE -> $BASE_REF_NOW@$BASE_NOW) — holding; the next run re-evaluates against the new base."
               continue
             fi
             hold_if_merge_queue "$PR_NUMBER" "$BASE_REF" "pre-merge" || continue
@@ -1022,7 +975,7 @@ jobs:
             # Last: one read of everything unpinned (head OID, labels, reviews,
             # threads). See the header. Nothing but local jq between it and the
             # merge call.
-            final_snapshot_hold "$PR_NUMBER" "$SHA" "$GATE2_VIA" || continue
+            final_snapshot_hold "$PR_NUMBER" "$SHA" "$COMMITS" || continue
             echo "Merging PR #$PR_NUMBER (Gate 0 and final snapshot revalidated)..."
 
             # gh pr merge exit 0 is provisional: a merge-queue base enqueues
@@ -1065,11 +1018,11 @@ jobs:
             # the decision to GitHub, which merges once the blocking requirement
             # clears WITHOUT re-running anything here - Gates 0-3 and the head
             # pin are all bypassed. A later dispatch re-evaluates every gate
-            # against the head as it is at that moment: the org sweep while it
-            # is enabled, otherwise a manual run. A blocked PR waits; it does
+            # against the head as it is at that moment: the next CI, review or
+            # Codex-comment event, or a manual run. A blocked PR waits; it does
             # not slip through — but if nothing dispatches, it waits forever,
             # so the notice below is not a promise that anything will retry.
-            echo "::notice::PR #$PR_NUMBER not mergeable yet - leaving it for the next sweep."
+            echo "::notice::PR #$PR_NUMBER not mergeable yet - leaving it for the next run."
           done
 
           if [ "$GATE0_RACE" -ne 0 ]; then

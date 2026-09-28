@@ -53,7 +53,7 @@ while i < len(args):
     if a in ("-X", "--input"): i += 2; continue
     path = a; i += 1
 if path == "graphql":
-    key = "graphql:" + fields["id"]
+    key = ("graphql:threads:" if "reviewThreads" in fields.get("query", "") else "graphql:") + fields["id"]
 else:
     key = path.split("/repos/" + os.environ["REPO"], 1)[-1].split("?", 1)[0]
 if key not in fx:
@@ -133,14 +133,43 @@ def clean(sha=HEAD[:10], **kw):
     return b
 
 
-def codex_review(commit, rid=11):
-    return {"id": rid, "user": {"login": CODEX}, "state": "COMMENTED", "commit_id": commit,
-            "body": "### Codex Review\n\n**Reviewed commit:** `%s`" % commit[:10]}
+def codex_review(commit, rid=11, state="COMMENTED", at="2026-09-27T23:12:30Z", body=None):
+    return {"id": rid, "user": {"login": CODEX, "type": "Bot"}, "state": state, "commit_id": commit,
+            "submitted_at": at,
+            "body": body if body is not None else "### Codex Review\n\n**Reviewed commit:** `%s`" % commit[:10]}
 
 
-def finding(original, rid=11, login=CODEX):
-    return {"user": {"login": login}, "pull_request_review_id": rid,
-            "original_commit_id": original, "commit_id": HEAD}
+def badge(p):
+    return "**<sub><sub>![P%d Badge](https://img.shields.io/badge/P%d-orange?style=flat)</sub></sub>  Finding" % (p, p)
+
+
+def finding(original, rid=11, login=CODEX, body="Something is wrong here", resolved=False, outdated=None):
+    """An inline review comment that starts a thread. By default a finding on an
+    earlier commit is outdated (a later push rewrote its lines). The harness
+    turns these into the GraphQL review threads and each review's comments."""
+    return {"user": {"login": login}, "pull_request_review_id": rid, "body": body,
+            "original_commit_id": original, "commit_id": HEAD, "resolved": resolved,
+            "outdated": (original != HEAD) if outdated is None else outdated}
+
+
+def derive_findings(fx):
+    """/pulls/{PR}/comments (the findings) -> review threads + per-review comments."""
+    key = f"/pulls/{PR}/comments"
+    if key not in fx:
+        return fx
+    fx = dict(fx)
+    found = fx[key]
+    nodes = [{"isResolved": f["resolved"], "isOutdated": f["outdated"], "comments": {"nodes": [{
+        "author": {"__typename": "Bot" if f["user"]["login"].endswith("[bot]") else "User",
+                   "login": f["user"]["login"].replace("[bot]", "")},
+        "path": "a.py", "body": f["body"]}]}} for f in found]
+    fx["graphql:threads:PR_1"] = {"data": {"node": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}
+    for r in fx.get(f"/pulls/{PR}/reviews") or []:
+        if "id" in r:
+            fx[f"/pulls/{PR}/reviews/{r['id']}/comments"] = [
+                {"id": i} for i, f in enumerate(found) if f["pull_request_review_id"] == r["id"]]
+    return fx
 
 
 CASES = []
@@ -304,8 +333,8 @@ def greptile_check(conclusion="success"):
         "output": {"title": "ok", "summary": "", "text": ""}}]}}
 
 
-GREPTILE_REVIEW = {"id": 12, "user": {"login": GREPTILE}, "state": "APPROVED", "commit_id": HEAD, "body": ""}
-HUMAN_APPROVAL = {"id": 13, "user": {"login": "some-human"}, "state": "APPROVED", "commit_id": HEAD, "body": "LGTM"}
+GREPTILE_REVIEW = {"id": 12, "user": {"login": GREPTILE, "type": "Bot"}, "state": "APPROVED", "commit_id": HEAD, "body": ""}
+HUMAN_APPROVAL = {"id": 13, "user": {"login": "some-human", "type": "User"}, "state": "APPROVED", "commit_id": HEAD, "body": "LGTM"}
 
 case("Greptile success with no Codex review", "fail", with_(base(), **greptile_check()))
 case("Greptile success with an open Codex finding", "fail",
@@ -390,6 +419,51 @@ def trigger_types():
     on = wf.get("on", wf.get(True))
     return on["pull_request_target"]["types"]
 
+# --- P0/P1 threshold (Brad, 2026-09-29): only open P0/P1 Codex findings fail --
+R = f"/pulls/{PR}/reviews"
+C = f"/pulls/{PR}/comments"
+case("Codex review on head, P2 finding only", "success",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))]}))
+case("Codex review on head, P3 finding only", "success",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(3))]}))
+case("Codex review on head, P1 finding", "fail",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(1))]}))
+case("Codex review on head, P0 finding", "fail",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(0))]}))
+case("Codex review on head, unbadged finding (fail closed)", "fail",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD)]}))
+case("Codex review on head, P1 finding resolved", "success",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(1), resolved=True)]}))
+case("Codex review on head, P2 plus a P1", "fail",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2)), finding(HEAD, body=badge(1))]}))
+case("clean comment on head, P2 finding on head", "success",
+     with_(clean(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))]}))
+case("P1 raised on an earlier commit that still applies, clean on head", "fail",
+     with_(clean(), **{R: [codex_review(OLD)], C: [finding(OLD, body=badge(1), outdated=False)]}))
+case("P1 raised on an earlier commit, now outdated, clean on head", "success",
+     with_(clean(), **{R: [codex_review(OLD)], C: [finding(OLD, body=badge(1))]}))
+case("human thread with a P1 badge never blocks", "success",
+     with_(clean(), **{C: [finding(HEAD, login="some-human", body=badge(1))]}))
+case("Greptile thread with a P1 badge never blocks", "success",
+     with_(clean(), **{C: [finding(HEAD, login=GREPTILE, body=badge(1))]}))
+case("dismissed Codex review on head with a P2 is not evidence", "fail",
+     with_(base(), **{R: [codex_review(HEAD, state="DISMISSED")], C: [finding(HEAD, body=badge(2))]}))
+case("Codex review on head is a skip notice", "fail",
+     with_(base(), **{R: [codex_review(HEAD, body="Codex hit a usage limit: rate limit")], C: [finding(HEAD, body=badge(2))]}))
+case("Codex review on head predates a retarget", "fail",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))]},
+           extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:30:00Z"))))
+case("Codex review on head after a retarget", "success",
+     with_(base(), **{R: [codex_review(HEAD, at="2026-09-27T23:40:00Z")], C: [finding(HEAD, body=badge(2))]},
+           extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:30:00Z"))))
+case("Codex review on head, Codex authored the head", "fail",
+     with_(base(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))],
+                      f"/commits/{HEAD}": {"author": {"login": CODEX}, "committer": {"login": "web-flow"}}}))
+case("Codex review on head by a User account named like Codex", "fail",
+     with_(base(), **{R: [dict(codex_review(HEAD), user={"login": CODEX, "type": "User"})], C: []}))
+case("review threads unreadable", "fail",
+     {k: v for k, v in with_(clean(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))]}).items()} | {"__drop_threads": True})
+
 
 def main():
     assert {"labeled", "unlabeled"} <= set(trigger_types()), "the hold label must re-evaluate the verdict"
@@ -412,7 +486,9 @@ def main():
         (tmp / "bin/gh").write_text(STUB)
         (tmp / "bin/gh").chmod(0o755)
         for name, expect, fx, contains in CASES:
-            fx = dict(fx)
+            fx = derive_findings(dict(fx))
+            if fx.pop("__drop_threads", False):
+                fx.pop("graphql:threads:PR_1", None)
             env_over = fx.pop("__env", {})
             (tmp / "fx.json").write_text(json.dumps(fx))
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),

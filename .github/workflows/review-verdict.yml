@@ -23,24 +23,39 @@ name: Review verdict
 #   fewer than 3000; unreadable, short, empty or oversized lists refuse. Not
 #   applied to a draft, to a PR with the `no-auto-merge` hold label, or to a
 #   fork's branch; those need Codex like any other. It is checked BEFORE the
-#   Codex findings block: a documentation-only PR needs no review, so Codex
+#   Codex P0/P1 findings block: a documentation-only PR needs no review, so Codex
 #   findings on it do not hold it. A retarget fires `edited`, a label change
 #   `labeled`/`unlabeled`; both re-evaluate. doc-auto-merge.yml does the merge.
 #
-# Evidence counted for every other PR (exactly one kind; nothing else,
+# THRESHOLD (Brad, 2026-09-29): pass when Codex has reviewed the current head
+# and no P0/P1 Codex finding is open. P2/P3 findings never fail it.
+#
+# Evidence counted for every other PR (Codex only; nothing else,
 # reactions never):
-#   Codex's clean result for this head: an ISSUE comment on this PR,
-#   authored by the chatgpt-codex-connector App itself (never a human
-#   quoting it), never edited, opening "Codex Review: Didn't find any major
-#   issues" and naming exactly one "Reviewed commit" that is a 10+ hex prefix
-#   of this head. Codex posts a clean pass this way, not as a review object.
-#   Codex's review objects never count: Codex posts one only to carry
-#   findings, and a writer can delete the findings, leaving a bare review
-#   object (Codex P1 on aios-coffee#122).
-# CODEX FINDINGS BLOCK: if Codex left any inline comment whose
-# original_commit_id is this head, or any review object on this head, the
-# verdict fails for this head whatever else exists. Fixing means a new push
-# and a clean Codex pass on it.
+#   1. Codex's clean result for this head: an ISSUE comment on this PR,
+#      authored by the chatgpt-codex-connector App itself (never a human
+#      quoting it), never edited, opening "Codex Review: Didn't find any major
+#      issues" and naming exactly one "Reviewed commit" that is a 10+ hex
+#      prefix of this head (full rules at evidence_from_codex_comment);
+#   2. a Codex review object whose commit_id is this head, not dismissed, not
+#      a skip notice, submitted after the latest retarget or head force-push.
+#      Codex posts one to carry findings; the rule below decides whether they
+#      block.
+# CODEX P0/P1 FINDINGS BLOCK: the verdict fails, whatever else exists, when
+#   - an unresolved, not-outdated review thread started by Codex has severity
+#     P0 or P1, read from the badge Codex puts in the body
+#     (`![P1 Badge](...)`). A Codex thread with no readable P2/P3 badge counts
+#     as P1 (fail closed). Threads by anyone else never block; or
+#   - a Codex review object on this head has no inline comments left. Codex
+#     posts a review object only to carry findings (143 of 143 checked), so
+#     none left means they were deleted and their severity is unreadable
+#     (Codex P1 on aios-coffee#122).
+# Resolving a P0/P1 thread fires no event this workflow can listen to
+# (pull_request_review_thread is not an Actions trigger), so re-run the
+# verdict after resolving one: `gh workflow run review-verdict.yml -f
+# pr_number=<n> -f head_sha=<sha>`, or push.
+# RESIDUAL, accepted: a writer who deletes only the P0/P1 inline comment of a
+# Codex review, leaving a P2, leaves nothing to read. It needs write access.
 # No review object, check-run or approval from anyone else (Greptile, a human,
 # another bot) is evidence. A Greptile check or review, passing or failing, is
 # ignored. (Until 2026-09-29 a Greptile check or review passed the verdict on
@@ -48,7 +63,7 @@ name: Review verdict
 # The author of the last push is never evidence for that head. Skip notices
 # never count.
 #
-# RESIDUAL, accepted: a clean Codex comment names the head
+# RESIDUAL, accepted (evidence 1): a clean Codex comment names the head
 # it reviewed but not the base, and it is bound to the base only by time
 # (posted after the latest retarget). If the author retargets the PR while a
 # Codex review is running, the clean comment lands after the retarget and is
@@ -58,7 +73,7 @@ name: Review verdict
 # (The 10-hex prefix collision this note used to describe is closed:
 # .github#48.)
 #
-# RESIDUAL, accepted: a replaced head's history is listed
+# RESIDUAL, accepted (evidence 1): a replaced head's history is listed
 # against the CURRENT base. If a Codex review of A is running, the base then
 # moves to contain A, and the PR reaches a precomputed head B sharing A's
 # 10-hex prefix (by force-push, or by fast-forward so A drops out of the PR's
@@ -442,50 +457,166 @@ jobs:
             echo "$commit" | jq '[.author.login // empty, .committer.login // empty] | map(select(length > 0)) | unique'
           }
 
-          # Codex findings on THIS head fail the verdict for it, whatever else exists.
-          # A finding is an inline review comment by Codex whose
-          # original_commit_id is this head (commit_id moves with later pushes;
-          # original_commit_id does not), OR any Codex review object on this
-          # head, dismissed or not. Codex posts a review object only to carry
-          # findings, and unlike an inline comment it cannot be deleted, so a
-          # writer deleting the findings or dismissing the review does not
-          # clear the veto (Codex P1 on aios-coffee#122). Unreadable counts as
-          # blocked.
+          # Gate the whole verdict on open P0/P1 Codex findings (see the header).
+          # Sets CODEX_BLOCKED=1 on a blocking finding or on anything unreadable,
+          # and CODEX_REVIEWS (REST reviews) for evidence 2.
           load_codex_findings() {
             CODEX_BLOCKED=0
-            local comments n
-            if ! comments=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/comments" --jq '.[]' | jq -s '.'); then
-              CODEX_BLOCKED=1
-              fail_closed_reason "could not read inline review comments for #$PR_NUMBER, so Codex evidence cannot be shown to be free of findings"
-              return 0
-            fi
-            if ! n=$(echo "$comments" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" \
-                  '[.[] | select(.user.login == $c and .original_commit_id == $sha)] | length'); then
-              CODEX_BLOCKED=1
-              fail_closed_reason "could not evaluate Codex's inline comments for #$PR_NUMBER"
-              return 0
-            fi
-            if [ "$n" -gt 0 ]; then
-              CODEX_BLOCKED=1
-              fail_closed_reason "Codex left ${n} inline finding(s) on this head, so no Codex comment counts for it; push a fix and get a clean Codex pass on the new head"
-              return 0
-            fi
-            local reviews
+            CODEX_REVIEWS="[]"
+            local reviews ids id n
             if ! reviews=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews" --jq '.[]' | jq -s '.'); then
               CODEX_BLOCKED=1
-              fail_closed_reason "could not read reviews for #$PR_NUMBER, so Codex evidence cannot be shown to be free of findings"
+              fail_closed_reason "could not read reviews for #$PR_NUMBER, so Codex findings cannot be ruled out"
               return 0
             fi
-            if ! n=$(echo "$reviews" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" \
-                  '[.[] | select(.user.login == $c and .commit_id == $sha)] | length'); then
+            CODEX_REVIEWS="$reviews"
+            # A Codex review object on this head with no inline comments left:
+            # its findings were deleted, so their severity is unreadable.
+            if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" \
+                  '.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha) | .id'); then
               CODEX_BLOCKED=1
               fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
               return 0
             fi
-            if [ "$n" -gt 0 ]; then
+            for id in $ids; do
+              if ! n=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews/$id/comments" --jq '.[] | .id' | wc -l | tr -d ' '); then
+                CODEX_BLOCKED=1
+                fail_closed_reason "could not read the findings of Codex review $id"
+                return 0
+              fi
+              if [ "$n" -eq 0 ]; then
+                CODEX_BLOCKED=1
+                fail_closed_reason "Codex review $id on this head has no inline findings left (deleted), so their severity cannot be read; push a fix and get a new Codex review"
+                return 0
+              fi
+            done
+            # Unresolved, not-outdated Codex threads of severity P0/P1 (or no
+            # readable severity), paged 100 at a time.
+            if [ -z "$PR_NODE" ]; then
               CODEX_BLOCKED=1
-              fail_closed_reason "Codex submitted ${n} review(s) with findings on this head (the findings may since have been deleted or the review dismissed), so no Codex comment counts for it; push a fix and get a clean Codex pass on the new head"
+              fail_closed_reason "pull request #$PR_NUMBER has no node_id, so its review threads cannot be read"
+              return 0
             fi
+            local after="" page=0 page_json blocking total=0
+            local -a after_arg
+            while :; do
+              page=$((page + 1))
+              if [ "$page" -gt 50 ]; then
+                CODEX_BLOCKED=1
+                fail_closed_reason "#$PR_NUMBER has over 5000 review threads"
+                return 0
+              fi
+              if [ -n "$after" ]; then after_arg=(-f after="$after"); else after_arg=(-F after=null); fi
+              # shellcheck disable=SC2016 # $id/$after are GraphQL variables, not shell
+              if ! page_json=$(gh api graphql -f id="$PR_NODE" "${after_arg[@]}" -f query='
+                  query($id: ID!, $after: String) { node(id: $id) { ... on PullRequest {
+                    reviewThreads(first: 100, after: $after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes { isResolved isOutdated
+                        comments(first: 1) { nodes { author { __typename login } path body } } } } } } }') \
+                 || ! echo "$page_json" | jq -e '(.data.node.reviewThreads.nodes | type == "array")
+                        and (.data.node.reviewThreads.pageInfo.hasNextPage | type == "boolean")' >/dev/null 2>&1; then
+                CODEX_BLOCKED=1
+                fail_closed_reason "could not read the review threads of #$PR_NUMBER, so Codex findings cannot be ruled out"
+                return 0
+              fi
+              if ! blocking=$(echo "$page_json" | jq --arg u "$CODEX_BOT" '
+                  def sev: ((.comments.nodes[0].body // "") | [scan("!\\[P([0-3]) Badge\\]") | .[0]] | first) // "?";
+                  [.data.node.reviewThreads.nodes[] | (.comments.nodes[0] // {}) as $c
+                   | select(.isResolved == false and .isOutdated == false
+                            and ($c.author.__typename // "") == "Bot"
+                            and (($c.author.login // "") == $u or (($c.author.login // "") + "[bot]") == $u)
+                            and (sev | IN("2", "3") | not))] | length'); then
+                CODEX_BLOCKED=1
+                fail_closed_reason "could not evaluate the review threads of #$PR_NUMBER"
+                return 0
+              fi
+              total=$((total + blocking))
+              [ "$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.hasNextPage')" = "true" ] || break
+              after=$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.endCursor // empty')
+              if [ -z "$after" ]; then
+                CODEX_BLOCKED=1
+                fail_closed_reason "review threads of #$PR_NUMBER report another page but no cursor"
+                return 0
+              fi
+            done
+            if [ "$total" -gt 0 ]; then
+              CODEX_BLOCKED=1
+              fail_closed_reason "${total} unresolved P0/P1 Codex finding(s) (or findings with no readable severity) still apply; fix them or resolve the thread(s), then re-run the verdict"
+            fi
+            return 0
+          }
+
+          # The latest retarget or head force-push, as TIMELINE (raw GraphQL)
+          # and CUTOFF (ISO time, empty if none). Returns 1 when unreadable.
+          load_cutoff() {
+            if [ -z "$PR_NODE" ]; then
+              fail_closed_reason "pull request #$PR_NUMBER has no node_id, so its retarget and force-push history cannot be read"
+              return 1
+            fi
+            # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
+            if ! TIMELINE=$(gh api graphql -f id="$PR_NODE" -f query='
+                query($id: ID!) { node(id: $id) { ... on PullRequest {
+                  timelineItems(last: 100, itemTypes: [BASE_REF_CHANGED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
+                    pageInfo { hasPreviousPage }
+                    nodes {
+                      ... on BaseRefChangedEvent { createdAt }
+                      ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } } } } } } }'); then
+              fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
+              return 1
+            fi
+            if ! CUTOFF=$(echo "$TIMELINE" | jq -er '
+                .data.node.timelineItems
+                | if .pageInfo.hasPreviousPage != false then error("more than 100 events") else .nodes end
+                | if type != "array" then error("no timeline")
+                  else (map(.createdAt // error("event without createdAt")) | max // "") end'); then
+              fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
+              return 1
+            fi
+            return 0
+          }
+
+          # Evidence 2: a Codex review object on this head (see the header).
+          evidence_from_codex_review() {
+            if [ "$CODEX_BLOCKED" = "1" ]; then
+              return 1
+            fi
+            local candidates
+            if ! candidates=$(echo "$CODEX_REVIEWS" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" '
+                [.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
+                              and (.state | IN("DISMISSED", "PENDING") | not)
+                              and (((.body // "") | test($skip; "i")) | not))
+                     | {submitted_at}]'); then
+              fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+              fail_closed_reason "no Codex review object on this head"
+              return 1
+            fi
+            local pushers
+            if ! pushers=$(last_push_logins_json); then
+              fail_closed_reason "could not read the author of head $HEAD_SHA"
+              return 1
+            fi
+            if echo "$pushers" | jq -e --arg c "$CODEX_BOT" 'index($c)' >/dev/null; then
+              fail_closed_reason "the author of the last push is ${CODEX_BOT}, who is not trusted evidence for this head"
+              return 1
+            fi
+            load_cutoff || return 1
+            if [ -n "$CUTOFF" ]; then
+              if ! candidates=$(echo "$candidates" | jq --arg cut "$CUTOFF" '
+                  def parse: sub("\\.[0-9]+";"") | sub("\\+00:00$";"Z") | fromdateiso8601;
+                  ($cut | parse) as $c | map(select(((.submitted_at // "") | parse) > $c))'); then
+                fail_closed_reason "could not compare Codex review times with the retarget and head force-push history"
+                return 1
+              fi
+              if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+                fail_closed_reason "every Codex review of this head predates the latest retarget or head force-push (${CUTOFF})"
+                return 1
+              fi
+            fi
+            EVIDENCE="a Codex review of this head (commit_id ${HEAD_SHA:0:10}) by ${CODEX_BOT}, submitted after the latest retarget or head force-push, with no unresolved P0/P1 Codex finding; P2/P3 findings do not block"
             return 0
           }
 
@@ -566,30 +697,8 @@ jobs:
 
             # Bind to this base and this line of heads: only comments posted after
             # the latest retarget or head force-push count.
-            if [ -z "$PR_NODE" ]; then
-              fail_closed_reason "pull request #$PR_NUMBER has no node_id, so its retarget and force-push history cannot be read"
-              return 1
-            fi
-            local timeline cutoff
-            # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
-            if ! timeline=$(gh api graphql -f id="$PR_NODE" -f query='
-                query($id: ID!) { node(id: $id) { ... on PullRequest {
-                  timelineItems(last: 100, itemTypes: [BASE_REF_CHANGED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
-                    pageInfo { hasPreviousPage }
-                    nodes {
-                      ... on BaseRefChangedEvent { createdAt }
-                      ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } } } } } } }'); then
-              fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
-              return 1
-            fi
-            if ! cutoff=$(echo "$timeline" | jq -er '
-                .data.node.timelineItems
-                | if .pageInfo.hasPreviousPage != false then error("more than 100 events") else .nodes end
-                | if type != "array" then error("no timeline")
-                  else (map(.createdAt // error("event without createdAt")) | max // "") end'); then
-              fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
-              return 1
-            fi
+            load_cutoff || return 1
+            local timeline="$TIMELINE" cutoff="$CUTOFF"
             if [ -n "$cutoff" ]; then
               # Strictly after: a comment in the same second as the event refuses.
               if ! candidates=$(echo "$candidates" | jq --arg cut "$cutoff" '
@@ -664,7 +773,7 @@ jobs:
                   elif $c.lastEditedAt != null then "no"
                   else "yes" end')
               if [ "$ok" = "yes" ]; then
-                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10} and of no other commit this PR has carried, posted after the latest retarget or head force-push, and no Codex findings on this head"
+                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10} and of no other commit this PR has carried, posted after the latest retarget or head force-push, and no unresolved P0/P1 Codex finding"
                 return 0
               fi
             done
@@ -776,12 +885,12 @@ jobs:
               TITLE="Documentation only: no review required"
               return 0
             fi
-            # Codex is the one reviewer. Its findings on this head fail the
-            # verdict; only its clean pass on this head can pass it. Greptile,
+            # Codex is the one reviewer. An open P0/P1 Codex finding fails the
+            # verdict; only Codex's review of this head can pass it. Greptile,
             # humans and other bots are not read at all.
             load_codex_findings
             if [ "$CODEX_BLOCKED" = "1" ]; then
-              TITLE="Codex findings on this head"
+              TITLE="Open P0/P1 Codex findings"
               return 0
             fi
             if evidence_from_codex_comment; then
@@ -789,7 +898,12 @@ jobs:
               TITLE="Reviewed by Codex"
               return 0
             fi
-            fail_closed_reason "only a clean Codex pass on this head counts; reactions, Greptile and human approvals are not evidence"
+            if evidence_from_codex_review; then
+              CONCLUSION="success"
+              TITLE="Reviewed by Codex"
+              return 0
+            fi
+            fail_closed_reason "only Codex's review of this head counts; reactions, Greptile and human approvals are not evidence"
             return 0
           }
 
