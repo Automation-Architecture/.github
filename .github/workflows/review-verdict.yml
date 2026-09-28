@@ -472,8 +472,12 @@ jobs:
             CODEX_REVIEWS="$reviews"
             # A Codex review object on this head with no inline comments left:
             # its findings were deleted, so their severity is unreadable.
-            if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" \
-                  '.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha) | .id'); then
+            # A skip notice (rate or usage limit) or a pending review carries no
+            # findings, so an empty comment list there proves no deletion.
+            if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" \
+                  '.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
+                                and .state != "PENDING"
+                                and (((.body // "") | test($skip; "i")) | not)) | .id'); then
               CODEX_BLOCKED=1
               fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
               return 0

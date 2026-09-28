@@ -461,6 +461,8 @@ case("Codex review on head, Codex authored the head", "fail",
                       f"/commits/{HEAD}": {"author": {"login": CODEX}, "committer": {"login": "web-flow"}}}))
 case("Codex review on head by a User account named like Codex", "fail",
      with_(base(), **{R: [dict(codex_review(HEAD), user={"login": CODEX, "type": "User"})], C: []}))
+case("Codex skip-notice review on head does not block a later clean comment", "success",
+     with_(clean(), **{R: [codex_review(HEAD, body="Codex hit a usage limit: rate limit")]}))
 case("review threads unreadable", "fail",
      {k: v for k, v in with_(clean(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))]}).items()} | {"__drop_threads": True})
 
