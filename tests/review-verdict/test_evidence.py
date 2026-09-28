@@ -76,10 +76,24 @@ def gql(node, login=CODEX_APP, edited=None, minimized=False):
         "lastEditedAt": edited, "isMinimized": minimized, "author": {"login": login}}}}}
 
 
-def timeline(*events):
-    """Retarget / force-push history: (typename, createdAt) pairs, oldest first."""
-    return {"graphql:PR_1": {"data": {"node": {"timelineItems": {"nodes": [
-        {"__typename": t, "createdAt": at} for t, at in events]}}}}}
+def timeline(*events, more=False):
+    """Retarget / head force-push history, oldest first: (typename, createdAt) or,
+    for a force-push, (typename, createdAt, replaced_oid)."""
+    nodes = []
+    for t, at, *before in events:
+        n = {"__typename": t, "createdAt": at}
+        if t == "HeadRefForcePushedEvent":
+            n["beforeCommit"] = {"oid": before[0]} if before and before[0] else (None if before else {"oid": OLD})
+        nodes.append(n)
+    return {"graphql:PR_1": {"data": {"node": {"timelineItems": {
+        "pageInfo": {"hasPreviousPage": more}, "nodes": nodes}}}}}
+
+
+def compare(oid, history, total=None):
+    """History of a replaced head past the base (the compare endpoint)."""
+    return {f"/compare/{'b' * 40}...{oid}": {
+        "total_commits": len(history) if total is None else total,
+        "commits": [{"sha": s} for s in history]}}
 
 
 def base():
@@ -89,6 +103,7 @@ def base():
                          "node_id": "PR_1", "commits": 2},
         f"/pulls/{PR}/commits": [{"sha": OLD}, {"sha": HEAD}],
         **timeline(),
+        **compare(OLD, [OLD]),
         f"/commits/{HEAD}": {"author": {"login": "dev"}, "committer": {"login": "web-flow"}},
         f"/pulls/{PR}/reviews": [],
         f"/pulls/{PR}/comments": [],
@@ -205,6 +220,25 @@ case("PR with exactly 250 commits (the endpoint's full page) counts", "success",
 case("PR with more than 250 commits refuses", "fail",
      with_(clean(), **{f"/pulls/{PR}": {**base()[f"/pulls/{PR}"], "commits": 251},
                        f"/pulls/{PR}/commits": [{"sha": s} for s in FILLER + [HEAD]]}))
+
+# Heads a force-push replaced also count as "carried" (Codex P1 on
+# opportunity-builder#178): a review of A still running when a colliding B is
+# force-pushed posts A's comment after the push, and A is gone from the list.
+FP_EARLY = "2026-09-27T23:08:00Z"  # before the clean comment (23:11:57)
+case("force-push replaced a colliding head", "fail",
+     with_(clean(), extra={**timeline(("HeadRefForcePushedEvent", FP_EARLY, COLLIDE)), **compare(COLLIDE, [COLLIDE])}))
+case("colliding commit in the history of a replaced head", "fail",
+     with_(clean(), extra={**timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD)), **compare(OLD, [COLLIDE, OLD])}))
+case("force-push replaced a non-colliding head", "success",
+     with_(clean(), extra=timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD))))
+case("replaced head's history unreadable", "fail",
+     {k: v for k, v in with_(clean(), extra=timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD))).items()
+      if not k.startswith("/compare/")})
+case("replaced head's history truncated", "fail",
+     with_(clean(), extra={**timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD)), **compare(OLD, [OLD], total=300)}))
+case("force-push without a recorded before commit", "fail",
+     with_(clean(), extra=timeline(("HeadRefForcePushedEvent", FP_EARLY, None))))
+case("more than 100 retarget / force-push events", "fail", with_(clean(), extra=timeline(more=True)))
 
 # --- Evidence 1: review objects ------------------------------------------------
 case("Codex review on head with no inline findings", "success",

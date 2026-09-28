@@ -620,11 +620,15 @@ jobs:
           #    does not, so, like a base advance, it is left to the Base-sha the
           #    verdict records rather than a rule no run could enforce after a
           #    pass was published (Codex P1 on .github#48);
-          #  - no OTHER commit of this PR starts with the Reviewed commit prefix
-          #    (Greptile P1 on aios-coffee#122). A 10-hex collision is a cheap
-          #    birthday search for whoever pushes both commits. Every earlier head
-          #    of the PR is either still in its commit list (fast-forward) or was
-          #    replaced by a force-push, which the rule above already covers.
+          #  - no OTHER commit this PR has ever carried starts with the Reviewed
+          #    commit prefix (Greptile P1 on aios-coffee#122). A 10-hex collision
+          #    is a cheap birthday search for whoever pushes both commits. Every
+          #    earlier head is either still in the PR's commit list (fast-forward)
+          #    or in the history of a head a force-push replaced, which the
+          #    timeline records by SHA. The time rule alone does not cover the
+          #    latter: a review of head A can still be running when a colliding
+          #    head B is force-pushed, and its comment then lands after the push
+          #    (Codex P1 on opportunity-builder#178).
           evidence_from_codex_comment() {
             if [ "$CODEX_BLOCKED" = "1" ]; then
               return 1
@@ -681,14 +685,16 @@ jobs:
             if ! timeline=$(gh api graphql -f id="$PR_NODE" -f query='
                 query($id: ID!) { node(id: $id) { ... on PullRequest {
                   timelineItems(last: 100, itemTypes: [BASE_REF_CHANGED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
+                    pageInfo { hasPreviousPage }
                     nodes {
                       ... on BaseRefChangedEvent { createdAt }
-                      ... on HeadRefForcePushedEvent { createdAt } } } } } }'); then
+                      ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } } } } } } }'); then
               fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
               return 1
             fi
             if ! cutoff=$(echo "$timeline" | jq -er '
-                .data.node.timelineItems.nodes
+                .data.node.timelineItems
+                | if .pageInfo.hasPreviousPage != false then error("more than 100 events") else .nodes end
                 | if type != "array" then error("no timeline")
                   else (map(.createdAt // error("event without createdAt")) | max // "") end'); then
               fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
@@ -723,13 +729,30 @@ jobs:
               fail_closed_reason "the commit list of #$PR_NUMBER is incomplete, so a Reviewed commit prefix cannot be shown to name only this head"
               return 1
             fi
+            # Add every head a force-push replaced, and its history past the base.
+            local replaced oid history
+            if ! replaced=$(echo "$timeline" | jq -r '
+                [.data.node.timelineItems.nodes[] | select(has("beforeCommit"))
+                  | (.beforeCommit.oid // error("force-push without a before commit"))] | unique | .[]'); then
+              fail_closed_reason "a head force-push on #$PR_NUMBER does not record the commit it replaced"
+              return 1
+            fi
+            for oid in $replaced; do
+              if ! history=$(gh api "/repos/$REPO/compare/$BASE_SHA...$oid" \
+                  | jq -e --arg oid "$oid" 'if (.commits | length) == .total_commits
+                      then [$oid] + [.commits[].sha] else error("truncated") end'); then
+                fail_closed_reason "could not list the full history of ${oid:0:10}, a head replaced by a force-push, so a Reviewed commit prefix cannot be shown to name only this head"
+                return 1
+              fi
+              pr_shas=$(jq -n --argjson a "$pr_shas" --argjson b "$history" '$a + $b | unique')
+            done
             if ! candidates=$(echo "$candidates" | jq --argjson shas "$pr_shas" --arg sha "$HEAD_SHA" '
                 map(.reviewed as $r | select([$shas[] | select(. != $sha and startswith($r))] | length == 0))'); then
               fail_closed_reason "could not check Codex Reviewed commit prefixes against the commits of #$PR_NUMBER"
               return 1
             fi
             if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
-              fail_closed_reason "the Reviewed commit prefix in every clean Codex comment also matches another commit of this PR, so it does not identify this head"
+              fail_closed_reason "the Reviewed commit prefix in every clean Codex comment also matches another commit this PR has carried, so it does not identify this head"
               return 1
             fi
 
@@ -748,7 +771,7 @@ jobs:
                   elif $c.lastEditedAt != null then "no"
                   else "yes" end')
               if [ "$ok" = "yes" ]; then
-                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10} and of no other commit in this PR, posted after the latest retarget or head force-push, and no Codex findings on this head"
+                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10} and of no other commit this PR has carried, posted after the latest retarget or head force-push, and no Codex findings on this head"
                 return 0
               fi
             done
