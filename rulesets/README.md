@@ -47,11 +47,12 @@ that would otherwise hold the PR is still off.
 ```bash
 gh api -X PUT orgs/Automation-Architecture/rulesets/23649946 -f enforcement=disabled
 gh workflow enable auto-merge.yml -R Automation-Architecture/opportunity-builder
-gh workflow enable auto-merge.yml -R Automation-Architecture/aaa-coffee
 ```
 
-aaa-client-dashboard is deliberately absent: its copy was already disabled before the
-pilot, so re-enabling it would restore a state this ruleset never took away. Add a line
+`aaa-client-dashboard` is deliberately absent: its copy was already disabled before the
+pilot, so re-enabling it would restore a state this ruleset never took away.
+`aios-coffee` now uses its own `agency-delivery-gate-pilot` ruleset; do not
+re-enable its old auto-merge workflow as part of this rollback. Add a line
 here whenever a repo joins, in the same change that disables its workflow.
 
 **Keep the live ruleset and this file in step.** An edit made in the GitHub UI is not
