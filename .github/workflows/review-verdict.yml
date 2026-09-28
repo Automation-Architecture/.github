@@ -28,10 +28,16 @@ name: Review verdict
 # The author of the last push is never evidence for that head. Skip notices
 # never count.
 #
-# RESIDUAL (evidence 3 only): Codex names the commit by a 10-hex prefix, not
-# the full SHA. A pusher who brute-forces a different commit with the same
-# 40-bit prefix after Codex's clean pass would inherit it. The ruleset's
-# thread-resolution rule and agency-delivery/gate still apply to that head.
+# RESIDUAL (evidence 3 only), accepted: a clean Codex comment names the head
+# it reviewed but not the base, and it is bound to the base only by time
+# (posted after the latest retarget). If the author retargets the PR while a
+# Codex review is running, the clean comment lands after the retarget and is
+# accepted for a diff Codex never reviewed (Codex P1 on aaa-client-dashboard#254).
+# Exploiting it needs write access and a retarget inside the few minutes a
+# review runs; nothing in the comment or the API records when Codex started.
+# The ruleset's thread-resolution rule and agency-delivery/gate still apply.
+# (The 10-hex prefix collision this note used to describe is closed:
+# .github#48.)
 #
 # RESIDUAL (evidence 2 only): a Greptile check binds to a commit, not a PR.
 # If two PRs share a head and BOTH were open when the check started, and one
@@ -704,7 +710,7 @@ jobs:
 
             # A Reviewed commit prefix must name only this head among the PR's
             # commits. The list endpoint stops at 250, so a longer PR refuses.
-            if ! [[ "$PR_COMMIT_COUNT" =~ ^[0-9]+$ ]] || [ "$PR_COMMIT_COUNT" -ge 250 ]; then
+            if ! [[ "$PR_COMMIT_COUNT" =~ ^[0-9]+$ ]] || [ "$PR_COMMIT_COUNT" -gt 250 ]; then
               fail_closed_reason "#$PR_NUMBER has ${PR_COMMIT_COUNT:-an unknown number of} commits, too many to show a Reviewed commit prefix names only this head"
               return 1
             fi
