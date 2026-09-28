@@ -76,10 +76,19 @@ def gql(node, login=CODEX_APP, edited=None, minimized=False):
         "lastEditedAt": edited, "isMinimized": minimized, "author": {"login": login}}}}}
 
 
+def timeline(*events):
+    """Retarget / force-push history: (typename, createdAt) pairs, oldest first."""
+    return {"graphql:PR_1": {"data": {"node": {"timelineItems": {"nodes": [
+        {"__typename": t, "createdAt": at} for t, at in events]}}}}}
+
+
 def base():
     return {
         f"/pulls/{PR}": {"head": {"sha": HEAD}, "base": {"ref": "main", "sha": "b" * 40},
-                         "created_at": "2026-09-27T23:06:05Z", "state": "open"},
+                         "created_at": "2026-09-27T23:06:05Z", "state": "open",
+                         "node_id": "PR_1", "commits": 2},
+        f"/pulls/{PR}/commits": [{"sha": OLD}, {"sha": HEAD}],
+        **timeline(),
         f"/commits/{HEAD}": {"author": {"login": "dev"}, "committer": {"login": "web-flow"}},
         f"/pulls/{PR}/reviews": [],
         f"/pulls/{PR}/comments": [],
@@ -153,6 +162,42 @@ case("inline comments unreadable -> Codex evidence refused", "fail",
 case("Codex authored the head commit", "fail",
      with_(clean(), **{f"/commits/{HEAD}": {"author": {"login": CODEX}, "committer": {"login": "web-flow"}}}))
 case("Codex removed from TRUSTED_REVIEWERS", "fail", clean() | {"__env": {"TRUSTED_REVIEWERS": GREPTILE}})
+
+# Bound to this base and this line of heads (Codex P1 / Greptile P1 on aios-coffee#122).
+# The clean comment is posted at 2026-09-27T23:11:57Z.
+case("PR retargeted after the clean comment", "fail",
+     with_(clean(), extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:30:00Z"))))
+case("PR retargeted before the clean comment", "success",
+     with_(clean(), extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:08:00Z"))))
+case("base force-pushed after the clean comment", "fail",
+     with_(clean(), extra=timeline(("BaseRefForcePushedEvent", "2026-09-27T23:30:00Z"))))
+case("head force-pushed after the clean comment (back to the same SHA)", "fail",
+     with_(clean(), extra=timeline(("HeadRefForcePushedEvent", "2026-09-27T23:30:00Z"))))
+case("latest of several events wins", "fail",
+     with_(clean(), extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:08:00Z"),
+                                   ("HeadRefForcePushedEvent", "2026-09-27T23:30:00Z"))))
+case("event in the same second as the clean comment", "fail",
+     with_(clean(), extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:11:57Z"))))
+case("newer clean comment after a retarget counts", "success",
+     with_(base(), extra={f"/issues/{PR}/comments": [
+         issue_comment(CLEAN_BODY.format(sha=HEAD[:10])),
+         issue_comment(CLEAN_BODY.format(sha=HEAD[:10]), node="IC_2", at="2026-09-27T23:40:00Z")],
+         **gql("IC_1"), **gql("IC_2"), **timeline(("BaseRefChangedEvent", "2026-09-27T23:30:00Z"))}))
+case("timeline unreadable", "fail",
+     {k: v for k, v in clean().items() if k != "graphql:PR_1"})
+case("timeline node missing", "fail",
+     with_(clean(), extra={"graphql:PR_1": {"data": {"node": None}}}))
+COLLIDE = HEAD[:10] + "f" * 30
+case("another PR commit shares the 10-hex reviewed prefix", "fail",
+     with_(clean(), **{f"/pulls/{PR}/commits": [{"sha": COLLIDE}, {"sha": HEAD}]}))
+case("12-hex reviewed prefix tells the colliding commits apart", "success",
+     with_(clean(sha=HEAD[:12]), **{f"/pulls/{PR}/commits": [{"sha": COLLIDE}, {"sha": HEAD}]}))
+case("PR commit list unreadable", "fail",
+     {k: v for k, v in clean().items() if k != f"/pulls/{PR}/commits"})
+case("PR commit list shorter than the PR's commit count", "fail",
+     with_(clean(), **{f"/pulls/{PR}/commits": [{"sha": HEAD}]}))
+case("PR with 250+ commits refuses", "fail",
+     with_(clean(), **{f"/pulls/{PR}": {**base()[f"/pulls/{PR}"], "commits": 250}}))
 
 # --- Evidence 1: review objects ------------------------------------------------
 case("Codex review on head with no inline findings", "success",

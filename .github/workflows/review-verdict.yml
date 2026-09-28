@@ -333,6 +333,8 @@ jobs:
             BASE_SHA=$(echo "$pr_json" | jq -r '.base.sha // empty')
             PR_CREATED=$(echo "$pr_json" | jq -r '.created_at // empty')
             PR_STATE=$(echo "$pr_json" | jq -r '.state // empty')
+            PR_NODE=$(echo "$pr_json" | jq -r '.node_id // empty')
+            PR_COMMIT_COUNT=$(echo "$pr_json" | jq -r '.commits // empty')
             if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ] \
                || [ -z "$BASE_REF" ] || [ -z "$BASE_SHA" ] || [ -z "$PR_CREATED" ]; then
               fail_closed_reason "pull request #$PR_NUMBER is missing head SHA, base ref, base SHA, or created_at"
@@ -603,7 +605,16 @@ jobs:
           #    aaa-client-dashboard#252), and hiding a clean bot comment asserts
           #    nothing about the code. Revoke a pass by pushing, or by deleting the
           #    comment (issue_comment `deleted` re-evaluates);
-          #  - Codex is not an author of the head commit.
+          #  - Codex is not an author of the head commit;
+          #  - posted AFTER the PR's latest retarget, base force-push and head
+          #    force-push, so a pass on the same head against another base, or
+          #    on a head a force-push replaced, never carries over (Codex P1 on
+          #    aios-coffee#122). Read from the typed GraphQL timeline;
+          #  - no OTHER commit of this PR starts with the Reviewed commit prefix
+          #    (Greptile P1 on aios-coffee#122). A 10-hex collision is a cheap
+          #    birthday search for whoever pushes both commits. Every earlier head
+          #    of the PR is either still in its commit list (fast-forward) or was
+          #    replaced by a force-push, which the rule above already covers.
           evidence_from_codex_comment() {
             if [ "$CODEX_BLOCKED" = "1" ]; then
               return 1
@@ -628,7 +639,7 @@ jobs:
                     and ((.body // "") | reviewed | length == 1)
                     and ((.body // "") | reviewed | .[0] as $s | $sha | startswith($s))
                   )
-                | {node_id, created_at}
+                | {node_id, created_at, reviewed: ((.body // "") | reviewed | .[0])}
               ] | sort_by(.created_at) | reverse'); then
               fail_closed_reason "could not evaluate Codex comments for #$PR_NUMBER"
               return 1
@@ -649,6 +660,70 @@ jobs:
               return 1
             fi
 
+            # Bind to this base and this line of heads: only comments posted after
+            # the latest retarget / base force-push / head force-push count.
+            if [ -z "$PR_NODE" ]; then
+              fail_closed_reason "pull request #$PR_NUMBER has no node_id, so its retarget and force-push history cannot be read"
+              return 1
+            fi
+            local timeline cutoff
+            # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
+            if ! timeline=$(gh api graphql -f id="$PR_NODE" -f query='
+                query($id: ID!) { node(id: $id) { ... on PullRequest {
+                  timelineItems(last: 100, itemTypes: [BASE_REF_CHANGED_EVENT, BASE_REF_FORCE_PUSHED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
+                    nodes {
+                      ... on BaseRefChangedEvent { createdAt }
+                      ... on BaseRefForcePushedEvent { createdAt }
+                      ... on HeadRefForcePushedEvent { createdAt } } } } } }'); then
+              fail_closed_reason "could not read the retarget and force-push history of #$PR_NUMBER"
+              return 1
+            fi
+            if ! cutoff=$(echo "$timeline" | jq -er '
+                .data.node.timelineItems.nodes
+                | if type != "array" then error("no timeline")
+                  else (map(.createdAt // error("event without createdAt")) | max // "") end'); then
+              fail_closed_reason "could not read the retarget and force-push history of #$PR_NUMBER"
+              return 1
+            fi
+            if [ -n "$cutoff" ]; then
+              # Strictly after: a comment in the same second as the event refuses.
+              if ! candidates=$(echo "$candidates" | jq --arg cut "$cutoff" '
+                  def parse: sub("\\.[0-9]+";"") | sub("\\+00:00$";"Z") | fromdateiso8601;
+                  ($cut | parse) as $c | map(select((.created_at | parse) > $c))'); then
+                fail_closed_reason "could not compare Codex comment times with the retarget and force-push history"
+                return 1
+              fi
+              if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+                fail_closed_reason "every clean Codex comment naming this head predates the latest retarget or force-push (${cutoff}), so it may cover a different diff"
+                return 1
+              fi
+            fi
+
+            # A Reviewed commit prefix must name only this head among the PR's
+            # commits. The list endpoint stops at 250, so a longer PR refuses.
+            if ! [[ "$PR_COMMIT_COUNT" =~ ^[0-9]+$ ]] || [ "$PR_COMMIT_COUNT" -ge 250 ]; then
+              fail_closed_reason "#$PR_NUMBER has ${PR_COMMIT_COUNT:-an unknown number of} commits, too many to show a Reviewed commit prefix names only this head"
+              return 1
+            fi
+            local pr_shas
+            if ! pr_shas=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/commits" --jq '.[]' | jq -s 'map(.sha)'); then
+              fail_closed_reason "could not list the commits of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$pr_shas" | jq 'length')" -ne "$PR_COMMIT_COUNT" ]; then
+              fail_closed_reason "the commit list of #$PR_NUMBER is incomplete, so a Reviewed commit prefix cannot be shown to name only this head"
+              return 1
+            fi
+            if ! candidates=$(echo "$candidates" | jq --argjson shas "$pr_shas" --arg sha "$HEAD_SHA" '
+                map(.reviewed as $r | select([$shas[] | select(. != $sha and startswith($r))] | length == 0))'); then
+              fail_closed_reason "could not check Codex Reviewed commit prefixes against the commits of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+              fail_closed_reason "the Reviewed commit prefix in every clean Codex comment also matches another commit of this PR, so it does not identify this head"
+              return 1
+            fi
+
             local node meta ok
             for node in $(echo "$candidates" | jq -r '.[].node_id'); do
               # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
@@ -664,7 +739,7 @@ jobs:
                   elif $c.lastEditedAt != null then "no"
                   else "yes" end')
               if [ "$ok" = "yes" ]; then
-                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10}, and no Codex findings on this head"
+                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10} and of no other commit in this PR, posted after the latest retarget or force-push, and no Codex findings on this head"
                 return 0
               fi
             done
