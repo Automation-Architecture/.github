@@ -48,6 +48,11 @@ while i < len(args):
         k, _, v = args[i + 1].partition("="); fields[k] = v; i += 2; continue
     if a == "--paginate": i += 1; continue
     path = a; i += 1
+if path == "graphql":
+    with open(os.path.join(state_dir, "graphql_calls"), "a") as f:
+        f.write(json.dumps(fields) + "\n")
+    open(os.path.join(state_dir, "disarmed"), "w").close()
+    sys.stdout.write("{}"); sys.exit(0)
 key = path.split("/repos/" + os.environ["REPO"], 1)[-1].split("?", 1)[0]
 merged_flag = os.path.join(state_dir, "merged")
 if method == "PUT" and key.endswith("/merge"):
@@ -61,6 +66,8 @@ if method != "GET":
     sys.exit("stub gh: unexpected %s %s" % (method, key))
 if os.path.exists(merged_flag) and key + "@merged" in fx:
     key = key + "@merged"
+elif os.path.exists(os.path.join(state_dir, "disarmed")) and key + "@disarmed" in fx:
+    key = key + "@disarmed"
 if key not in fx:
     sys.stderr.write("stub gh: no fixture for %s\n" % key); sys.exit(1)
 v = fx[key]
@@ -147,6 +154,14 @@ case("file list unreadable: not merged", "held", with_(base(), **{f"/pulls/{PR}/
 case("3000 changed files: not merged", "held", with_(base(), **{f"/pulls/{PR}": pr(files=3000)}))
 case("draft never merges", "held", base(draft=True))
 case("hold label stops it", "held", base(labels=("no-auto-merge",)))
+case("hold label with native auto-merge armed: disarms it, does not merge", "held",
+     with_(base(), **{f"/pulls/{PR}": {**pr(labels=("no-auto-merge",)), "node_id": "PR_x", "auto_merge": {"merge_method": "squash"}},
+                      f"/pulls/{PR}@disarmed": {**pr(labels=("no-auto-merge",)), "auto_merge": None}}))
+case("hold label, auto-merge cannot be disarmed: red run", "error",
+     with_(base(), **{f"/pulls/{PR}": {**pr(labels=("no-auto-merge",)), "node_id": "PR_x", "auto_merge": {"merge_method": "squash"}}}))
+case("CI turns red in the final snapshot: not merged", "held",
+     with_(base(), **{f"/commits/{HEAD}/check-runs": {"__seq": [
+         {"check_runs": [run_("unittest")]}, {"check_runs": [run_("unittest", "failure", rid=2)]}]}}))
 case("labels unreadable: not merged", "held", with_(base(), **{f"/pulls/{PR}": {**pr(), "labels": None}}))
 case("fork PR never merges", "held", base(head_repo="mallory/widget"))
 case("already merged: nothing to do", "held", with_(base(), **{f"/pulls/{PR}": pr(merged=True, state="closed")}))

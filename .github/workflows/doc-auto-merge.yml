@@ -98,6 +98,9 @@ permissions:
   pull-requests: write
   checks: read
   statuses: read
+  # Reading which workflow a cancelled Actions job belongs to
+  # (GET actions/runs/<id>) needs Actions read.
+  actions: read
 
 concurrency:
   # One run per PR HEAD COMMIT; the newest event for that commit wins and
@@ -183,7 +186,21 @@ jobs:
                 if (.labels | type) != "array" then "unreadable"
                 elif any(.labels[]; .name == $l) then "yes" else "no" end')" in
               no) ;;
-              yes) done_ "held by the ${HOLD_LABEL} label; a person merges it." ;;
+              yes)
+                # The hold also disarms GitHub native auto-merge if someone
+                # armed it, or GitHub could still merge the PR. Verified by a
+                # re-read; a hold that cannot be enforced is a red run.
+                if [ "$(echo "$pr" | jq -r 'if .auto_merge == null then "no" else "yes" end')" = "yes" ]; then
+                  # shellcheck disable=SC2016 # $id is a GraphQL variable
+                  gh api graphql -f id="$(echo "$pr" | jq -r '.node_id')" -f query='
+                    mutation($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }' >/dev/null || true
+                  if [ "$(gh api "/repos/$REPO/pulls/$PR_NUMBER" --jq 'if .auto_merge == null then "no" else "yes" end' || echo yes)" != "no" ]; then
+                    echo "::error::#$PR_NUMBER carries ${HOLD_LABEL} but native auto-merge is armed and could not be disabled."
+                    exit 1
+                  fi
+                  say "native auto-merge was armed; disabled it for the ${HOLD_LABEL} hold."
+                fi
+                done_ "held by the ${HOLD_LABEL} label; a person merges it." ;;
               *) done_ "labels unreadable, so the hold cannot be ruled out; not merging." ;;
             esac
             if [ "$(echo "$pr" | jq -r '.head.repo.full_name // empty')" != "$REPO" ]; then
@@ -327,11 +344,17 @@ jobs:
             qualify
           done
 
-          # Final snapshot, immediately before the merge.
+          # Final snapshot, immediately before the merge: PR metadata and files
+          # again, and CI again (a re-run can turn a check pending or red after
+          # the loop saw green).
           locked_base="$BASE_REF"
           qualify
           if [ "$BASE_REF" != "$locked_base" ]; then
             done_ "base moved while checking; the run for the new state decides."
+          fi
+          state=$(checks_state)
+          if [ "$state" != "green" ]; then
+            done_ "CI changed in the final snapshot (${state#*:}); not merging. A later CI completion re-evaluates."
           fi
 
           say "CI green on ${HEAD:0:7}; squash-merging."
