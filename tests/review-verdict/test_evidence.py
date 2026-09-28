@@ -146,8 +146,26 @@ def finding(original, rid=11, login=CODEX):
 CASES = []
 
 
-def case(name, expect, fx):
-    CASES.append((name, expect, fx))
+def case(name, expect, fx, contains=None):
+    CASES.append((name, expect, fx, contains))
+
+
+def doc(files, changed=None, draft=False, labels=(), head_repo=REPO, pages=1):
+    """A PR whose changed files are `files` (names, or (name, previous_name)
+    for a rename). With pages > 1 the list is served as `gh --paginate` would
+    concatenate it."""
+    b = base()
+    entries = [{"filename": f[0], "previous_filename": f[1], "status": "renamed"} if isinstance(f, tuple)
+               else {"filename": f, "status": "modified"} for f in files]
+    b[f"/pulls/{PR}"] = {**b[f"/pulls/{PR}"], "draft": draft,
+                         "changed_files": len(entries) if changed is None else changed,
+                         "labels": [{"name": l} for l in labels],
+                         "head": {"sha": HEAD, "repo": {"full_name": head_repo} if head_repo else None}}
+    b[f"/pulls/{PR}/files"] = entries if pages == 1 else {"__pages": [entries[i::pages] for i in range(pages)]}
+    return b
+
+
+DOC_EVIDENCE = "documentation-only PR: no review required by policy (Brad, 2026-09-28)"
 
 
 # --- Evidence 3: Codex clean issue comment ------------------------------------
@@ -315,7 +333,66 @@ case("clean Codex comment for an older head only, Greptile success on head", "fa
      with_(clean(sha=OLD[:10]), **greptile_check()))
 
 
+# --- Evidence 0: documentation-only exemption (Brad, 2026-09-28) --------------
+case("doc-only PR, no review at all", "success", doc(["README.md"]), DOC_EVIDENCE)
+case("doc-only: .md and .markdown at any depth, instruction files included", "success",
+     doc(["docs/guide.md", "notes/a.markdown", "CLAUDE.md", "pkg/AGENTS.md", ".github/pull_request_template.md",
+          ".claude/agents/x.md"]),
+     DOC_EVIDENCE)
+case(".mdx is not documentation-only (reviewed like code)", "fail", doc(["docs/guide.mdx"]))
+case("rename from .md to .mdx refuses", "fail", doc([("docs/guide.mdx", "docs/guide.md")]))
+case("rename from .mdx to .md refuses", "fail", doc([("docs/guide.md", "docs/guide.mdx")]))
+case("mixed .md + .mdx refuses", "fail", doc(["README.md", "docs/guide.mdx"]))
+case("doc-only: rename between two Markdown names", "success", doc([("docs/new.md", "docs/old.md")]), DOC_EVIDENCE)
+case("doc-only with Codex findings on the head still needs no review", "success",
+     with_(doc(["README.md"]), **{f"/pulls/{PR}/comments": [finding(HEAD)], f"/pulls/{PR}/reviews": [codex_review(HEAD)]}),
+     DOC_EVIDENCE)
+case("mixed diff: Markdown plus code refuses the exemption", "fail", doc(["README.md", "src/app.py"]))
+case("mixed diff: Markdown plus a workflow refuses", "fail", doc(["README.md", ".github/workflows/ci.yml"]))
+case("mixed diff: Markdown plus a lockfile refuses", "fail", doc(["README.md", "package-lock.json"]))
+case("rename from .py to .md refuses (previous name is code)", "fail", doc([("app.md", "app.py")]))
+case("truncated list: fewer files than changed_files refuses", "fail", doc(["README.md", "b.md"], changed=3))
+case("file list unreadable refuses", "fail",
+     {k: v for k, v in doc(["README.md"]).items() if k != f"/pulls/{PR}/files"})
+case("changed_files at the 3000 cap refuses", "fail", doc(["README.md"], changed=3000))
+case("empty diff refuses", "fail", doc([], changed=0))
+case("changed_files missing refuses", "fail",
+     with_(doc(["README.md"]), **{f"/pulls/{PR}": {k: v for k, v in doc(["README.md"])[f"/pulls/{PR}"].items()
+                                                   if k != "changed_files"}}))
+MANY = ["docs/p%03d.md" % i for i in range(250)]
+case("250 Markdown files served in 3 pages", "success", doc(MANY, pages=3), DOC_EVIDENCE)
+case("paged list with one non-Markdown file refuses", "fail", doc(MANY + ["docs/p.json"], pages=3))
+case("paged list short of changed_files refuses", "fail", doc(MANY, changed=251, pages=3))
+case("extension must be at the end: notes.md.py refuses", "fail", doc(["notes.md.py"]))
+case("extension is case-sensitive: README.MD refuses", "fail", doc(["README.MD"]))
+case("newline in a filename cannot smuggle code past the pattern", "fail", doc(["x.md\ny.py"]))
+case("a trailing newline after .md is not Markdown (pins \\z over $)", "fail", doc(["x.md\n"]))
+case("directory named like Markdown: docs.md/run.sh refuses", "fail", doc(["docs.md/run.sh"]))
+case("draft doc-only PR does not take the exemption", "fail", doc(["README.md"], draft=True))
+case("draft doc-only PR still publishes normally from review evidence", "success",
+     with_(doc(["README.md"], draft=True), **{f"/issues/{PR}/comments": [issue_comment(CLEAN_BODY.format(sha=HEAD[:10]))]},
+           extra=gql("IC_1")), "clean Codex result")
+case("hold label switches the exemption off", "fail", doc(["README.md"], labels=["no-auto-merge"]))
+case("held doc-only PR can still pass on review evidence", "success",
+     with_(doc(["README.md"], labels=["docs", "no-auto-merge"]),
+           **{f"/issues/{PR}/comments": [issue_comment(CLEAN_BODY.format(sha=HEAD[:10]))]}, extra=gql("IC_1")),
+     "clean Codex result")
+case("unrelated label keeps the exemption", "success", doc(["README.md"], labels=["documentation"]), DOC_EVIDENCE)
+case("labels unreadable refuses", "fail",
+     with_(doc(["README.md"]), **{f"/pulls/{PR}": {**doc(["README.md"])[f"/pulls/{PR}"], "labels": None}}))
+case("doc-only PR from a fork refuses", "fail", doc(["README.md"], head_repo="mallory/widget"))
+case("doc-only PR whose head repository is gone refuses", "fail", doc(["README.md"], head_repo=None))
+
+
+
+def trigger_types():
+    wf = yaml.safe_load(WORKFLOW.read_text())
+    on = wf.get("on", wf.get(True))
+    return on["pull_request_target"]["types"]
+
+
 def main():
+    assert {"labeled", "unlabeled"} <= set(trigger_types()), "the hold label must re-evaluate the verdict"
     wf = yaml.safe_load(WORKFLOW.read_text())
     # GitHub rejects the WHOLE file if it lists itself under workflow_run
     # ("cannot listen to itself"), so no event runs and no verdict is ever
@@ -334,7 +411,7 @@ def main():
         (tmp / "bin").mkdir()
         (tmp / "bin/gh").write_text(STUB)
         (tmp / "bin/gh").chmod(0o755)
-        for name, expect, fx in CASES:
+        for name, expect, fx, contains in CASES:
             fx = dict(fx)
             env_over = fx.pop("__env", {})
             (tmp / "fx.json").write_text(json.dumps(fx))
@@ -345,7 +422,7 @@ def main():
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True)
             verdict = next((l for l in out.stdout.splitlines() if l.startswith("Verdict:")), "")
             got = "success" if verdict.startswith("Verdict: success") else "fail"
-            ok = got == expect and out.returncode == 0
+            ok = got == expect and out.returncode == 0 and (contains is None or contains in verdict)
             failures += not ok
             print(f"{'PASS' if ok else 'FAIL'}  {name}  (expected {expect}, got {got})")
             if not ok:
