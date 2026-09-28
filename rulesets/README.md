@@ -1,10 +1,10 @@
 # Org rulesets
 
-> **Coffee rename audit (2026-09-28):** The Coffee entry in the JSON and rollback command
-> below still name `aaa-coffee`. GitHub now names the repository `aios-coffee`,
+> **Coffee rename audit (2026-09-28):** The Coffee entry in the JSON
+> still names `aaa-coffee`. GitHub now names the repository `aios-coffee`,
 > and its effective `main` rulesets are `aaa-default-branch-protection`
 > (`16125109`) and the repository-specific `agency-delivery-gate-pilot`
-> (`23773361`). Do not apply this JSON or use the Coffee rollback command
+> (`23773361`). Do not apply this JSON
 > until the live organization ruleset and this file have been reconciled.
 
 Intended configuration for the org rulesets this repo manages. GitHub holds the live
