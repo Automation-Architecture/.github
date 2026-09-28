@@ -55,10 +55,13 @@ while i < len(args):
 if path == "graphql":
     key = "graphql:" + fields["id"]
 else:
-    key = path.split("/repos/" + os.environ["REPO"], 1)[-1]
+    key = path.split("/repos/" + os.environ["REPO"], 1)[-1].split("?", 1)[0]
 if key not in fx:
     sys.stderr.write("stub gh: no fixture for %s\n" % key); sys.exit(1)
-data = json.dumps(fx[key])
+v = fx[key]
+if isinstance(v, dict) and "__pages" in v:
+    sys.stdout.write("".join(json.dumps(pg) for pg in v["__pages"])); sys.exit(0)
+data = json.dumps(v)
 if jq:
     data = subprocess.run(["jq", "-c", jq], input=data, capture_output=True, text=True, check=True).stdout
 sys.stdout.write(data)
@@ -89,11 +92,14 @@ def timeline(*events, more=False):
         "pageInfo": {"hasPreviousPage": more}, "nodes": nodes}}}}}
 
 
-def compare(oid, history, total=None):
-    """History of a replaced head past the base (the compare endpoint)."""
-    return {f"/compare/{'b' * 40}...{oid}": {
-        "total_commits": len(history) if total is None else total,
-        "commits": [{"sha": s} for s in history]}}
+def compare(oid, history, total=None, pages=1):
+    """History of a replaced head past the base (the compare endpoint). With
+    pages > 1 the stub serves a list of per-page objects, as `gh --paginate`
+    concatenates them."""
+    total = len(history) if total is None else total
+    chunks = [history[i::pages] for i in range(pages)]
+    objs = [{"total_commits": total, "commits": [{"sha": s} for s in c]} for c in chunks]
+    return {f"/compare/{'b' * 40}...{oid}": objs[0] if pages == 1 else {"__pages": objs}}
 
 
 def base():
@@ -236,12 +242,22 @@ case("replaced head's history unreadable", "fail",
       if not k.startswith("/compare/")})
 case("replaced head's history truncated", "fail",
      with_(clean(), extra={**timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD)), **compare(OLD, [OLD], total=300)}))
+LONG = ["%040x" % (0xabc000 + i) for i in range(300)]
+case("replaced head with a 300-commit history, served in pages", "success",
+     with_(clean(), extra={**timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD)), **compare(OLD, LONG, pages=3)}))
+case("paged history of a replaced head still catches a collision", "fail",
+     with_(clean(), extra={**timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD)),
+                           **compare(OLD, LONG + [COLLIDE], pages=3)}))
+case("paged history short of total_commits", "fail",
+     with_(clean(), extra={**timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD)), **compare(OLD, LONG, total=400, pages=3)}))
 case("force-push without a recorded before commit", "fail",
      with_(clean(), extra=timeline(("HeadRefForcePushedEvent", FP_EARLY, None))))
 case("more than 100 retarget / force-push events", "fail", with_(clean(), extra=timeline(more=True)))
 
 # --- Evidence 1: review objects ------------------------------------------------
-case("Codex review on head with no inline findings", "success",
+# Codex review objects never count (Codex P1 on aios-coffee#122): deleting the
+# findings would otherwise leave a bare review object that passes.
+case("Codex review on head whose findings were deleted", "fail",
      with_(base(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD)]}))
 case("Codex review on head with inline findings", "fail",
      with_(base(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD)], f"/pulls/{PR}/comments": [finding(HEAD)]}))
