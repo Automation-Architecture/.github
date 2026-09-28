@@ -99,6 +99,11 @@ name: Review verdict
 #                         own copy of this file, so a PR that renames the
 #                         workflow suppresses the relay; that is the same
 #                         accepted `.github/**` gap described above.
+#   push                — this file changed on the default branch. The
+#                         `sweep` job dispatches a re-evaluation for every open
+#                         PR's head, so a verdict published under an older
+#                         policy (e.g. a Greptile-only `success`) does not
+#                         outlive the policy (Codex P1 on .github#55).
 #   workflow_dispatch   — re-evaluate one PR: pr_number AND its head_sha.
 # A new head always gets a new check. Re-runs POST a fresh completed run of
 # the same name; the latest one is what GitHub uses.
@@ -110,6 +115,8 @@ on:
     types: [submitted, dismissed]
   issue_comment:
     types: [created, edited, deleted]
+  push:
+    paths: [.github/workflows/review-verdict.yml]
   workflow_run:
     # Must equal this file's `name:`. Runs of the relay itself also complete
     # and re-trigger this event; the job `if` skips them, and GitHub stops
@@ -137,7 +144,7 @@ concurrency:
   # INVARIANT: only a run that will publish may enter the shared group. Every
   # such run re-evaluates from scratch, so whatever it cancels is replaced by
   # a fresh verdict. A run the job `if` skips (a read-only review on a
-  # fork/Dependabot PR, any issue_comment or workflow_run, which only
+  # fork/Dependabot PR, any issue_comment, workflow_run or push, which only
   # relay) gets a
   # throwaway group, because
   # workflow-level concurrency is applied BEFORE the job `if`: in the shared
@@ -158,7 +165,7 @@ concurrency:
   # run joins that commit's group and is pinned to it like every other run
   # (Codex on opportunity-builder#165 / aaa-client-dashboard#243: keyed by PR
   # number it could publish a stale `success` after a dismissal).
-  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'workflow_run' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
+  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'workflow_run' && github.event_name != 'push' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -248,6 +255,36 @@ jobs:
               -f pr_number="$pr" -f head_sha="$RUN_HEAD"
           done
 
+  # push only: this file changed on the default branch. Re-evaluate every
+  # open PR's current head under the new rules. Pushes to other branches
+  # (including PR branches) are ignored.
+  sweep:
+    if: >
+      github.event_name == 'push' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Dispatch review/verdict for every open PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # GITHUB_WORKFLOW_REF = owner/repo/.github/workflows/<file>@<ref>
+          wf="${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
+          wf="${wf%@*}"
+          gh api --paginate "/repos/$REPO/pulls?state=open&per_page=100" \
+            --jq '.[] | "\(.number) \(.head.sha)"' |
+          while read -r pr head; do
+            echo "Dispatching $wf on $DEFAULT_BRANCH for #$pr at ${head:0:7}"
+            gh workflow run "$wf" --repo "$REPO" --ref "$DEFAULT_BRANCH" \
+              -f pr_number="$pr" -f head_sha="$head"
+          done
+
   publish:
     # pull_request_review on a fork or Dependabot PR gets a READ-ONLY token, so
     # it cannot publish; skip it rather than fail. Those PRs get their verdict
@@ -259,6 +296,7 @@ jobs:
     if: >
       github.event_name != 'issue_comment' &&
       github.event_name != 'workflow_run' &&
+      github.event_name != 'push' &&
       (github.event_name != 'pull_request_review' ||
        (github.event.pull_request.head.repo.full_name == github.repository &&
         github.event.pull_request.user.login != 'dependabot[bot]'))
