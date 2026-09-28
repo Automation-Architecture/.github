@@ -155,6 +155,8 @@ case("clean Codex comment on head", "success", clean())
 case("clean comment on head, stale finding on an earlier commit", "success",
      with_(clean(), **{f"/pulls/{PR}/comments": [finding(OLD)], f"/pulls/{PR}/reviews": [codex_review(OLD)]}))
 case("clean comment names an earlier commit", "fail", clean(sha=OLD[:10]))
+# Not caught by the prefix-uniqueness rule, so this pins the "names this head" test itself.
+case("clean comment names a commit this PR never carried", "fail", clean(sha="abcdef0123"))
 case("human account quoting the clean comment", "fail",
      clean(login="some-human", utype="User", app=None))
 case("human comment with Codex-like login but not via the App", "fail", clean(app=None))
@@ -191,7 +193,7 @@ case("inline comments unreadable -> Codex evidence refused", "fail",
      {k: v for k, v in clean().items() if k != f"/pulls/{PR}/comments"})
 case("Codex authored the head commit", "fail",
      with_(clean(), **{f"/commits/{HEAD}": {"author": {"login": CODEX}, "committer": {"login": "web-flow"}}}))
-case("Codex removed from TRUSTED_REVIEWERS", "fail", clean() | {"__env": {"TRUSTED_REVIEWERS": GREPTILE}})
+case("CODEX_APP configured empty fails closed", "fail", clean() | {"__env": {"CODEX_APP": " "}})
 
 # Bound to this base and this line of heads (Codex P1 / Greptile P1 on aios-coffee#122).
 # The clean comment is posted at 2026-09-27T23:11:57Z.
@@ -272,18 +274,45 @@ case("Codex review on head with inline findings", "fail",
      with_(base(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD)], f"/pulls/{PR}/comments": [finding(HEAD)]}))
 case("Codex review on an earlier commit only", "fail",
      with_(base(), **{f"/pulls/{PR}/reviews": [codex_review(OLD)]}))
-case("Greptile review on head still counts (Codex findings do not veto Greptile)", "success",
-     with_(base(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD), {
-         "id": 12, "user": {"login": GREPTILE}, "state": "COMMENTED", "commit_id": HEAD, "body": ""}],
-         f"/pulls/{PR}/comments": [finding(HEAD)]}))
 case("no evidence at all", "fail", base())
 
-# --- Evidence 2: Greptile check (unchanged) ------------------------------------
-case("successful Greptile Review check on head", "success",
-     with_(base(), **{f"/commits/{HEAD}/check-runs": {"check_runs": [{
-         "name": "Greptile Review", "app": {"slug": "greptile-apps"}, "status": "completed",
-         "conclusion": "success", "started_at": "2026-09-27T23:07:00Z", "completed_at": "2026-09-27T23:09:00Z",
-         "output": {"title": "ok", "summary": "", "text": ""}}]}}))
+# --- Codex is the only reviewer (Brad, 2026-09-29; Codex P1 on .github#53) ----
+# Greptile is outside the merge policy: its check and review objects are never
+# read, so they can neither pass nor block the verdict. No human approval counts.
+def greptile_check(conclusion="success"):
+    return {f"/commits/{HEAD}/check-runs": {"check_runs": [{
+        "name": "Greptile Review", "app": {"slug": "greptile-apps"}, "status": "completed",
+        "conclusion": conclusion, "started_at": "2026-09-27T23:07:00Z", "completed_at": "2026-09-27T23:09:00Z",
+        "output": {"title": "ok", "summary": "", "text": ""}}]}}
+
+
+GREPTILE_REVIEW = {"id": 12, "user": {"login": GREPTILE}, "state": "APPROVED", "commit_id": HEAD, "body": ""}
+HUMAN_APPROVAL = {"id": 13, "user": {"login": "some-human"}, "state": "APPROVED", "commit_id": HEAD, "body": "LGTM"}
+
+case("Greptile success with no Codex review", "fail", with_(base(), **greptile_check()))
+case("Greptile success with an open Codex finding", "fail",
+     with_(base(), **greptile_check(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD)],
+                                           f"/pulls/{PR}/comments": [finding(HEAD)]}))
+case("Greptile review on head with an open Codex finding", "fail",
+     with_(base(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD), GREPTILE_REVIEW],
+                      f"/pulls/{PR}/comments": [finding(HEAD)]}))
+case("Greptile review on head, no Codex review", "fail",
+     with_(base(), **{f"/pulls/{PR}/reviews": [GREPTILE_REVIEW]}))
+case("Greptile check, Greptile review and clean Codex, but a Codex finding on head", "fail",
+     with_(clean(), **greptile_check(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD), GREPTILE_REVIEW],
+                                            f"/pulls/{PR}/comments": [finding(HEAD)]}))
+case("human approval on head, no Codex review", "fail",
+     with_(base(), **{f"/pulls/{PR}/reviews": [HUMAN_APPROVAL]}))
+case("human approval on head with an open Codex finding", "fail",
+     with_(clean(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD), HUMAN_APPROVAL],
+                       f"/pulls/{PR}/comments": [finding(HEAD)]}))
+case("clean Codex on head passes whatever Greptile did (failed check)", "success",
+     with_(clean(), **greptile_check("failure")))
+case("clean Codex on head passes with no Greptile and no human", "success", clean())
+case("Codex review on an older head only, Greptile success on head", "fail",
+     with_(base(), **greptile_check(), **{f"/pulls/{PR}/reviews": [codex_review(OLD)]}))
+case("clean Codex comment for an older head only, Greptile success on head", "fail",
+     with_(clean(sha=OLD[:10]), **greptile_check()))
 
 
 def main():
