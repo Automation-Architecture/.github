@@ -606,10 +606,14 @@ jobs:
           #    nothing about the code. Revoke a pass by pushing, or by deleting the
           #    comment (issue_comment `deleted` re-evaluates);
           #  - Codex is not an author of the head commit;
-          #  - posted AFTER the PR's latest retarget, base force-push and head
-          #    force-push, so a pass on the same head against another base, or
-          #    on a head a force-push replaced, never carries over (Codex P1 on
-          #    aios-coffee#122). Read from the typed GraphQL timeline;
+          #  - posted AFTER the PR's latest retarget and head force-push, so a
+          #    pass on the same head against another base, or on a head a
+          #    force-push replaced, never carries over (Codex P1 on
+          #    aios-coffee#122). Read from the typed GraphQL timeline. Both events
+          #    re-run this workflow (`edited`, `synchronize`). A base force-push
+          #    does not, so, like a base advance, it is left to the Base-sha the
+          #    verdict records rather than a rule no run could enforce after a
+          #    pass was published (Codex P1 on .github#48);
           #  - no OTHER commit of this PR starts with the Reviewed commit prefix
           #    (Greptile P1 on aios-coffee#122). A 10-hex collision is a cheap
           #    birthday search for whoever pushes both commits. Every earlier head
@@ -661,7 +665,7 @@ jobs:
             fi
 
             # Bind to this base and this line of heads: only comments posted after
-            # the latest retarget / base force-push / head force-push count.
+            # the latest retarget or head force-push count.
             if [ -z "$PR_NODE" ]; then
               fail_closed_reason "pull request #$PR_NUMBER has no node_id, so its retarget and force-push history cannot be read"
               return 1
@@ -670,19 +674,18 @@ jobs:
             # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
             if ! timeline=$(gh api graphql -f id="$PR_NODE" -f query='
                 query($id: ID!) { node(id: $id) { ... on PullRequest {
-                  timelineItems(last: 100, itemTypes: [BASE_REF_CHANGED_EVENT, BASE_REF_FORCE_PUSHED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
+                  timelineItems(last: 100, itemTypes: [BASE_REF_CHANGED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
                     nodes {
                       ... on BaseRefChangedEvent { createdAt }
-                      ... on BaseRefForcePushedEvent { createdAt }
                       ... on HeadRefForcePushedEvent { createdAt } } } } } }'); then
-              fail_closed_reason "could not read the retarget and force-push history of #$PR_NUMBER"
+              fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
               return 1
             fi
             if ! cutoff=$(echo "$timeline" | jq -er '
                 .data.node.timelineItems.nodes
                 | if type != "array" then error("no timeline")
                   else (map(.createdAt // error("event without createdAt")) | max // "") end'); then
-              fail_closed_reason "could not read the retarget and force-push history of #$PR_NUMBER"
+              fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
               return 1
             fi
             if [ -n "$cutoff" ]; then
@@ -690,11 +693,11 @@ jobs:
               if ! candidates=$(echo "$candidates" | jq --arg cut "$cutoff" '
                   def parse: sub("\\.[0-9]+";"") | sub("\\+00:00$";"Z") | fromdateiso8601;
                   ($cut | parse) as $c | map(select((.created_at | parse) > $c))'); then
-                fail_closed_reason "could not compare Codex comment times with the retarget and force-push history"
+                fail_closed_reason "could not compare Codex comment times with the retarget and head force-push history"
                 return 1
               fi
               if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
-                fail_closed_reason "every clean Codex comment naming this head predates the latest retarget or force-push (${cutoff}), so it may cover a different diff"
+                fail_closed_reason "every clean Codex comment naming this head predates the latest retarget or head force-push (${cutoff}), so it may cover a different diff"
                 return 1
               fi
             fi
@@ -739,7 +742,7 @@ jobs:
                   elif $c.lastEditedAt != null then "no"
                   else "yes" end')
               if [ "$ok" = "yes" ]; then
-                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10} and of no other commit in this PR, posted after the latest retarget or force-push, and no Codex findings on this head"
+                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10} and of no other commit in this PR, posted after the latest retarget or head force-push, and no Codex findings on this head"
                 return 0
               fi
             done

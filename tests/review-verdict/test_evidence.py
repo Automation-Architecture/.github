@@ -169,8 +169,10 @@ case("PR retargeted after the clean comment", "fail",
      with_(clean(), extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:30:00Z"))))
 case("PR retargeted before the clean comment", "success",
      with_(clean(), extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:08:00Z"))))
-case("base force-pushed after the clean comment", "fail",
-     with_(clean(), extra=timeline(("BaseRefForcePushedEvent", "2026-09-27T23:30:00Z"))))
+# A base force-push fires no event here, so it is not queried (Codex P1 on .github#48);
+# the stub serves the timeline as given, so this pins that the query does not ask for it.
+case("base force-push is not part of the cutoff query", "success",
+     with_(clean(), extra=timeline()))
 case("head force-pushed after the clean comment (back to the same SHA)", "fail",
      with_(clean(), extra=timeline(("HeadRefForcePushedEvent", "2026-09-27T23:30:00Z"))))
 case("latest of several events wins", "fail",
