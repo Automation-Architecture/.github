@@ -14,7 +14,21 @@ name: Review verdict
 # outside the merge policy: nothing here reads it, so it can neither satisfy
 # nor block the verdict. No human approval is evidence or is required.
 #
-# Evidence counted (exactly one kind; nothing else, reactions never):
+# DOCUMENTATION-ONLY EXEMPTION (Brad, 2026-09-28; .mdx excluded 2026-09-29):
+#   no review is required when EVERY changed file, and the previous name of
+#   every renamed file, ends in .md or .markdown (case-sensitive, any path;
+#   CLAUDE.md, AGENTS.md, .claude/** and .github/** Markdown included by
+#   decision; .mdx carries JSX and is reviewed like code). The file list is
+#   read in full, paginated, and must hold exactly `changed_files` entries,
+#   fewer than 3000; unreadable, short, empty or oversized lists refuse. Not
+#   applied to a draft, to a PR with the `no-auto-merge` hold label, or to a
+#   fork's branch; those need Codex like any other. It is checked BEFORE the
+#   Codex findings block: a documentation-only PR needs no review, so Codex
+#   findings on it do not hold it. A retarget fires `edited`, a label change
+#   `labeled`/`unlabeled`; both re-evaluate. doc-auto-merge.yml does the merge.
+#
+# Evidence counted for every other PR (exactly one kind; nothing else,
+# reactions never):
 #   Codex's clean result for this head: an ISSUE comment on this PR,
 #   authored by the chatgpt-codex-connector App itself (never a human
 #   quoting it), never edited, opening "Codex Review: Didn't find any major
@@ -79,8 +93,11 @@ name: Review verdict
 # is accepted, not closed. Codex still reviews such a PR (rulesets/README.md).
 #
 # Triggers:
-#   pull_request_target — PR opened/pushed/edited; waits up to WAIT_SECONDS for
-#                         the reviewer, exiting early once evidence appears.
+#   pull_request_target — PR opened/pushed/edited/labelled; waits up to
+#                         WAIT_SECONDS for the reviewer (not on edited,
+#                         labeled or unlabeled), exiting early once evidence
+#                         appears. A documentation-only PR has evidence on the
+#                         first pass; the hold label switches it off and on.
 #   pull_request_review — a review landed or was dismissed (a Codex review on
 #                         the head revokes a pass); re-evaluate immediately.
 #   issue_comment       — Codex created/edited/deleted a PR comment. The event
@@ -105,7 +122,7 @@ name: Review verdict
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, edited]
+    types: [opened, synchronize, reopened, ready_for_review, edited, labeled, unlabeled]
   pull_request_review:
     types: [submitted, dismissed]
   issue_comment:
@@ -262,6 +279,9 @@ jobs:
           # whose findings veto. The App slug is checked on every comment.
           CODEX_BOT: "chatgpt-codex-connector[bot]"
           CODEX_APP: "chatgpt-codex-connector"
+          # The documentation-only exemption. Same values as doc-auto-merge.yml.
+          DOC_ONLY_PATTERN: '\.(md|markdown)\z'
+          HOLD_LABEL: "no-auto-merge"
           # Same string as auto-merge.yml's REVIEW_SKIP_PATTERN. Keep in step.
           REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit"
           # Codex lands a few minutes after a push. Other events evaluate once.
@@ -293,6 +313,10 @@ jobs:
           WAIT_SECONDS="${WAIT_SECONDS:-0}"
           CODEX_BOT="${CODEX_BOT:-chatgpt-codex-connector[bot]}"
           CODEX_APP="${CODEX_APP:-chatgpt-codex-connector}"
+          # \z, not $: jq's $ also matches before a TRAILING newline, and a
+          # filename is a byte string, so anchor at the absolute end.
+          DOC_ONLY_PATTERN="${DOC_ONLY_PATTERN:-\.(md|markdown)\z}"
+          HOLD_LABEL="${HOLD_LABEL:-no-auto-merge}"
           # Canonical copy: Automation-Architecture/.github .github/workflows/auto-merge.yml
           # (AAA-711: the better idea; skip notices are status, not a verdict).
           REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit}"
@@ -310,6 +334,11 @@ jobs:
           # 1 = the verdict fails for this head: Codex has findings on it, or
           # they could not be read. Nothing overrides it.
           CODEX_BLOCKED=0
+          PR_JSON=""
+          # Documentation-only file-list result for this run's head: "" = not
+          # yet read, "doc" = every file is Markdown, anything else = why not.
+          DOC_FILES_RESULT=""
+          DOC_FILES_COUNT=""
           # NEVER "neutral": GitHub counts neutral, skipped and success as passing a
           # required check, so a neutral "no evidence" verdict would let an unreviewed
           # PR through the ruleset. action_required is completed but not passing.
@@ -343,7 +372,7 @@ jobs:
               return 1
             fi
             local associated
-            if ! associated=$(gh api --paginate "/repos/$REPO/commits/$HEAD_SHA_HINT/pulls"); then
+            if ! associated=$(gh api --paginate "/repos/$REPO/commits/$HEAD_SHA_HINT/pulls" --jq '.[]' | jq -s '.'); then
               fail_closed_reason "could not list pull requests for head $HEAD_SHA_HINT"
               return 1
             fi
@@ -381,6 +410,7 @@ jobs:
             PR_STATE=$(echo "$pr_json" | jq -r '.state // empty')
             PR_NODE=$(echo "$pr_json" | jq -r '.node_id // empty')
             PR_COMMIT_COUNT=$(echo "$pr_json" | jq -r '.commits // empty')
+            PR_JSON="$pr_json"
             if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ] \
                || [ -z "$BASE_REF" ] || [ -z "$BASE_SHA" ] || [ -z "$PR_CREATED" ]; then
               fail_closed_reason "pull request #$PR_NUMBER is missing head SHA, base ref, base SHA, or created_at"
@@ -642,6 +672,76 @@ jobs:
             return 1
           }
 
+          # Evidence 0: the documentation-only exemption (Brad, 2026-09-28). A PR
+          # whose every changed file is Markdown needs no review. Fails closed:
+          # any doubt about the file list refuses the exemption, and the PR then
+          # needs a clean Codex pass like any other.
+          #  - the file list is read in full (paginated) and must hold exactly
+          #    `changed_files` entries. The endpoint stops at 3000 files and
+          #    --paginate reports a truncated list as complete, so 3000 or more
+          #    refuses, as does an empty diff;
+          #  - every filename AND every previous_filename (renames) must end in
+          #    .md or .markdown; a rename from app.py to app.md is code
+          #    leaving the tree;
+          #  - not a draft; no HOLD_LABEL; head branch in this repository (a
+          #    fork's PR is never exempt).
+          # The list is the diff against the base at read time. It is cached for
+          # the run: this run's head is fixed (load_pr), and a retarget fires
+          # `edited`, which starts a new run in this head's group.
+          evidence_from_doc_only() {
+            local files verdict draft held head_repo
+            if [ -z "$DOC_FILES_RESULT" ]; then
+              local changed
+              changed=$(echo "$PR_JSON" | jq -r '.changed_files // empty')
+              if ! [[ "$changed" =~ ^[0-9]+$ ]]; then
+                DOC_FILES_RESULT="the pull request does not report how many files it changes"
+              elif [ "$changed" -eq 0 ]; then
+                DOC_FILES_RESULT="the pull request changes no files"
+              elif [ "$changed" -ge 3000 ]; then
+                DOC_FILES_RESULT="the pull request changes ${changed} files, at or past the 3000 the file list can return, so it cannot be shown to be all Markdown"
+              elif ! files=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -s 'add // []'); then
+                DOC_FILES_RESULT="could not read the changed files of #$PR_NUMBER"
+              elif ! verdict=$(echo "$files" | jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" '
+                  if type != "array" then "the changed-file list is not a list"
+                  elif length != $n then "the changed-file list holds \(length) of \($n) files, so it is incomplete"
+                  elif any(.[]; (.filename | type) != "string" or .filename == "") then "a changed file has no name"
+                  else
+                    [.[] | .filename, (.previous_filename // empty)]
+                    | map(select(type != "string" or (test($pat) | not)))
+                    | if length == 0 then "doc"
+                      else "\(length) changed path(s) are not Markdown, e.g. \(.[0] | tostring | .[0:120])" end
+                  end'); then
+                DOC_FILES_RESULT="could not classify the changed files of #$PR_NUMBER"
+              else
+                DOC_FILES_RESULT="$verdict"
+                DOC_FILES_COUNT="$changed"
+              fi
+            fi
+            if [ "$DOC_FILES_RESULT" != "doc" ]; then
+              fail_closed_reason "not documentation-only: ${DOC_FILES_RESULT}"
+              return 1
+            fi
+            draft=$(echo "$PR_JSON" | jq -r 'if .draft == false then "no" else "yes" end')
+            held=$(echo "$PR_JSON" | jq -r --arg l "$HOLD_LABEL" '
+              if (.labels | type) != "array" then "unreadable"
+              elif any(.labels[]; .name == $l) then "yes" else "no" end')
+            head_repo=$(echo "$PR_JSON" | jq -r '.head.repo.full_name // empty')
+            if [ "$draft" != "no" ]; then
+              fail_closed_reason "documentation-only, but a draft never takes the documentation-only exemption"
+              return 1
+            fi
+            if [ "$held" != "no" ]; then
+              fail_closed_reason "documentation-only, but the ${HOLD_LABEL} label is on it (or its labels could not be read), which switches the exemption off"
+              return 1
+            fi
+            if [ "$head_repo" != "$REPO" ]; then
+              fail_closed_reason "documentation-only, but the branch comes from ${head_repo:-an unreadable repository}, not ${REPO}; a fork's PR is never exempt"
+              return 1
+            fi
+            EVIDENCE="documentation-only PR: no review required by policy (Brad, 2026-09-28). All ${DOC_FILES_COUNT} changed files, and the previous name of every renamed one, are Markdown (.md, .markdown; not .mdx); the list was read in full against base ${BASE_SHA:0:7}; not a draft; no ${HOLD_LABEL} label; same-repository branch"
+            return 0
+          }
+
           evaluate_once() {
             EVIDENCE=""
             MISSING_REASONS=()
@@ -670,6 +770,12 @@ jobs:
               echo "::notice::#$PR_NUMBER is $PR_STATE — evaluating anyway because PUBLISH=0."
             fi
 
+            # A documentation-only PR needs no review (Brad, 2026-09-28).
+            if evidence_from_doc_only; then
+              CONCLUSION="success"
+              TITLE="Documentation only: no review required"
+              return 0
+            fi
             # Codex is the one reviewer. Its findings on this head fail the
             # verdict; only its clean pass on this head can pass it. Greptile,
             # humans and other bots are not read at all.
@@ -763,7 +869,10 @@ jobs:
           # reviewer finishing even before this workflow exists on the default
           # branch (the issue_comment relay and pull_request_review triggers run
           # from there).
-          if [ "$WAIT_SECONDS" -gt 0 ] && [ "$EVENT" = "pull_request_target" ] && [ "$PR_ACTION" != "edited" ]; then
+          # No wait on edited / labeled / unlabeled: nothing a reviewer does follows
+          # from them, and Codex's later comment re-evaluates via the relay.
+          if [ "$WAIT_SECONDS" -gt 0 ] && [ "$EVENT" = "pull_request_target" ] \
+             && [ "$PR_ACTION" != "edited" ] && [ "$PR_ACTION" != "labeled" ] && [ "$PR_ACTION" != "unlabeled" ]; then
             :
           else
             WAIT_SECONDS=0
