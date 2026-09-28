@@ -198,8 +198,13 @@ case("PR commit list unreadable", "fail",
      {k: v for k, v in clean().items() if k != f"/pulls/{PR}/commits"})
 case("PR commit list shorter than the PR's commit count", "fail",
      with_(clean(), **{f"/pulls/{PR}/commits": [{"sha": HEAD}]}))
-case("PR with 250+ commits refuses", "fail",
-     with_(clean(), **{f"/pulls/{PR}": {**base()[f"/pulls/{PR}"], "commits": 250}}))
+FILLER = ["%040x" % (i + 1) for i in range(249)]
+case("PR with exactly 250 commits (the endpoint's full page) counts", "success",
+     with_(clean(), **{f"/pulls/{PR}": {**base()[f"/pulls/{PR}"], "commits": 250},
+                       f"/pulls/{PR}/commits": [{"sha": s} for s in FILLER + [HEAD]]}))
+case("PR with more than 250 commits refuses", "fail",
+     with_(clean(), **{f"/pulls/{PR}": {**base()[f"/pulls/{PR}"], "commits": 251},
+                       f"/pulls/{PR}/commits": [{"sha": s} for s in FILLER + [HEAD]]}))
 
 # --- Evidence 1: review objects ------------------------------------------------
 case("Codex review on head with no inline findings", "success",
