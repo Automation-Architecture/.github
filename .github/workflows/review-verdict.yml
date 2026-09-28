@@ -11,7 +11,10 @@ name: Review verdict
 # auto-merge doing the merging.
 #
 # Evidence counted (nothing else, reactions never):
-#   1. a review by a trusted reviewer whose commit_id is this head;
+#   1. a review by a trusted reviewer whose commit_id is this head. Codex's
+#      review objects never count: Codex posts one only to carry findings,
+#      and a writer can delete the findings, leaving a bare review object
+#      (Codex P1 on aios-coffee#122). Codex's clean pass is evidence 3;
 #   2. a successful `Greptile Review` check on this head from greptile-apps,
 #      attributable to this PR (only open PR at the head; completed after the
 #      PR was opened);
@@ -22,7 +25,7 @@ name: Review verdict
 #      a 10+ hex prefix of this head. Codex posts a clean pass this way, not
 #      as a review object, so without this a Codex-only PR never passes.
 # CODEX FINDINGS BLOCK: if Codex left any inline comment whose
-# original_commit_id is this head, no Codex evidence (1 or 3) counts for this
+# original_commit_id is this head, no Codex clean comment (3) counts for this
 # head. Fixing means a new push and a clean Codex pass on it. Greptile's
 # evidence is unchanged by this rule.
 # The author of the last push is never evidence for that head. Skip notices
@@ -38,6 +41,12 @@ name: Review verdict
 # The ruleset's thread-resolution rule and agency-delivery/gate still apply.
 # (The 10-hex prefix collision this note used to describe is closed:
 # .github#48.)
+#
+# RESIDUAL (evidence 3 only), accepted: a replaced head's history is listed
+# against the CURRENT base. If a Codex review of A is running, the PR moves
+# past A, the base then moves to contain A, and a precomputed head B sharing
+# A's 10-hex prefix is force-pushed, A's late clean comment passes B. All five
+# must hold at once (Codex P1 on .github#50).
 #
 # RESIDUAL (evidence 2 only): a Greptile check binds to a commit, not a PR.
 # If two PRs share a head and BOTH were open when the check started, and one
@@ -232,11 +241,12 @@ jobs:
           # reviewer.
           #
           # Evidence, strongest first (nothing else counts; reactions never count):
-          #   1. a review object by a trusted reviewer whose commit_id is the head;
+          #   1. a review object by a trusted reviewer other than Codex whose
+          #      commit_id is the head;
           #   2. a successful `Greptile Review` check on the head from greptile-apps,
           #      attributable to this PR;
           #   3. a clean Codex issue comment naming the head as its reviewed commit.
-          # Codex inline findings on the head veto Codex evidence (1 and 3).
+          # Codex inline findings on the head veto Codex evidence (3).
           #
           # Fails closed: no evidence means no successful verdict. A vendor renaming a
           # check or rewording a comment can cost a verdict; it can never buy one.
@@ -268,8 +278,8 @@ jobs:
           PR_STATE=""
           EVIDENCE=""
           MISSING_REASONS=()
-          # 1 = Codex evidence (review object or clean comment) cannot count for
-          # this head: Codex has findings on it, or they could not be read.
+          # 1 = a Codex clean comment cannot count for this head: Codex has
+          # findings on it, or they could not be read.
           CODEX_BLOCKED=0
           # NEVER "neutral": GitHub counts neutral, skipped and success as passing a
           # required check, so a neutral "no evidence" verdict would let an unreviewed
@@ -385,9 +395,8 @@ jobs:
               return 1
             fi
             trusted=$(trusted_json)
-            if [ "$CODEX_BLOCKED" = "1" ]; then
-              trusted=$(echo "$trusted" | jq --arg c "$CODEX_BOT" 'map(select(. != $c))')
-            fi
+            # Never Codex: its review objects carry findings, not passes.
+            trusted=$(echo "$trusted" | jq --arg c "$CODEX_BOT" 'map(select(. != $c))')
             local pushers
             if ! pushers=$(last_push_logins_json); then
               fail_closed_reason "could not read the author of head $HEAD_SHA"
@@ -591,7 +600,7 @@ jobs:
             fi
             if [ "$n" -gt 0 ]; then
               CODEX_BLOCKED=1
-              fail_closed_reason "Codex left ${n} inline finding(s) on this head, so no Codex review or comment counts for it; push a fix and get a clean Codex pass on the new head"
+              fail_closed_reason "Codex left ${n} inline finding(s) on this head, so no Codex comment counts for it; push a fix and get a clean Codex pass on the new head"
             fi
             return 0
           }
@@ -738,9 +747,12 @@ jobs:
               return 1
             fi
             for oid in $replaced; do
-              if ! history=$(gh api "/repos/$REPO/compare/$BASE_SHA...$oid" \
-                  | jq -e --arg oid "$oid" 'if (.commits | length) == .total_commits
-                      then [$oid] + [.commits[].sha] else error("truncated") end'); then
+              # Paged: one response lists at most 250 commits (Greptile P1 on
+              # aios-coffee#122); every page repeats total_commits.
+              if ! history=$(gh api --paginate "/repos/$REPO/compare/$BASE_SHA...$oid?per_page=100" \
+                  | jq -es --arg oid "$oid" '([.[].commits[].sha] | unique) as $s
+                      | if ($s | length) == .[0].total_commits
+                        then [$oid] + $s else error("incomplete") end'); then
                 fail_closed_reason "could not list the full history of ${oid:0:10}, a head replaced by a force-push, so a Reviewed commit prefix cannot be shown to name only this head"
                 return 1
               fi
