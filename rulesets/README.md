@@ -1,11 +1,18 @@
 # Org rulesets
 
-Source of truth for the org rulesets this repo manages. GitHub holds the live
-copy; this file is what it should match.
+> **Coffee rename audit (2026-09-28):** The Coffee entry in the JSON
+> still names `aaa-coffee`. GitHub now names the repository `aios-coffee`,
+> and its effective `main` rulesets are `aaa-default-branch-protection`
+> (`16125109`) and the repository-specific `agency-delivery-gate-pilot`
+> (`23773361`). Do not apply this JSON
+> until the live organization ruleset and this file have been reconciled.
+
+Intended configuration for the org rulesets this repo manages. GitHub holds the live
+copy; the Coffee target in this file requires reconciliation before reuse.
 
 | File | Ruleset | State |
 |---|---|---|
-| `aaa-merge-gates.json` | `aaa-merge-gates` | **Active since 2026-09-18, id `23649946`.** Covers aaa-client-dashboard, opportunity-builder and (since 2026-09-20) aaa-coffee; `auto-merge.yml` disabled on all three. |
+| `aaa-merge-gates.json` | `aaa-merge-gates` | **Active ruleset, id `23649946`.** GitHub reports it on aaa-client-dashboard and opportunity-builder. The JSON also retains the historical `aaa-coffee` target from 2026-09-20; Coffee's current effective rulesets are listed above. Reconcile the target before applying this file. |
 
 ## aaa-merge-gates
 
@@ -40,11 +47,12 @@ that would otherwise hold the PR is still off.
 ```bash
 gh api -X PUT orgs/Automation-Architecture/rulesets/23649946 -f enforcement=disabled
 gh workflow enable auto-merge.yml -R Automation-Architecture/opportunity-builder
-gh workflow enable auto-merge.yml -R Automation-Architecture/aaa-coffee
 ```
 
-aaa-client-dashboard is deliberately absent: its copy was already disabled before the
-pilot, so re-enabling it would restore a state this ruleset never took away. Add a line
+`aaa-client-dashboard` is deliberately absent: its copy was already disabled before the
+pilot, so re-enabling it would restore a state this ruleset never took away.
+`aios-coffee` now uses its own `agency-delivery-gate-pilot` ruleset; do not
+re-enable its old auto-merge workflow as part of this rollback. Add a line
 here whenever a repo joins, in the same change that disables its workflow.
 
 **Keep the live ruleset and this file in step.** An edit made in the GitHub UI is not
