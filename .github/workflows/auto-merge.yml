@@ -81,8 +81,10 @@ name: Auto-Merge when Checks Green and Reviews In
 #   2. Codex's clean pass: an issue comment by the Codex Bot, never edited,
 #      opening "Codex Review: Didn't find any major issues" and naming exactly
 #      one "Reviewed commit" (10-40 hex) that is a prefix of the head and of no
-#      other commit this PR carries. The PR's commit list is read in full
-#      (a PR over 250 commits gets no comment evidence).
+#      other commit this PR carries, or that a head force-push replaced
+#      (with its history past the base). The PR's commit list is read in full
+#      (a PR over 250 commits, or an unreadable force-push history, gets no
+#      comment evidence).
 # A review or clean pass of any EARLIER commit never counts. That closes the
 # hole the previous gates had (Codex P1 on aaa-runbooks#175): with outdated
 # threads excluded, a push could clear the findings and merge a head Codex
@@ -578,6 +580,43 @@ jobs:
             if [ "$n" -gt 0 ]; then echo comment; else echo none; fi
           }
 
+          # Every commit a head force-push on PR $1 replaced, plus each one's
+          # history past base $2, as a JSON array of SHAs. Returns 1 when any
+          # part is unreadable or incomplete (then no clean-pass comment
+          # counts). Reads the last 100 force-push events; more refuses.
+          replaced_heads_json() {
+            local pr="$1" base="$2" timeline replaced oid history all="[]"
+            if ! timeline=$(gh api graphql \
+                  -f owner="${REPO%/*}" -f name="${REPO#*/}" -F number="$pr" \
+                  -f query='query($owner:String!,$name:String!,$number:Int!){
+                    repository(owner:$owner,name:$name){ pullRequest(number:$number){
+                      timelineItems(last:100, itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){
+                        pageInfo{ hasPreviousPage }
+                        nodes{ ... on HeadRefForcePushedEvent { beforeCommit{ oid } } } } } } }' 2>/dev/null); then
+              return 1
+            fi
+            # -r, not -e: no force-push at all is a valid, empty answer; error()
+            # still exits non-zero.
+            if ! replaced=$(echo "$timeline" | jq -r '
+                .data.repository.pullRequest.timelineItems
+                | if .pageInfo.hasPreviousPage != false then error("more than 100 events") else .nodes end
+                | if type != "array" then error("no timeline") else . end
+                | [.[] | (.beforeCommit.oid // error("force-push without a before commit"))] | unique | .[]' 2>/dev/null); then
+              return 1
+            fi
+            for oid in $replaced; do
+              # Paged: one response lists at most 250 commits; every page
+              # repeats total_commits.
+              if ! history=$(gh api --paginate "/repos/$REPO/compare/$base...$oid?per_page=100" 2>/dev/null \
+                  | jq -es --arg oid "$oid" '([.[].commits[].sha] | unique) as $s
+                      | if ($s | length) == .[0].total_commits then [$oid] + $s else error("incomplete") end' 2>/dev/null); then
+                return 1
+              fi
+              all=$(jq -n --argjson a "$all" --argjson b "$history" '$a + $b | unique')
+            done
+            echo "$all"
+          }
+
           # Gate 3's rule, one jq filter used by both reads (evaluation and the
           # final snapshot). Input: review-thread nodes with comments(first:1)
           # {author{__typename login} path body}. Output:
@@ -894,7 +933,13 @@ jobs:
             if [[ "$N_COMMITS" =~ ^[0-9]+$ ]] && [ "$N_COMMITS" -le 250 ]; then
               if C=$(gh api "/repos/$REPO/pulls/$PR_NUMBER/commits" --paginate --jq '.[].sha' | jq -Rs 'split("\n") | map(select(length > 0))') \
                  && [ "$(echo "$C" | jq 'length')" = "$N_COMMITS" ]; then
-                COMMITS="$C"
+                # Plus every head a force-push replaced, and its history past
+                # the base: a late clean pass for a replaced head A must not
+                # count for a colliding current head B (Codex P1 on .github#57;
+                # review-verdict has the same rule).
+                if R=$(replaced_heads_json "$PR_NUMBER" "$BASE"); then
+                  COMMITS=$(jq -n --argjson a "$C" --argjson b "$R" '$a + $b | unique')
+                fi
               fi
             fi
 

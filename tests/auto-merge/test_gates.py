@@ -79,7 +79,7 @@ if path == "graphql":
     if "dequeuePullRequest" in q: out({"data": {}}, jq)
     if "isInMergeQueue" in q: out({"data": {"repository": {"pullRequest": {"isInMergeQueue": False}}}}, jq)
     if "mergeQueue(" in q: out({"data": {"repository": {"mergeQueue": None}}}, jq)
-    for key in ("headRefOid", "reviewThreads(first:100, after", "comments(last:100)"):
+    for key in ("headRefOid", "timelineItems", "reviewThreads(first:100, after", "comments(last:100)"):
         if key in q:
             if g.get(key) is None: sys.exit("stub gh: graphql unavailable: " + key)
             out(g[key], jq)
@@ -127,7 +127,7 @@ def check(name, conclusion="success", status="completed", app="github-actions"):
 
 def build(reviews=(), comments=(), threads=(), checks=(check("CI"),), labels=(), draft=False,
           commits=(OLD, HEAD), files=("src/a.py",), snap_threads=None, snap_reviews=None,
-          snap_comments=None, requested=(), drop=()):
+          snap_comments=None, requested=(), drop=(), replaced=(), histories=None):
     pr = {"number": PR, "state": "open", "draft": draft, "head": {"sha": HEAD},
           "base": {"sha": BASE, "ref": "main"}, "changed_files": len(files), "commits": len(commits),
           "labels": [{"name": l} for l in labels], "node_id": "PR_1",
@@ -148,8 +148,14 @@ def build(reviews=(), comments=(), threads=(), checks=(check("CI"),), labels=(),
             f"/commits/{HEAD}/check-runs": {"check_runs": list(checks)},
             f"/pulls/{PR}/reviews": list(reviews),
             f"/pulls/{PR}/commits": [{"sha": c} for c in commits],
+            **{f"/compare/{BASE}...{oid}": {"total_commits": len((histories or {}).get(oid, [oid])),
+                                             "commits": [{"sha": c} for c in (histories or {}).get(oid, [oid])]}
+               for oid in replaced},
         },
         "graphql": {
+            "timelineItems": {"data": {"repository": {"pullRequest": {"timelineItems": {
+                "pageInfo": {"hasPreviousPage": False},
+                "nodes": [{"beforeCommit": {"oid": oid}} for oid in replaced]}}}}},
             "comments(last:100)": {"data": {"repository": {"pullRequest": {"comments": {"nodes": list(comments)}}}}},
             "reviewThreads(first:100, after": {"data": {"repository": {"pullRequest": {"reviewThreads": {
                 "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": list(threads)}}}}},
@@ -195,6 +201,19 @@ case("PR commits unreadable: no comment evidence", "hold",
      build(comments=[CLEAN_HEAD], drop=[("rest", f"/pulls/{PR}/commits")]))
 case("PR commits unreadable, Codex review on head still counts", "merge",
      build(reviews=[codex_review()], drop=[("rest", f"/pulls/{PR}/commits")]))
+# Heads a force-push replaced also count as carried (Codex P1 on .github#57).
+case("force-push replaced a head sharing the reviewed prefix", "hold",
+     build(comments=[CLEAN_HEAD], replaced=[COLLIDE]))
+case("colliding commit in the history of a replaced head", "hold",
+     build(comments=[CLEAN_HEAD], replaced=[OLD], histories={OLD: [COLLIDE, OLD]}))
+case("force-push replaced a non-colliding head", "merge",
+     build(comments=[CLEAN_HEAD], replaced=[OLD]))
+case("replaced head's history unreadable: no comment evidence", "hold",
+     build(comments=[CLEAN_HEAD], replaced=[OLD], drop=[("rest", f"/compare/{BASE}...{OLD}")]))
+case("force-push history unreadable: no comment evidence", "hold",
+     build(comments=[CLEAN_HEAD], drop=[("graphql", "timelineItems")]))
+case("force-push history unreadable, Codex review on head still counts", "merge",
+     build(reviews=[codex_review()], drop=[("graphql", "timelineItems")]))
 case("comments unreadable", "hold",
      build(reviews=[codex_review()], drop=[("graphql", "comments(last:100)")]))
 case("Codex review on head dismissed", "hold", build(reviews=[codex_review(state="DISMISSED")]))
