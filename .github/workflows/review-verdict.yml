@@ -14,9 +14,24 @@ name: Review verdict
 #   1. a review by a trusted reviewer whose commit_id is this head;
 #   2. a successful `Greptile Review` check on this head from greptile-apps,
 #      attributable to this PR (only open PR at the head; completed after the
-#      PR was opened).
+#      PR was opened);
+#   3. Codex's clean result for this head: an ISSUE comment on this PR,
+#      authored by the chatgpt-codex-connector App itself (never a human
+#      quoting it), never edited or minimised, opening "Codex Review: Didn't
+#      find any major issues" and naming exactly one "Reviewed commit" that is
+#      a 10+ hex prefix of this head. Codex posts a clean pass this way, not
+#      as a review object, so without this a Codex-only PR never passes.
+# CODEX FINDINGS BLOCK: if Codex left any inline comment whose
+# original_commit_id is this head, no Codex evidence (1 or 3) counts for this
+# head. Fixing means a new push and a clean Codex pass on it. Greptile's
+# evidence is unchanged by this rule.
 # The author of the last push is never evidence for that head. Skip notices
 # never count.
+#
+# RESIDUAL (evidence 3 only): Codex names the commit by a 10-hex prefix, not
+# the full SHA. A pusher who brute-forces a different commit with the same
+# 40-bit prefix after Codex's clean pass would inherit it. The ruleset's
+# thread-resolution rule and agency-delivery/gate still apply to that head.
 #
 # RESIDUAL (evidence 2 only): a Greptile check binds to a commit, not a PR.
 # If two PRs share a head and BOTH were open when the check started, and one
@@ -51,6 +66,14 @@ name: Review verdict
 #                         the reviewer, exiting early once evidence appears.
 #   pull_request_review — a review landed; re-evaluate immediately.
 #   check_run           — Greptile finished; re-evaluate immediately.
+#   issue_comment       — Codex created/edited/deleted a PR comment. The event
+#                         carries no head SHA, so it cannot join the per-head
+#                         concurrency group and NEVER publishes. Its `relay`
+#                         job reads the current head and dispatches this
+#                         workflow (workflow_dispatch, pr_number + head_sha),
+#                         which evaluates and publishes like any other run.
+#                         GITHUB_TOKEN may trigger workflow_dispatch (the
+#                         documented exception to its no-recursion rule).
 #   workflow_dispatch   — re-evaluate one PR: pr_number AND its head_sha.
 # A new head always gets a new check. Re-runs POST a fresh completed run of
 # the same name; the latest one is what GitHub uses.
@@ -62,6 +85,8 @@ on:
     types: [submitted, dismissed]
   check_run:
     types: [completed]
+  issue_comment:
+    types: [created, edited, deleted]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -77,12 +102,14 @@ permissions:
   contents: read
   checks: write
   pull-requests: read
+  issues: read
 
 concurrency:
   # INVARIANT: only a run that will publish may enter the shared group. Every
   # such run re-evaluates from scratch, so whatever it cancels is replaced by
   # a fresh verdict. A run the job `if` skips (a non-Greptile check_run, a
-  # read-only review on a fork/Dependabot PR) gets a throwaway group, because
+  # read-only review on a fork/Dependabot PR, any issue_comment, which only
+  # relays) gets a throwaway group, because
   # workflow-level concurrency is applied BEFORE the job `if`: in the shared
   # group it could cancel a publisher, notably a dismissal re-evaluation, and
   # publish nothing, leaving a stale `success` as the latest check.
@@ -101,10 +128,53 @@ concurrency:
   # run joins that commit's group and is pinned to it like every other run
   # (Codex on opportunity-builder#165 / aaa-client-dashboard#243: keyed by PR
   # number it could publish a stale `success` after a dismissal).
-  group: review-verdict-${{ github.repository }}-${{ ((github.event_name != 'check_run' || (github.event.check_run.name == 'Greptile Review' && github.event.check_run.app.slug == 'greptile-apps')) && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.check_run.head_sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
+  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && (github.event_name != 'check_run' || (github.event.check_run.name == 'Greptile Review' && github.event.check_run.app.slug == 'greptile-apps')) && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.check_run.head_sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
+  # issue_comment only. Codex posts its clean pass as an issue comment, which
+  # carries no head SHA, so this job never evaluates or publishes: it reads
+  # the PR's current head and hands off to a workflow_dispatch run, which
+  # joins that head's concurrency group like every other publisher. Filtered
+  # on the comment's AUTHOR, so a human quoting Codex never triggers it, while
+  # anyone's edit or deletion of a Codex comment does (both can revoke
+  # evidence). No checkout, and no event text is interpolated into the script.
+  relay:
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.comment.user.login == 'chatgpt-codex-connector[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Dispatch review/verdict for the PR's current head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "/repos/$REPO/pulls/$PR_NUMBER")
+          state=$(echo "$pr_json" | jq -r '.state // empty')
+          head=$(echo "$pr_json" | jq -r '.head.sha // empty')
+          if [ "$state" != "open" ]; then
+            echo "#$PR_NUMBER is ${state:-unreadable}; nothing to re-evaluate."
+            exit 0
+          fi
+          if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not read a head SHA for #$PR_NUMBER."
+            exit 1
+          fi
+          # GITHUB_WORKFLOW_REF = owner/repo/.github/workflows/<file>@<ref>
+          wf="${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
+          wf="${wf%@*}"
+          echo "Dispatching $wf on $DEFAULT_BRANCH for #$PR_NUMBER at ${head:0:7}"
+          gh workflow run "$wf" --repo "$REPO" --ref "$DEFAULT_BRANCH" \
+            -f pr_number="$PR_NUMBER" -f head_sha="$head"
+
   publish:
     # pull_request_review on a fork or Dependabot PR gets a READ-ONLY token, so
     # it cannot publish; skip it rather than fail. Those PRs get their verdict
@@ -112,6 +182,7 @@ jobs:
     # check_run, or a workflow_dispatch. Never a pass: a skipped run publishes
     # nothing, and the head keeps its action_required verdict until then.
     if: >
+      github.event_name != 'issue_comment' &&
       (github.event_name != 'check_run' ||
        (github.event.check_run.name == 'Greptile Review' &&
         github.event.check_run.app.slug == 'greptile-apps')) &&
@@ -137,6 +208,10 @@ jobs:
           TRUSTED_REVIEWERS: "greptile-apps[bot],chatgpt-codex-connector[bot]"
           REQUIRED_REVIEW_CHECK: "Greptile Review"
           REQUIRED_REVIEW_APP: "greptile-apps"
+          # Evidence 3 and the Codex findings rule. The login must also be in
+          # TRUSTED_REVIEWERS; the App slug is checked on every comment.
+          CODEX_BOT: "chatgpt-codex-connector[bot]"
+          CODEX_APP: "chatgpt-codex-connector"
           # Same string as auto-merge.yml's REVIEW_SKIP_PATTERN. Keep in step.
           REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit"
           # Greptile lands ~2-11 min after a push. Other events evaluate once.
@@ -153,7 +228,9 @@ jobs:
           # Evidence, strongest first (nothing else counts; reactions never count):
           #   1. a review object by a trusted reviewer whose commit_id is the head;
           #   2. a successful `Greptile Review` check on the head from greptile-apps,
-          #      attributable to this PR.
+          #      attributable to this PR;
+          #   3. a clean Codex issue comment naming the head as its reviewed commit.
+          # Codex inline findings on the head veto Codex evidence (1 and 3).
           #
           # Fails closed: no evidence means no successful verdict. A vendor renaming a
           # check or rewording a comment can cost a verdict; it can never buy one.
@@ -169,6 +246,8 @@ jobs:
           TRUSTED_REVIEWERS="${TRUSTED_REVIEWERS:-greptile-apps[bot],chatgpt-codex-connector[bot]}"
           REQUIRED_REVIEW_CHECK="${REQUIRED_REVIEW_CHECK:-Greptile Review}"
           REQUIRED_REVIEW_APP="${REQUIRED_REVIEW_APP:-greptile-apps}"
+          CODEX_BOT="${CODEX_BOT:-chatgpt-codex-connector[bot]}"
+          CODEX_APP="${CODEX_APP:-chatgpt-codex-connector}"
           # Canonical copy: Automation-Architecture/.github .github/workflows/auto-merge.yml
           # (AAA-711: the better idea; skip notices are status, not a verdict).
           REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit}"
@@ -183,6 +262,9 @@ jobs:
           PR_STATE=""
           EVIDENCE=""
           MISSING_REASONS=()
+          # 1 = Codex evidence (review object or clean comment) cannot count for
+          # this head: Codex has findings on it, or they could not be read.
+          CODEX_BLOCKED=0
           # NEVER "neutral": GitHub counts neutral, skipped and success as passing a
           # required check, so a neutral "no evidence" verdict would let an unreviewed
           # PR through the ruleset. action_required is completed but not passing.
@@ -295,6 +377,9 @@ jobs:
               return 1
             fi
             trusted=$(trusted_json)
+            if [ "$CODEX_BLOCKED" = "1" ]; then
+              trusted=$(echo "$trusted" | jq --arg c "$CODEX_BOT" 'map(select(. != $c))')
+            fi
             local pushers
             if ! pushers=$(last_push_logins_json); then
               fail_closed_reason "could not read the author of head $HEAD_SHA"
@@ -478,11 +563,116 @@ jobs:
             return 0
           }
 
+          # Codex findings on THIS head veto every Codex-derived verdict for it.
+          # A finding is an inline review comment by Codex whose
+          # original_commit_id is this head (commit_id moves with later pushes;
+          # original_commit_id does not). Unreadable counts as blocked.
+          load_codex_findings() {
+            CODEX_BLOCKED=0
+            local comments n
+            if ! comments=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/comments" --jq '.[]' | jq -s '.'); then
+              CODEX_BLOCKED=1
+              fail_closed_reason "could not read inline review comments for #$PR_NUMBER, so Codex evidence cannot be shown to be free of findings"
+              return 0
+            fi
+            if ! n=$(echo "$comments" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" \
+                  '[.[] | select(.user.login == $c and .original_commit_id == $sha)] | length'); then
+              CODEX_BLOCKED=1
+              fail_closed_reason "could not evaluate Codex's inline comments for #$PR_NUMBER"
+              return 0
+            fi
+            if [ "$n" -gt 0 ]; then
+              CODEX_BLOCKED=1
+              fail_closed_reason "Codex left ${n} inline finding(s) on this head, so no Codex review or comment counts for it; push a fix and get a clean Codex pass on the new head"
+            fi
+            return 0
+          }
+
+          # Evidence 3: Codex's clean pass, which Codex posts as an ISSUE comment,
+          # not a review object. Every test below must hold; any doubt refuses.
+          #  - author is the Codex App's bot account (a [bot] login cannot belong
+          #    to a person) AND the comment was posted via the Codex App;
+          #  - body OPENS with the clean-result sentence, so a quote inside a
+          #    longer comment never matches, and does not match REVIEW_SKIP_PATTERN;
+          #  - exactly one "Reviewed commit" SHA, 10-40 hex, a prefix of this head;
+          #  - never edited (a writer can edit another user's comment) and not
+          #    minimised, read from GraphQL lastEditedAt / isMinimized;
+          #  - Codex is not an author of the head commit.
+          evidence_from_codex_comment() {
+            if [ "$CODEX_BLOCKED" = "1" ]; then
+              return 1
+            fi
+            if ! trusted_json | jq -e --arg c "$CODEX_BOT" 'index($c)' >/dev/null; then
+              return 1
+            fi
+            local comments candidates n
+            if ! comments=$(gh api --paginate "/repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[]' | jq -s '.'); then
+              fail_closed_reason "could not read issue comments for #$PR_NUMBER"
+              return 1
+            fi
+            if ! candidates=$(echo "$comments" | jq --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
+                  --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" '
+              def reviewed: [scan("\\*\\*Reviewed commit:\\*\\* `([0-9a-f]{10,40})`") | .[0]];
+              [.[]
+                | select(
+                    .user.login == $bot and .user.type == "Bot"
+                    and (.performed_via_github_app.slug // "") == $app
+                    and ((.body // "") | test("\\ACodex Review: Didn.t find any major issues"))
+                    and (((.body // "") | test($skip; "i")) | not)
+                    and ((.body // "") | reviewed | length == 1)
+                    and ((.body // "") | reviewed | .[0] as $s | $sha | startswith($s))
+                  )
+                | {node_id, created_at}
+              ] | sort_by(.created_at) | reverse'); then
+              fail_closed_reason "could not evaluate Codex comments for #$PR_NUMBER"
+              return 1
+            fi
+            n=$(echo "$candidates" | jq 'length')
+            if [ "$n" -eq 0 ]; then
+              fail_closed_reason "no clean Codex result names this head as its reviewed commit"
+              return 1
+            fi
+
+            local pushers
+            if ! pushers=$(last_push_logins_json); then
+              fail_closed_reason "could not read the author of head $HEAD_SHA"
+              return 1
+            fi
+            if echo "$pushers" | jq -e --arg c "$CODEX_BOT" 'index($c)' >/dev/null; then
+              fail_closed_reason "the author of the last push is ${CODEX_BOT}, who is not trusted evidence for this head"
+              return 1
+            fi
+
+            local node meta ok
+            for node in $(echo "$candidates" | jq -r '.[].node_id'); do
+              # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
+              if ! meta=$(gh api graphql -f id="$node" -f query='
+                  query($id: ID!) { node(id: $id) { ... on IssueComment {
+                    lastEditedAt isMinimized author { login } } } }'); then
+                continue
+              fi
+              ok=$(echo "$meta" | jq -r --arg app "$CODEX_APP" '
+                .data.node as $c
+                | if $c == null then "no"
+                  elif ($c.author.login // "") != $app then "no"
+                  elif $c.lastEditedAt != null then "no"
+                  elif $c.isMinimized != false then "no"
+                  else "yes" end')
+              if [ "$ok" = "yes" ]; then
+                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10}, and no Codex findings on this head"
+                return 0
+              fi
+            done
+            fail_closed_reason "clean Codex comment(s) name this head but were edited, minimised, or unreadable, so they do not count"
+            return 1
+          }
+
           evaluate_once() {
             EVIDENCE=""
             MISSING_REASONS=()
             CONCLUSION="action_required"
             TITLE="Waiting for a trusted review"
+            CODEX_BLOCKED=0
 
             # Identity first so a fail-closed verdict can still land on the head SHA.
             if ! resolve_pr; then
@@ -505,12 +695,18 @@ jobs:
               echo "::notice::#$PR_NUMBER is $PR_STATE — evaluating anyway because PUBLISH=0."
             fi
 
+            load_codex_findings
             if evidence_from_reviews; then
               CONCLUSION="success"
               TITLE="Reviewed"
               return 0
             fi
             if evidence_from_greptile_check; then
+              CONCLUSION="success"
+              TITLE="Reviewed"
+              return 0
+            fi
+            if evidence_from_codex_comment; then
               CONCLUSION="success"
               TITLE="Reviewed"
               return 0
@@ -606,7 +802,7 @@ jobs:
             if [ -n "$EVIDENCE" ] || [ "$SUPERSEDED" = "1" ] || [ "$SECONDS" -ge "$deadline" ]; then
               break
             fi
-            printf 'No evidence yet; waiting for a trusted review or %s — up to %ss.\n' \
+            printf 'No evidence yet; waiting for a trusted review, a clean Codex result or %s — up to %ss.\n' \
               "$REQUIRED_REVIEW_CHECK" "$WAIT_SECONDS"
             sleep 20
           done
