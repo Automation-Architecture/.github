@@ -43,10 +43,11 @@ name: Review verdict
 # .github#48.)
 #
 # RESIDUAL (evidence 3 only), accepted: a replaced head's history is listed
-# against the CURRENT base. If a Codex review of A is running, the PR moves
-# past A, the base then moves to contain A, and a precomputed head B sharing
-# A's 10-hex prefix is force-pushed, A's late clean comment passes B. All five
-# must hold at once (Codex P1 on .github#50).
+# against the CURRENT base. If a Codex review of A is running, the base then
+# moves to contain A, and the PR reaches a precomputed head B sharing A's
+# 10-hex prefix (by force-push, or by fast-forward so A drops out of the PR's
+# commit list), A's late clean comment passes B. Every step must hold at once
+# (Codex P1 on .github#50 and opportunity-builder#178).
 #
 # RESIDUAL (evidence 2 only): a Greptile check binds to a commit, not a PR.
 # If two PRs share a head and BOTH were open when the check started, and one
@@ -583,7 +584,12 @@ jobs:
           # Codex findings on THIS head veto every Codex-derived verdict for it.
           # A finding is an inline review comment by Codex whose
           # original_commit_id is this head (commit_id moves with later pushes;
-          # original_commit_id does not). Unreadable counts as blocked.
+          # original_commit_id does not), OR any Codex review object on this
+          # head, dismissed or not. Codex posts a review object only to carry
+          # findings, and unlike an inline comment it cannot be deleted, so a
+          # writer deleting the findings or dismissing the review does not
+          # clear the veto (Codex P1 on aios-coffee#122). Unreadable counts as
+          # blocked.
           load_codex_findings() {
             CODEX_BLOCKED=0
             local comments n
@@ -601,6 +607,23 @@ jobs:
             if [ "$n" -gt 0 ]; then
               CODEX_BLOCKED=1
               fail_closed_reason "Codex left ${n} inline finding(s) on this head, so no Codex comment counts for it; push a fix and get a clean Codex pass on the new head"
+              return 0
+            fi
+            local reviews
+            if ! reviews=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews" --jq '.[]' | jq -s '.'); then
+              CODEX_BLOCKED=1
+              fail_closed_reason "could not read reviews for #$PR_NUMBER, so Codex evidence cannot be shown to be free of findings"
+              return 0
+            fi
+            if ! n=$(echo "$reviews" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" \
+                  '[.[] | select(.user.login == $c and .commit_id == $sha)] | length'); then
+              CODEX_BLOCKED=1
+              fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
+              return 0
+            fi
+            if [ "$n" -gt 0 ]; then
+              CODEX_BLOCKED=1
+              fail_closed_reason "Codex submitted ${n} review(s) with findings on this head (the findings may since have been deleted or the review dismissed), so no Codex comment counts for it; push a fix and get a clean Codex pass on the new head"
             fi
             return 0
           }

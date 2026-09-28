@@ -178,6 +178,15 @@ case("skip notice wording in the comment", "fail",
          CLEAN_BODY.format(sha=HEAD[:10]) + "\nReview skipped: rate limit")], **gql("IC_1")}))
 case("Codex findings on this head veto the clean comment", "fail",
      with_(clean(), **{f"/pulls/{PR}/comments": [finding(HEAD)], f"/pulls/{PR}/reviews": [codex_review(HEAD)]}))
+# A Codex review object on the head is a durable finding marker (Codex P1 on
+# aios-coffee#122): deleting its inline findings or dismissing it does not
+# revive a clean comment on the same head.
+case("clean comment, then a Codex review on the same head whose findings were deleted", "fail",
+     with_(clean(), **{f"/pulls/{PR}/reviews": [codex_review(HEAD)]}))
+case("clean comment, Codex review on the same head dismissed", "fail",
+     with_(clean(), **{f"/pulls/{PR}/reviews": [dict(codex_review(HEAD), state="DISMISSED")]}))
+case("reviews unreadable -> Codex evidence refused", "fail",
+     {k: v for k, v in clean().items() if k != f"/pulls/{PR}/reviews"})
 case("inline comments unreadable -> Codex evidence refused", "fail",
      {k: v for k, v in clean().items() if k != f"/pulls/{PR}/comments"})
 case("Codex authored the head commit", "fail",
