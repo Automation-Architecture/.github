@@ -48,6 +48,11 @@ while i < len(args):
         k, _, v = args[i + 1].partition("="); fields[k] = v; i += 2; continue
     if a == "--paginate": i += 1; continue
     path = a; i += 1
+if path == "graphql":
+    with open(os.path.join(state_dir, "graphql_calls"), "a") as f:
+        f.write(json.dumps(fields) + "\n")
+    open(os.path.join(state_dir, "disarmed"), "w").close()
+    sys.stdout.write("{}"); sys.exit(0)
 key = path.split("/repos/" + os.environ["REPO"], 1)[-1].split("?", 1)[0]
 merged_flag = os.path.join(state_dir, "merged")
 if method == "PUT" and key.endswith("/merge"):
@@ -61,6 +66,8 @@ if method != "GET":
     sys.exit("stub gh: unexpected %s %s" % (method, key))
 if os.path.exists(merged_flag) and key + "@merged" in fx:
     key = key + "@merged"
+elif os.path.exists(os.path.join(state_dir, "disarmed")) and key + "@disarmed" in fx:
+    key = key + "@disarmed"
 if key not in fx:
     sys.stderr.write("stub gh: no fixture for %s\n" % key); sys.exit(1)
 v = fx[key]
@@ -85,9 +92,16 @@ def pr(files=1, draft=False, labels=(), head_repo=REPO, head=HEAD, base="main", 
             "base": {"ref": base, "sha": "b" * 40}}
 
 
-def run_(name, conclusion="success", status="completed", slug="github-actions", rid=1, app_id=15368):
-    return {"id": rid, "name": name, "status": status, "conclusion": conclusion if status == "completed" else None,
-            "app": {"slug": slug, "id": app_id}}
+def run_(name, conclusion="success", status="completed", slug="github-actions", rid=1, app_id=15368, run=None):
+    r = {"id": rid, "name": name, "status": status, "conclusion": conclusion if status == "completed" else None,
+         "app": {"slug": slug, "id": app_id}}
+    if run is not None:
+        r["details_url"] = f"https://github.com/{REPO}/actions/runs/{run}/job/{rid + 1000}"
+    return r
+
+
+def actions_run(run, path):
+    return {f"/actions/runs/{run}": {"id": run, "path": path}}
 
 
 def base(files=("README.md",), runs=(), statuses=(), required=(), classic=None, **prkw):
@@ -140,6 +154,14 @@ case("file list unreadable: not merged", "held", with_(base(), **{f"/pulls/{PR}/
 case("3000 changed files: not merged", "held", with_(base(), **{f"/pulls/{PR}": pr(files=3000)}))
 case("draft never merges", "held", base(draft=True))
 case("hold label stops it", "held", base(labels=("no-auto-merge",)))
+case("hold label with native auto-merge armed: disarms it, does not merge", "held",
+     with_(base(), **{f"/pulls/{PR}": {**pr(labels=("no-auto-merge",)), "node_id": "PR_x", "auto_merge": {"merge_method": "squash"}},
+                      f"/pulls/{PR}@disarmed": {**pr(labels=("no-auto-merge",)), "auto_merge": None}}))
+case("hold label, auto-merge cannot be disarmed: red run", "error",
+     with_(base(), **{f"/pulls/{PR}": {**pr(labels=("no-auto-merge",)), "node_id": "PR_x", "auto_merge": {"merge_method": "squash"}}}))
+case("CI turns red in the final snapshot: not merged", "held",
+     with_(base(), **{f"/commits/{HEAD}/check-runs": {"__seq": [
+         {"check_runs": [run_("unittest")]}, {"check_runs": [run_("unittest", "failure", rid=2)]}]}}))
 case("labels unreadable: not merged", "held", with_(base(), **{f"/pulls/{PR}": {**pr(), "labels": None}}))
 case("fork PR never merges", "held", base(head_repo="mallory/widget"))
 case("already merged: nothing to do", "held", with_(base(), **{f"/pulls/{PR}": pr(merged=True, state="closed")}))
@@ -170,8 +192,19 @@ case("newest run of a check wins: failed then re-run green merges", "merged",
      base(runs=[run_("unittest", "failure", rid=1), run_("unittest", rid=2)]))
 case("newest run of a check wins: green then re-run failed holds", "held",
      base(runs=[run_("unittest", rid=1), run_("unittest", "failure", rid=2)]))
-case("a cancelled (superseded) run is not a failure", "merged",
-     base(runs=[run_("publish", "cancelled"), run_("unittest", rid=2)]))
+case("review-verdict's superseded (cancelled) publish job is not a failure", "merged",
+     with_(base(runs=[run_("publish", "cancelled", run=900), run_("review/verdict", rid=2), run_("unittest", rid=3)]),
+           **actions_run(900, ".github/workflows/review-verdict.yml")))
+case("a cancelled newest CI run is a failure", "held",
+     with_(base(runs=[run_("unittest", "cancelled", run=901)]), **actions_run(901, ".github/workflows/ci.yml")))
+case("a CI job named like review-verdict's still counts when cancelled", "held",
+     with_(base(runs=[run_("publish", "cancelled", run=902)]), **actions_run(902, ".github/workflows/release.yml")))
+case("cancelled run whose workflow cannot be read: not merged", "held",
+     base(runs=[run_("unittest", "cancelled", run=903)]))
+case("cancelled then re-run green (newest wins) merges", "merged",
+     base(runs=[run_("unittest", "cancelled", rid=1, run=904), run_("unittest", rid=2)]))
+case("cancelled non-Actions check is a failure", "held",
+     base(runs=[run_("vercel-build", "cancelled", slug="vercel", app_id=8)]))
 case("this job's own check is not waited on", "merged",
      base(runs=[run_("doc-auto-merge", status="in_progress"), run_("doc-auto-merge", "cancelled", rid=2)]))
 case("Greptile is a reviewer, not CI: its pending check is not waited on", "merged",
@@ -214,6 +247,10 @@ case("merge call succeeds but PR not merged: red run", "error",
 
 def main():
     wf = yaml.safe_load(WORKFLOW.read_text())
+    group = wf["concurrency"]["group"]
+    for needle in ("github.event.pull_request.number", "github.event.pull_request.head.sha",
+                   "github.event.workflow_run.pull_requests[0].number", "github.event.workflow_run.head_sha"):
+        assert needle in group, f"concurrency group must key on {needle} (PR number AND head SHA)"
     step = wf["jobs"]["doc-auto-merge"]["steps"][0]
     static_env = {k: str(v) for k, v in step["env"].items() if "${{" not in str(v)}
     failures = 0
