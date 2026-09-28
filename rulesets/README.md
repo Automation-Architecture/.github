@@ -1,7 +1,8 @@
 # Org rulesets
 
 > **Policy (Brad, 2026-09-29):** no human approval is required anywhere in the org, and Codex is the one
-> required reviewer (Greptile only on a few opted-in projects). `aaa-merge-gates.json` below is the live
+> required reviewer. Greptile is outside the merge policy: it runs only on repos Brad enables in its
+> dashboard, nothing requires or waits on it, and nobody invites it (`@greptileai`). `aaa-merge-gates.json` below is the live
 > ruleset `23649946` as read back on 2026-09-29, after that policy was applied. `aios-coffee` is not in it;
 > it uses its own `agency-delivery-gate-pilot` ruleset (`23773361`).
 
