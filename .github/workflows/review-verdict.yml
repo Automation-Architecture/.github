@@ -17,7 +17,7 @@ name: Review verdict
 #      PR was opened);
 #   3. Codex's clean result for this head: an ISSUE comment on this PR,
 #      authored by the chatgpt-codex-connector App itself (never a human
-#      quoting it), never edited or minimised, opening "Codex Review: Didn't
+#      quoting it), never edited, opening "Codex Review: Didn't
 #      find any major issues" and naming exactly one "Reviewed commit" that is
 #      a 10+ hex prefix of this head. Codex posts a clean pass this way, not
 #      as a review object, so without this a Codex-only PR never passes.
@@ -595,8 +595,14 @@ jobs:
           #  - body OPENS with the clean-result sentence, so a quote inside a
           #    longer comment never matches, and does not match REVIEW_SKIP_PATTERN;
           #  - exactly one "Reviewed commit" SHA, 10-40 hex, a prefix of this head;
-          #  - never edited (a writer can edit another user's comment) and not
-          #    minimised, read from GraphQL lastEditedAt / isMinimized;
+          #  - never edited (a writer can edit another user's comment), read from
+          #    GraphQL lastEditedAt. An edit fires issue_comment `edited`, so a
+          #    pass already published is re-evaluated. Minimising (hiding) is
+          #    deliberately NOT a revocation: it fires no event, so the rule could
+          #    not be enforced after a pass was published (Codex P1 on
+          #    aaa-client-dashboard#252), and hiding a clean bot comment asserts
+          #    nothing about the code. Revoke a pass by pushing, or by deleting the
+          #    comment (issue_comment `deleted` re-evaluates);
           #  - Codex is not an author of the head commit.
           evidence_from_codex_comment() {
             if [ "$CODEX_BLOCKED" = "1" ]; then
@@ -648,7 +654,7 @@ jobs:
               # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
               if ! meta=$(gh api graphql -f id="$node" -f query='
                   query($id: ID!) { node(id: $id) { ... on IssueComment {
-                    lastEditedAt isMinimized author { login } } } }'); then
+                    lastEditedAt author { login } } } }'); then
                 continue
               fi
               ok=$(echo "$meta" | jq -r --arg app "$CODEX_APP" '
@@ -656,14 +662,13 @@ jobs:
                 | if $c == null then "no"
                   elif ($c.author.login // "") != $app then "no"
                   elif $c.lastEditedAt != null then "no"
-                  elif $c.isMinimized != false then "no"
                   else "yes" end')
               if [ "$ok" = "yes" ]; then
                 EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10}, and no Codex findings on this head"
                 return 0
               fi
             done
-            fail_closed_reason "clean Codex comment(s) name this head but were edited, minimised, or unreadable, so they do not count"
+            fail_closed_reason "clean Codex comment(s) name this head but were edited or unreadable, so they do not count"
             return 1
           }
 

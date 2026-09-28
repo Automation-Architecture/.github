@@ -130,7 +130,9 @@ case("human account quoting the clean comment", "fail",
 case("human comment with Codex-like login but not via the App", "fail", clean(app=None))
 case("clean comment edited after posting", "fail",
      with_(clean(), extra=gql("IC_1", edited="2026-09-27T23:20:00Z")))
-case("clean comment minimised", "fail", with_(clean(), extra=gql("IC_1", minimized=True)))
+# Minimising is not a revocation (it fires no event, so it could not be enforced
+# after a pass was published); edits and deletions are.
+case("clean comment minimised still counts", "success", with_(clean(), extra=gql("IC_1", minimized=True)))
 case("GraphQL author is not the Codex App", "fail", with_(clean(), extra=gql("IC_1", login="mallory")))
 case("GraphQL lookup fails", "fail",
      {k: v for k, v in clean().items() if not k.startswith("graphql:")})
