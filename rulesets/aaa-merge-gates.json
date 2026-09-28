@@ -1,24 +1,4 @@
 {
-  "name": "aaa-merge-gates",
-  "target": "branch",
-  "enforcement": "active",
-  "conditions": {
-    "ref_name": {
-      "include": [
-        "~DEFAULT_BRANCH"
-      ],
-      "exclude": []
-    },
-    "repository_name": {
-      "include": [
-        "aaa-client-dashboard",
-        "opportunity-builder",
-        "aaa-coffee"
-      ],
-      "exclude": [],
-      "protected": false
-    }
-  },
   "bypass_actors": [
     {
       "actor_id": null,
@@ -26,53 +6,53 @@
       "bypass_mode": "pull_request"
     }
   ],
+  "conditions": {
+    "ref_name": {
+      "exclude": [],
+      "include": [
+        "~DEFAULT_BRANCH"
+      ]
+    },
+    "repository_name": {
+      "exclude": [],
+      "include": [
+        "aaa-client-dashboard",
+        "opportunity-builder"
+      ],
+      "protected": false
+    }
+  },
+  "enforcement": "active",
+  "name": "aaa-merge-gates",
   "rules": [
     {
-      "type": "required_status_checks",
       "parameters": {
-        "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false,
         "required_status_checks": [
           {
             "context": "review/verdict",
             "integration_id": 15368
           }
-        ]
-      }
+        ],
+        "strict_required_status_checks_policy": false
+      },
+      "type": "required_status_checks"
     },
     {
-      "type": "pull_request",
       "parameters": {
-        "required_approving_review_count": 0,
-        "dismiss_stale_reviews_on_push": false,
-        "require_code_owner_review": false,
-        "require_last_push_approval": false,
-        "required_review_thread_resolution": true,
         "allowed_merge_methods": [
           "squash"
         ],
-        "required_reviewers": [
-          {
-            "reviewer": {
-              "id": 17698930,
-              "type": "Team"
-            },
-            "minimum_approvals": 1,
-            "file_patterns": [
-              ".github/**",
-              "CLAUDE.md",
-              "**/CLAUDE.md",
-              "AGENTS.md",
-              "**/AGENTS.md",
-              ".cursorrules",
-              ".claude/**",
-              ".greptile/**",
-              "greptile.json"
-            ]
-          }
-        ],
-        "require_extra_approval_for_unattributed_changes": true
-      }
+        "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false,
+        "require_extra_approval_for_unattributed_changes": false,
+        "require_last_push_approval": false,
+        "required_approving_review_count": 0,
+        "required_review_thread_resolution": false,
+        "required_reviewers": []
+      },
+      "type": "pull_request"
     }
-  ]
+  ],
+  "target": "branch"
 }
