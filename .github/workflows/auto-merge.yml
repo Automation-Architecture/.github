@@ -153,8 +153,8 @@ name: Auto-Merge when Checks Green and Reviews In
 #
 # So every signal that nothing pins is read in ONE GraphQL query, after the
 # PR_LOCK re-read and immediately before `gh pr merge`: the head OID, the
-# labels, the latest 100 reviews, the latest 100 issue comments and the
-# first 100 review threads.
+# labels, the draft state, the latest 100 reviews, the latest 100 issue
+# comments and the first 100 review threads.
 #
 # Gates 2 and 3 are re-run from that read (.github#43, 2026-09-23): a Codex
 # review dismissed, or a clean pass edited or deleted, mid-run holds, and a
@@ -721,6 +721,7 @@ jobs:
                 repository(owner:$owner,name:$name){
                   pullRequest(number:$number){
                     headRefOid
+                    isDraft
                     labels(first:100){ totalCount nodes{ name } }
                     reviews(last:100){ totalCount nodes{ state submittedAt body commit{ oid } author{ __typename login } } }
                     comments(last:100){ nodes{ body createdAt lastEditedAt author{ __typename login } } }
@@ -732,6 +733,7 @@ jobs:
                  ((.errors // []) | length) == 0
                  and (.data.repository.pullRequest as $p
                    | ($p.headRefOid | type == "string")
+                     and ($p.isDraft | type == "boolean")
                      and ($p.labels.totalCount | type == "number")
                      and ($p.labels.nodes | type == "array")
                      and ($p.reviews.totalCount | type == "number")
@@ -745,6 +747,13 @@ jobs:
             head=$(echo "$snap" | jq -r '.data.repository.pullRequest.headRefOid')
             if [ "$head" != "$sha" ]; then
               echo "::notice::PR #$pr head moved before merge (${head:0:7}) — holding."
+              return 1
+            fi
+            # Draft is a person's stop, like the label. Converting to draft
+            # fires no event this workflow runs on, so re-read it here: a PR
+            # drafted mid-run holds (Codex P1 on .github#59).
+            if [ "$(echo "$snap" | jq -r '.data.repository.pullRequest.isDraft')" != "false" ]; then
+              echo "::notice::PR #$pr held (final snapshot) - it is a draft."
               return 1
             fi
 

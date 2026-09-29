@@ -163,6 +163,7 @@ def build(reviews=(), comments=(), threads=(), checks=(check("CI"),), labels=(),
                 "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": list(threads)}}}}},
             "headRefOid": {"data": {"repository": {"pullRequest": {
                 "headRefOid": HEAD,
+                "isDraft": draft,
                 "labels": {"totalCount": len(labels), "nodes": [{"name": l} for l in labels]},
                 "reviewRequests": {"totalCount": len(requested)},
                 "reviews": {"totalCount": len(sr), "nodes": gql_reviews(sr)},
@@ -305,6 +306,15 @@ def label_added_late():
 
 
 case("label added between evaluation and merge", "hold", label_added_late())
+
+
+def drafted_late():
+    fx = build(comments=[CLEAN_HEAD])
+    fx["graphql"]["headRefOid"]["data"]["repository"]["pullRequest"]["isDraft"] = True
+    return fx
+
+
+case("converted to draft between evaluation and merge", "hold", drafted_late())
 
 # --- Triggers: Codex's clean pass is an issue comment -------------------------
 case("issue_comment event evaluates the commented PR", "merge",
