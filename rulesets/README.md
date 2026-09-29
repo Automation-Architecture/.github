@@ -16,7 +16,8 @@ all repos: PR required, no force-push, no deletion, no approvals) is not stored 
 
 ## aaa-merge-gates
 
-Moves merge enforcement from `auto-merge.yml` into GitHub, which checks these
+Moves merge enforcement from the old `auto-merge.yml` workflow (retired
+2026-09-29) into GitHub, which checks these
 rules at the moment of merge. Merging is GitHub's native auto-merge, opted into
 per PR with `gh pr merge --auto --squash`.
 
@@ -35,29 +36,23 @@ per PR with `gh pr merge --auto --squash`.
 
 **Create it only after** `review-verdict.yml` is on `main` in every targeted
 repo and has been seen publishing on real PRs. Team has no dry-run mode: a
-required check a repo never produces blocks every PR there immediately. Also
-disable `auto-merge.yml` in the targeted repos first, because it revokes
-native auto-merge.
+required check a repo never produces blocks every PR there immediately.
 
 ```bash
 gh api -X POST orgs/Automation-Architecture/rulesets --input rulesets/aaa-merge-gates.json
 ```
 
-Rollback: disable enforcement, then re-enable the workflow gate on every repo whose
-`auto-merge.yml` was disabled FOR this ruleset. Disabling enforcement alone leaves those
-repos with no gate at all: the ruleset stops requiring `review/verdict`, and the workflow
-that would otherwise hold the PR is still off.
+Rollback: disable enforcement.
 
 ```bash
 gh api -X PUT orgs/Automation-Architecture/rulesets/23649946 -f enforcement=disabled
-gh workflow enable auto-merge.yml -R Automation-Architecture/opportunity-builder
 ```
 
-`aaa-client-dashboard` is deliberately absent: its copy was already disabled before the
-pilot, so re-enabling it would restore a state this ruleset never took away.
-`aios-coffee` now uses its own `agency-delivery-gate-pilot` ruleset; do not
-re-enable its old auto-merge workflow as part of this rollback. Add a line
-here whenever a repo joins, in the same change that disables its workflow.
+There is no workflow gate to fall back to: `auto-merge.yml` was retired
+org-wide on 2026-09-29 and is gone from both targeted repos. With enforcement
+disabled, `review/verdict` still publishes but nothing requires it, so code PRs
+in the targeted repos lose their merge gate until the ruleset is re-enabled.
+Markdown-only PRs are unaffected (`doc-auto-merge.yml`).
 
 **Keep the live ruleset and this file in step.** An edit made in the GitHub UI is not
 reflected here; after any change, compare:
