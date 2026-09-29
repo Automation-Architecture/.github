@@ -325,8 +325,8 @@ def main():
     assert "pull_requests[0]" not in group, "a CI completion must not be keyed on its first PR only"
     on = wf.get("on", wf.get(True))
     assert "auto_merge_enabled" in on["pull_request_target"]["types"], "auto_merge_enabled must trigger"
-    assert on["pull_request"]["types"] == ["auto_merge_enabled"] and "paths" not in on["pull_request"], \
-        "code PRs (no Markdown) must be seen when auto-merge is armed"
+    assert "paths" not in on["pull_request_target"], "code PRs (no Markdown) must be seen when auto-merge is armed"
+    assert "pull_request" not in on, "never run the PR's own copy of this workflow (org PAT in reach; Codex on #60)"
     step = wf["jobs"]["doc-auto-merge"]["steps"][0]
     static_env = {k: str(v) for k, v in step["env"].items() if "${{" not in str(v)}
     failures = 0
