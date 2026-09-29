@@ -81,6 +81,12 @@ if isinstance(v, dict) and "__seq" in v:
     v = v["__seq"][min(n, len(v["__seq"]) - 1)]
 if v == "__error":
     sys.stderr.write("HTTP 502\n"); sys.exit(1)
+if isinstance(v, dict) and "__pages" in v:
+    # Like gh --paginate: pages concatenated; only served when paginating.
+    if "--paginate" not in sys.argv:
+        v = v["__pages"][0]
+    else:
+        sys.stdout.write("".join(json.dumps(pg) for pg in v["__pages"])); sys.exit(0)
 data = json.dumps(v)
 if jq:
     data = subprocess.run(["jq", "-r", "-c", jq], input=data, capture_output=True, text=True, check=True).stdout
@@ -182,6 +188,19 @@ case("truncated file list (1 of 2 files) is never merged", "held", with_(base(),
 case("file list unreadable: not merged", "held", with_(base(), **{f"/pulls/{PR}/files": "__error"}))
 case("3000 changed files: not merged", "held", with_(base(), **{f"/pulls/{PR}": pr(files=3000)}))
 case("draft never merges", "held", base(draft=True))
+case("draft with native auto-merge armed: disarmed (it could merge when marked ready)", "held",
+     with_(base(), **{f"/pulls/{PR}": pr(draft=True, armed=True), f"/pulls/{PR}@disarmed": pr(draft=True)}),
+     disarmed={PR})
+case("required check in a second page of branch rules is enforced", "held",
+     with_(base(), **{"/rules/branches/main": {"__pages": [
+         [{"type": "pull_request", "parameters": {}}] * 30,
+         [{"type": "required_status_checks", "parameters": {"required_status_checks": [
+             {"context": "review/verdict", "integration_id": 15368}]}}]]}}))
+case("required check on the second rules page, passed: merges", "merged",
+     with_(base(runs=[run_("review/verdict")]), **{"/rules/branches/main": {"__pages": [
+         [{"type": "pull_request", "parameters": {}}] * 30,
+         [{"type": "required_status_checks", "parameters": {"required_status_checks": [
+             {"context": "review/verdict", "integration_id": 15368}]}}]]}}))
 case("hold label stops it", "held", base(labels=("no-auto-merge",)))
 case("hold label with native auto-merge armed: disarms it, does not merge", "held",
      with_(base(), **{f"/pulls/{PR}": pr(labels=("no-auto-merge",), armed=True),
@@ -342,6 +361,7 @@ def main():
     assert "pull_requests[0]" not in group, "a CI completion must not be keyed on its first PR only"
     on = wf.get("on", wf.get(True))
     assert "auto_merge_enabled" in on["pull_request_target"]["types"], "auto_merge_enabled must trigger"
+    assert "converted_to_draft" in on["pull_request_target"]["types"], "converted_to_draft must trigger (disarm)"
     assert "paths" not in on["pull_request_target"], "code PRs (no Markdown) must be seen when auto-merge is armed"
     assert "pull_request" not in on, "never run the PR's own copy of this workflow (org PAT in reach; Codex on #60)"
     step = wf["jobs"]["doc-auto-merge"]["steps"][0]
