@@ -1,0 +1,26 @@
+name: Review verdict evidence tests
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/review-verdict.yml
+      - .github/workflows/review-verdict-tests.yml
+      - tests/review-verdict/test_evidence.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/review-verdict.yml
+      - .github/workflows/review-verdict-tests.yml
+      - tests/review-verdict/test_evidence.py
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: python -m pip install 'PyYAML>=6,<7'
+      - run: python tests/review-verdict/test_evidence.py

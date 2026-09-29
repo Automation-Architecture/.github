@@ -813,9 +813,11 @@ jobs:
                 DOC_FILES_RESULT="the pull request changes ${changed} files, at or past the 300 the compare can return, so it cannot be shown to be all Markdown"
               elif ! files=$(gh api "/repos/$REPO/compare/$BASE_SHA...$HEAD_SHA"); then
                 DOC_FILES_RESULT="could not read the changed files for pinned base/head of #$PR_NUMBER"
-              elif ! verdict=$(echo "$files" | jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" --arg base "$BASE_SHA" --arg head "$HEAD_SHA" '
-                  if .base_commit.sha != $base or .commits[-1].sha != $head
-                    then "the compare does not identify the captured base/head"
+              elif ! verdict=$(echo "$files" | jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" --arg base "$BASE_SHA" '
+                  # The compare URL already pins the head SHA. Its commits list
+                  # may be only the first page, so its last item need not be HEAD.
+                  if .base_commit.sha != $base
+                    then "the compare does not identify the captured base"
                   elif (.files | type) != "array" then "the changed-file list is not a list"
                   elif (.files | length) != $n then "the changed-file list holds \(.files | length) of \($n) files, so it is incomplete"
                   elif any(.files[]; (.filename | type) != "string" or .filename == "") then "a changed file has no name"
