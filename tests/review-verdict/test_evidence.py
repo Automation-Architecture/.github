@@ -407,6 +407,10 @@ case("compare with a different base refuses", "fail",
      with_(doc(["README.md"]), extra={DOC_COMPARE: {
          "base_commit": {"sha": OLD}, "merge_base_commit": {"sha": OLD},
          "commits": [{"sha": HEAD}], "files": [{"filename": "README.md"}]}}))
+case("branch behind base still uses its pinned three-dot diff", "success",
+     with_(doc(["README.md"]), extra={DOC_COMPARE: {
+         "base_commit": {"sha": "b" * 40}, "merge_base_commit": {"sha": OLD},
+         "commits": [{"sha": HEAD}], "files": [{"filename": "README.md"}]}}), DOC_EVIDENCE)
 case("extension must be at the end: notes.md.py refuses", "fail", doc(["notes.md.py"]))
 case("extension is case-sensitive: README.MD refuses", "fail", doc(["README.MD"]))
 case("newline in a filename cannot smuggle code past the pattern", "fail", doc(["x.md\ny.py"]))

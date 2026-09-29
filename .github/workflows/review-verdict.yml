@@ -814,7 +814,7 @@ jobs:
               elif ! files=$(gh api "/repos/$REPO/compare/$BASE_SHA...$HEAD_SHA"); then
                 DOC_FILES_RESULT="could not read the changed files for pinned base/head of #$PR_NUMBER"
               elif ! verdict=$(echo "$files" | jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" --arg base "$BASE_SHA" --arg head "$HEAD_SHA" '
-                  if .base_commit.sha != $base or .merge_base_commit.sha != $base or .commits[-1].sha != $head
+                  if .base_commit.sha != $base or .commits[-1].sha != $head
                     then "the compare does not identify the captured base/head"
                   elif (.files | type) != "array" then "the changed-file list is not a list"
                   elif (.files | length) != $n then "the changed-file list holds \(.files | length) of \($n) files, so it is incomplete"
