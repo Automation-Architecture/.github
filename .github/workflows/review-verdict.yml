@@ -19,8 +19,8 @@ name: Review verdict
 #   every renamed file, ends in .md or .markdown (case-sensitive, any path;
 #   CLAUDE.md, AGENTS.md, .claude/** and .github/** Markdown included by
 #   decision; .mdx carries JSX and is reviewed like code). The file list is
-#   read in full, paginated, and must hold exactly `changed_files` entries,
-#   fewer than 3000; unreadable, short, empty or oversized lists refuse. Not
+#   read from an immutable base/head compare and must hold exactly `changed_files`
+#   entries, fewer than 300; unreadable, short, empty or oversized lists refuse. Not
 #   applied to a draft, to a PR with the `no-auto-merge` hold label, or to a
 #   fork's branch; those need Codex like any other. It is checked BEFORE the
 #   Codex P0/P1 findings block: a documentation-only PR needs no review, so Codex
@@ -789,18 +789,17 @@ jobs:
           # whose every changed file is Markdown needs no review. Fails closed:
           # any doubt about the file list refuses the exemption, and the PR then
           # needs a clean Codex pass like any other.
-          #  - the file list is read in full (paginated) and must hold exactly
-          #    `changed_files` entries. The endpoint stops at 3000 files and
-          #    --paginate reports a truncated list as complete, so 3000 or more
-          #    refuses, as does an empty diff;
+          #  - the file list comes from an immutable base/head compare, never
+          #    the PR's live head. Compare returns at most 300 files, so 300 or
+          #    more refuses. The count must equal `changed_files`;
           #  - every filename AND every previous_filename (renames) must end in
           #    .md or .markdown; a rename from app.py to app.md is code
           #    leaving the tree;
           #  - not a draft; no HOLD_LABEL; head branch in this repository (a
           #    fork's PR is never exempt).
-          # The list is the diff against the base at read time. It is cached for
-          # the run: this run's head is fixed (load_pr), and a retarget fires
-          # `edited`, which starts a new run in this head's group.
+          # A live /pulls/N/files read can follow a different head from the one
+          # load_pr captured, then publish a false success on the old head.
+          # The pinned compare closes that race; a retarget fires `edited`.
           evidence_from_doc_only() {
             local files verdict draft held head_repo
             if [ -z "$DOC_FILES_RESULT" ]; then
@@ -810,16 +809,18 @@ jobs:
                 DOC_FILES_RESULT="the pull request does not report how many files it changes"
               elif [ "$changed" -eq 0 ]; then
                 DOC_FILES_RESULT="the pull request changes no files"
-              elif [ "$changed" -ge 3000 ]; then
-                DOC_FILES_RESULT="the pull request changes ${changed} files, at or past the 3000 the file list can return, so it cannot be shown to be all Markdown"
-              elif ! files=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -s 'add // []'); then
-                DOC_FILES_RESULT="could not read the changed files of #$PR_NUMBER"
-              elif ! verdict=$(echo "$files" | jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" '
-                  if type != "array" then "the changed-file list is not a list"
-                  elif length != $n then "the changed-file list holds \(length) of \($n) files, so it is incomplete"
-                  elif any(.[]; (.filename | type) != "string" or .filename == "") then "a changed file has no name"
+              elif [ "$changed" -ge 300 ]; then
+                DOC_FILES_RESULT="the pull request changes ${changed} files, at or past the 300 the compare can return, so it cannot be shown to be all Markdown"
+              elif ! files=$(gh api "/repos/$REPO/compare/$BASE_SHA...$HEAD_SHA"); then
+                DOC_FILES_RESULT="could not read the changed files for pinned base/head of #$PR_NUMBER"
+              elif ! verdict=$(echo "$files" | jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" --arg base "$BASE_SHA" --arg head "$HEAD_SHA" '
+                  if .base_commit.sha != $base or .commits[-1].sha != $head
+                    then "the compare does not identify the captured base/head"
+                  elif (.files | type) != "array" then "the changed-file list is not a list"
+                  elif (.files | length) != $n then "the changed-file list holds \(.files | length) of \($n) files, so it is incomplete"
+                  elif any(.files[]; (.filename | type) != "string" or .filename == "") then "a changed file has no name"
                   else
-                    [.[] | .filename, (.previous_filename // empty)]
+                    [.files[] | .filename, (.previous_filename // empty)]
                     | map(select(type != "string" or (test($pat) | not)))
                     | if length == 0 then "doc"
                       else "\(length) changed path(s) are not Markdown, e.g. \(.[0] | tostring | .[0:120])" end
@@ -851,7 +852,7 @@ jobs:
               fail_closed_reason "documentation-only, but the branch comes from ${head_repo:-an unreadable repository}, not ${REPO}; a fork's PR is never exempt"
               return 1
             fi
-            EVIDENCE="documentation-only PR: no review required by policy (Brad, 2026-09-28). All ${DOC_FILES_COUNT} changed files, and the previous name of every renamed one, are Markdown (.md, .markdown; not .mdx); the list was read in full against base ${BASE_SHA:0:7}; not a draft; no ${HOLD_LABEL} label; same-repository branch"
+            EVIDENCE="documentation-only PR: no review required by policy (Brad, 2026-09-28). All ${DOC_FILES_COUNT} changed files, and the previous name of every renamed one, are Markdown (.md, .markdown; not .mdx); the list was read from pinned base ${BASE_SHA:0:7} and head ${HEAD_SHA:0:7}; not a draft; no ${HOLD_LABEL} label; same-repository branch"
             return 0
           }
 

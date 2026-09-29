@@ -179,10 +179,12 @@ def case(name, expect, fx, contains=None):
     CASES.append((name, expect, fx, contains))
 
 
-def doc(files, changed=None, draft=False, labels=(), head_repo=REPO, pages=1):
+DOC_COMPARE = f"/compare/{'b' * 40}...{HEAD}"
+
+
+def doc(files, changed=None, draft=False, labels=(), head_repo=REPO):
     """A PR whose changed files are `files` (names, or (name, previous_name)
-    for a rename). With pages > 1 the list is served as `gh --paginate` would
-    concatenate it."""
+    for a rename). The immutable compare is keyed to the captured SHAs."""
     b = base()
     entries = [{"filename": f[0], "previous_filename": f[1], "status": "renamed"} if isinstance(f, tuple)
                else {"filename": f, "status": "modified"} for f in files]
@@ -190,7 +192,9 @@ def doc(files, changed=None, draft=False, labels=(), head_repo=REPO, pages=1):
                          "changed_files": len(entries) if changed is None else changed,
                          "labels": [{"name": l} for l in labels],
                          "head": {"sha": HEAD, "repo": {"full_name": head_repo} if head_repo else None}}
-    b[f"/pulls/{PR}/files"] = entries if pages == 1 else {"__pages": [entries[i::pages] for i in range(pages)]}
+    b[DOC_COMPARE] = {"base_commit": {"sha": "b" * 40},
+                      "merge_base_commit": {"sha": "b" * 40},
+                      "commits": [{"sha": HEAD}], "files": entries}
     return b
 
 
@@ -382,16 +386,31 @@ case("mixed diff: Markdown plus a lockfile refuses", "fail", doc(["README.md", "
 case("rename from .py to .md refuses (previous name is code)", "fail", doc([("app.md", "app.py")]))
 case("truncated list: fewer files than changed_files refuses", "fail", doc(["README.md", "b.md"], changed=3))
 case("file list unreadable refuses", "fail",
-     {k: v for k, v in doc(["README.md"]).items() if k != f"/pulls/{PR}/files"})
-case("changed_files at the 3000 cap refuses", "fail", doc(["README.md"], changed=3000))
+     {k: v for k, v in doc(["README.md"]).items() if k != DOC_COMPARE})
+case("changed_files at the 300 cap refuses", "fail", doc(["README.md"], changed=300))
 case("empty diff refuses", "fail", doc([], changed=0))
 case("changed_files missing refuses", "fail",
      with_(doc(["README.md"]), **{f"/pulls/{PR}": {k: v for k, v in doc(["README.md"])[f"/pulls/{PR}"].items()
                                                    if k != "changed_files"}}))
 MANY = ["docs/p%03d.md" % i for i in range(250)]
-case("250 Markdown files served in 3 pages", "success", doc(MANY, pages=3), DOC_EVIDENCE)
-case("paged list with one non-Markdown file refuses", "fail", doc(MANY + ["docs/p.json"], pages=3))
-case("paged list short of changed_files refuses", "fail", doc(MANY, changed=251, pages=3))
+case("250 Markdown files in the pinned compare", "success", doc(MANY), DOC_EVIDENCE)
+case("pinned compare with one non-Markdown file refuses", "fail", doc(MANY + ["docs/p.json"]))
+case("pinned compare short of changed_files refuses", "fail", doc(MANY, changed=251))
+case("299 Markdown files below the compare cap", "success",
+     doc(["docs/p%03d.md" % i for i in range(299)]), DOC_EVIDENCE)
+case("live PR file list cannot replace pinned code diff", "fail",
+     with_(doc(["README.md"]), extra={DOC_COMPARE: {
+         "base_commit": {"sha": "b" * 40}, "merge_base_commit": {"sha": "b" * 40},
+         "commits": [{"sha": HEAD}], "files": [{"filename": "src/app.py"}]},
+         f"/pulls/{PR}/files": [{"filename": "README.md"}]}))
+case("compare with a different base refuses", "fail",
+     with_(doc(["README.md"]), extra={DOC_COMPARE: {
+         "base_commit": {"sha": OLD}, "merge_base_commit": {"sha": OLD},
+         "commits": [{"sha": HEAD}], "files": [{"filename": "README.md"}]}}))
+case("branch behind base still uses its pinned three-dot diff", "success",
+     with_(doc(["README.md"]), extra={DOC_COMPARE: {
+         "base_commit": {"sha": "b" * 40}, "merge_base_commit": {"sha": OLD},
+         "commits": [{"sha": HEAD}], "files": [{"filename": "README.md"}]}}), DOC_EVIDENCE)
 case("extension must be at the end: notes.md.py refuses", "fail", doc(["notes.md.py"]))
 case("extension is case-sensitive: README.MD refuses", "fail", doc(["README.MD"]))
 case("newline in a filename cannot smuggle code past the pattern", "fail", doc(["x.md\ny.py"]))
