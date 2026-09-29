@@ -308,8 +308,14 @@ case("auto-merge armed on a fork PR: disarmed", "held",
 case("auto-merge armed on a PR whose files cannot be read: disarmed", "held",
      with_(base(), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr(), f"/pulls/{PR}/files": "__error"}),
      disarmed={PR})
-case("auto-merge armed on a qualifying doc PR is left alone (it merges)", "merged",
-     with_(base(), **{f"/pulls/{PR}": pr(armed=True)}), disarmed=set())
+case("auto-merge armed on a qualifying doc PR: disarmed at once, then this workflow merges it", "merged",
+     with_(base(), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr()}), disarmed={PR})
+case("auto-merge armed on a doc PR while CI is pending: disarmed before the wait", "held",
+     with_(base(runs=[run_("unittest", status="in_progress")]),
+           **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr()}),
+     env={"SETTLE_SECONDS": "0", "WAIT_SECONDS": "0"}, disarmed={PR})
+case("auto-merge on a doc PR that will not disarm: red run, never merged", "error",
+     with_(base(), **{f"/pulls/{PR}": pr(armed=True)}), disarmed={PR})
 case("auto-merge armed on a doc PR whose optional CI failed: disarmed", "held",
      with_(base(runs=[run_("unittest", "failure")]), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr()}),
      disarmed={PR})
