@@ -282,8 +282,10 @@ case("threads unreadable", "hold",
 case("requested human reviewer pending, Codex clean", "merge", build(comments=[CLEAN_HEAD], requested=["some-human"]))
 case("Greptile CHANGES_REQUESTED, Codex clean", "merge",
      build(comments=[CLEAN_HEAD], reviews=[review(GREPTILE, "CHANGES_REQUESTED", utype="Bot")]))
-case("human CHANGES_REQUESTED, Codex clean (explicit stop kept)", "hold",
+case("human CHANGES_REQUESTED, Codex clean (no human hold, 2026-09-29)", "merge",
      build(comments=[CLEAN_HEAD], reviews=[review("some-human", "CHANGES_REQUESTED")]))
+case("human CHANGES_REQUESTED arriving before the merge does not hold", "merge",
+     build(reviews=[codex_review()], snap_reviews=[codex_review(), review("some-human", "CHANGES_REQUESTED")]))
 case("draft", "hold", build(comments=[CLEAN_HEAD], draft=True))
 case("no-auto-merge label", "hold", build(comments=[CLEAN_HEAD], labels=["no-auto-merge"]))
 case("Gate 0: PR edits AGENTS.md", "hold", build(comments=[CLEAN_HEAD], files=("AGENTS.md",)))

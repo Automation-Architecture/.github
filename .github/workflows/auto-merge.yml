@@ -7,9 +7,10 @@ name: Auto-Merge when Checks Green and Reviews In
 # ── POLICY (Brad, 2026-09-29) ──────────────────────────────────────────────
 # Codex is the one reviewer. Greptile is outside the merge policy: its check
 # is ignored by Gate 1, it is never Gate 2 evidence, and its threads never
-# block. No human approval is required anywhere, and human review threads
-# never block. The merge threshold: Codex reviewed the current head, no
-# P0/P1 Codex finding is open, CI is green. P2/P3 findings do not block.
+# block. No human approval is required anywhere, and no human review decision
+# or thread ever blocks: a CHANGES_REQUESTED is not read (2026-09-29). The
+# merge threshold: Codex reviewed the current head, no P0/P1 Codex finding is
+# open, CI is green. P2/P3 findings do not block.
 #
 # ── Gate 0: never auto-merge a PR that edits the reviewer (2026-09-16) ────
 # Ported from the aaa-client-dashboard pilot (#235) for AAA-711 / .github#31.
@@ -535,21 +536,6 @@ jobs:
             esac
           }
 
-          # Latest decision per reviewer; COMMENTED carries no decision. Prints
-          # the number of reviewers whose latest decision is CHANGES_REQUESTED.
-          # A person's explicit CHANGES_REQUESTED still holds (an opt-in stop,
-          # like the label; nothing REQUIRES a human). Greptile's never does.
-          count_changes_requested() {
-            echo "$1" | jq --arg g "$IGNORED_CHECK_APP" '
-              [.[] | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED" or .state == "DISMISSED")
-                   | select((.user.login | sub("\\[bot\\]$"; "")) != $g)]
-              | sort_by(.submitted_at)
-              | group_by(.user.login)
-              | map(last)
-              | map(select(.state == "CHANGES_REQUESTED"))
-              | length'
-          }
-
           # Gate 2: did Codex review head $4? $1 reviews (REST shape: user.login,
           # user.type, commit_id, state, body), $2 issue comments normalised to
           # {login, type, body, edited, created_at}, $3 the PR's commit SHAs as a
@@ -724,7 +710,7 @@ jobs:
           # merge; every other path holds (return 1), including any
           # unreadable or malformed answer.
           final_snapshot_hold() {
-            local pr="$1" sha="$2" commits="$3" cutoff="$4" snap head held n_labels n_reviews more_threads reviews comments cr via
+            local pr="$1" sha="$2" commits="$3" cutoff="$4" snap head held n_labels n_reviews more_threads reviews comments via
             if [ -z "${HOLD_LABEL// /}" ]; then
               echo "::error::HOLD_LABEL is empty - refusing to merge #$pr."
               return 1
@@ -787,16 +773,6 @@ jobs:
                 return 1
               fi
             fi
-            cr=$(count_changes_requested "$reviews" 2>/dev/null || echo "")
-            if ! [[ "$cr" =~ ^[0-9]+$ ]]; then
-              echo "::error::Could not evaluate review decisions for #$pr before merge — refusing to merge."
-              return 1
-            fi
-            if [ "$cr" -gt 0 ]; then
-              echo "::notice::PR #$pr changes requested since Gate 2 — holding."
-              return 1
-            fi
-
             # Gate 2, re-run: Codex's review or clean pass on this head must
             # still qualify now (dismissed, edited or deleted mid-run holds).
             comments=$(echo "$snap" | jq '[.data.repository.pullRequest.comments.nodes[]
@@ -934,15 +910,11 @@ jobs:
               continue
             fi
 
-            # Only each reviewer's LATEST decision counts. The reviews API keeps
-            # every submission, so a CHANGES_REQUESTED that the same reviewer
-            # later superseded with APPROVED would otherwise block forever.
-            # COMMENTED reviews carry no decision and are skipped when reducing.
-            CHANGES_REQUESTED=$(count_changes_requested "$REVIEWS")
-            if [ "$CHANGES_REQUESTED" -gt 0 ]; then
-              echo "changes requested (latest decision of $CHANGES_REQUESTED reviewer(s)) — not merging."
-              continue
-            fi
+            # No review decision holds a PR: a CHANGES_REQUESTED from a person,
+            # Greptile or any other bot is not read (Brad, 2026-09-29: "we do
+            # not need humans whatsoever"). Only Codex P0/P1 findings and CI
+            # decide; a person who wants a PR stopped uses the draft state or
+            # the no-auto-merge label.
 
             # Issue comments, for Codex's clean pass. GraphQL gives lastEditedAt
             # (REST has no edit marker). The latest 100 only: a miss can only
