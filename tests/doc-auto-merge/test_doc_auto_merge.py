@@ -310,6 +310,17 @@ case("auto-merge armed on a PR whose files cannot be read: disarmed", "held",
      disarmed={PR})
 case("auto-merge armed on a qualifying doc PR is left alone (it merges)", "merged",
      with_(base(), **{f"/pulls/{PR}": pr(armed=True)}), disarmed=set())
+case("auto-merge armed on a doc PR whose optional CI failed: disarmed", "held",
+     with_(base(runs=[run_("unittest", "failure")]), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr()}),
+     disarmed={PR})
+case("auto-merge armed on a doc PR whose CI never settled: disarmed", "held",
+     with_(base(runs=[run_("unittest", status="in_progress")]),
+           **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr()}), disarmed={PR})
+case("auto-merge armed, CI turns red in the final snapshot: disarmed", "held",
+     with_(base(), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr(),
+                      f"/commits/{HEAD}/check-runs": {"__seq": [
+                          {"check_runs": [run_("unittest")]}, {"check_runs": [run_("unittest", "failure", rid=2)]}]}}),
+     disarmed={PR})
 case("code PR with auto-merge that will not disarm: red run", "error",
      {k: v for k, v in with_(base(files=("app.py",)), **{f"/pulls/{PR}": pr(armed=True)}).items()}, disarmed={PR})
 case("merge call succeeds but PR not merged: red run", "error",

@@ -357,11 +357,11 @@ jobs:
               case "$state" in
                 green) break ;;
                 red:*)
-                  done_ "CI is not green on ${HEAD:0:7}: ${state#red:}. Not merging; a push, or a CI re-run that completes, re-evaluates." ;;
+                  refuse "CI is not green on ${HEAD:0:7}: ${state#red:}. Not merging; a push, or a CI re-run that completes, re-evaluates" ;;
               esac
               if [ "$SECONDS" -ge "$deadline" ]; then
                 echo "::warning::#$PR_NUMBER is documentation-only but CI did not settle within ${WAIT_SECONDS}s (${state#pending:}). Re-run: gh workflow run doc-auto-merge.yml -R $REPO -f pr_number=$PR_NUMBER"
-                done_ "gave up waiting: ${state#pending:}."
+                refuse "gave up waiting: ${state#pending:}"
               fi
               say "${state#pending:}; checking again in ${POLL_SECONDS}s."
               sleep "$POLL_SECONDS"
@@ -378,7 +378,7 @@ jobs:
             fi
             state=$(checks_state)
             if [ "$state" != "green" ]; then
-              done_ "CI changed in the final snapshot (${state#*:}); not merging. A later CI completion re-evaluates."
+              refuse "CI changed in the final snapshot (${state#*:}); not merging. A later CI completion re-evaluates"
             fi
 
             say "CI green on ${HEAD:0:7}; squash-merging."
