@@ -51,10 +51,13 @@ while i < len(args):
 if path == "graphql":
     with open(os.path.join(state_dir, "graphql_calls"), "a") as f:
         f.write(json.dumps(fields) + "\n")
-    open(os.path.join(state_dir, "disarmed"), "w").close()
+    # node ids in the fixtures are PR_<number>
+    open(os.path.join(state_dir, "disarmed_" + fields.get("id", "").replace("PR_", "")), "w").close()
     sys.stdout.write("{}"); sys.exit(0)
 key = path.split("/repos/" + os.environ["REPO"], 1)[-1].split("?", 1)[0]
-merged_flag = os.path.join(state_dir, "merged")
+# merge / disarm state is per PR number
+prnum = key.split("/")[2] if key.startswith("/pulls/") else ""
+merged_flag = os.path.join(state_dir, "merged_" + prnum)
 if method == "PUT" and key.endswith("/merge"):
     with open(os.path.join(state_dir, "merge_calls"), "a") as f:
         f.write(json.dumps({"path": key, **fields, "token": os.environ.get("GH_TOKEN", "")}) + "\n")
@@ -66,7 +69,7 @@ if method != "GET":
     sys.exit("stub gh: unexpected %s %s" % (method, key))
 if os.path.exists(merged_flag) and key + "@merged" in fx:
     key = key + "@merged"
-elif os.path.exists(os.path.join(state_dir, "disarmed")) and key + "@disarmed" in fx:
+elif os.path.exists(os.path.join(state_dir, "disarmed_" + prnum)) and key + "@disarmed" in fx:
     key = key + "@disarmed"
 if key not in fx:
     sys.stderr.write("stub gh: no fixture for %s\n" % key); sys.exit(1)
@@ -85,8 +88,10 @@ sys.stdout.write(data)
 '''
 
 
-def pr(files=1, draft=False, labels=(), head_repo=REPO, head=HEAD, base="main", merged=False, state="open"):
-    return {"number": PR, "state": state, "merged": merged, "draft": draft, "changed_files": files,
+def pr(files=1, draft=False, labels=(), head_repo=REPO, head=HEAD, base="main", merged=False, state="open",
+       number=PR, armed=False):
+    return {"number": number, "node_id": f"PR_{number}", "auto_merge": {"merge_method": "squash"} if armed else None,
+            "state": state, "merged": merged, "draft": draft, "changed_files": files,
             "labels": [{"name": l} for l in labels],
             "head": {"sha": head, "ref": "docs/x", "repo": {"full_name": head_repo} if head_repo else None},
             "base": {"ref": base, "sha": "b" * 40}}
@@ -130,9 +135,33 @@ def with_(fx, **kw):
 CASES = []
 
 
-def case(name, expect, fx, env=None):
-    """expect: 'merged' or 'held' (no merge call, exit 0) or 'error' (exit != 0, no merge)."""
-    CASES.append((name, expect, fx, env or {}))
+def case(name, expect, fx, env=None, merged=None, disarmed=None):
+    """expect: 'merged' or 'held' (no merge call, exit 0) or 'error' (exit != 0, no merge).
+    merged: the exact set of PR numbers that must be merged (multi-PR cases).
+    disarmed: the exact set of PR numbers whose native auto-merge must be disabled."""
+    CASES.append((name, expect, fx, env or {}, merged, disarmed))
+
+
+OTHER = 8
+
+
+def pr_entry(number, head=HEAD, repo=REPO):
+    """One item of workflow_run.pull_requests, as GitHub sends it."""
+    return {"number": number, "head": {"sha": head}, "base": {"repo": {"url": f"https://api.github.com/repos/{repo}"}}}
+
+
+def second(files=("README.md",), **prkw):
+    """Fixtures for PR #8 at the same head commit as #7."""
+    entries = [{"filename": f[0], "previous_filename": f[1]} if isinstance(f, tuple) else {"filename": f}
+               for f in files]
+    prkw.setdefault("files", len(entries))
+    return {f"/pulls/{OTHER}": pr(number=OTHER, **prkw),
+            f"/pulls/{OTHER}@merged": pr(number=OTHER, merged=True, state="closed"),
+            f"/pulls/{OTHER}/files": entries}
+
+
+def multi(*numbers, **kw):
+    return {"PRS_JSON": json.dumps([pr_entry(n, **kw) for n in numbers]), "PR_NUMBER": "", "HEAD_HINT": HEAD}
 
 
 GREEN_CI = [run_("unittest", rid=1), run_("lint", "skipped", rid=2)]
@@ -155,10 +184,10 @@ case("3000 changed files: not merged", "held", with_(base(), **{f"/pulls/{PR}": 
 case("draft never merges", "held", base(draft=True))
 case("hold label stops it", "held", base(labels=("no-auto-merge",)))
 case("hold label with native auto-merge armed: disarms it, does not merge", "held",
-     with_(base(), **{f"/pulls/{PR}": {**pr(labels=("no-auto-merge",)), "node_id": "PR_x", "auto_merge": {"merge_method": "squash"}},
-                      f"/pulls/{PR}@disarmed": {**pr(labels=("no-auto-merge",)), "auto_merge": None}}))
+     with_(base(), **{f"/pulls/{PR}": pr(labels=("no-auto-merge",), armed=True),
+                      f"/pulls/{PR}@disarmed": pr(labels=("no-auto-merge",))}))
 case("hold label, auto-merge cannot be disarmed: red run", "error",
-     with_(base(), **{f"/pulls/{PR}": {**pr(labels=("no-auto-merge",)), "node_id": "PR_x", "auto_merge": {"merge_method": "squash"}}}))
+     with_(base(), **{f"/pulls/{PR}": pr(labels=("no-auto-merge",), armed=True)}))
 case("CI turns red in the final snapshot: not merged", "held",
      with_(base(), **{f"/commits/{HEAD}/check-runs": {"__seq": [
          {"check_runs": [run_("unittest")]}, {"check_runs": [run_("unittest", "failure", rid=2)]}]}}))
@@ -241,6 +270,59 @@ case("head moves while waiting: this run stops", "held",
                       f"/commits/{HEAD}/check-runs": {"check_runs": [run_("unittest", status="in_progress")]}}),
      env={"WAIT_SECONDS": "5", "POLL_SECONDS": "0"})
 case("GitHub refuses the merge: red run", "error", with_(base(), __merge_fails=True))
+case("merge refused because another run already merged it: not an error", "merged",
+     with_(base(), __merge_fails=True, **{f"/pulls/{PR}": {"__seq": [pr(), pr(), pr(merged=True, state="closed")]}}))
+
+# --- CI completion naming several PRs (Brad, 2026-09-29) ---------------------
+case("CI run names a doc PR and a code PR: only the doc PR merges", "merged",
+     with_(base(), **second(files=("README.md", "app.py"))), env=multi(PR, OTHER), merged={PR})
+case("CI run names a held PR first: the second still merges", "merged",
+     with_(base(labels=("no-auto-merge",)), **second()), env=multi(PR, OTHER), merged={OTHER})
+case("CI run names a held, armed PR first: it is disarmed and the second still merges", "merged",
+     with_(base(), **{f"/pulls/{PR}": pr(labels=("no-auto-merge",), armed=True),
+                      f"/pulls/{PR}@disarmed": pr(labels=("no-auto-merge",))}, **second()),
+     env=multi(PR, OTHER), merged={OTHER}, disarmed={PR})
+case("CI run names two doc PRs: both merge", "merged",
+     with_(base(), **second()), env=multi(PR, OTHER), merged={PR, OTHER})
+case("CI run: one PR cannot be read, the other still merges (red run)", "error",
+     with_(base(), **{f"/pulls/{PR}": "__error"}, **second()), env=multi(PR, OTHER), merged={OTHER})
+case("CI run: a PR whose head is not the run's head is not evaluated", "merged",
+     with_(base(), **second()), env={**multi(PR), "PRS_JSON": json.dumps([pr_entry(PR), pr_entry(OTHER, head=NEW_HEAD)])},
+     merged={PR})
+case("CI run: a PR based in another repository is not evaluated", "held",
+     with_(base(), **second()), env={**multi(PR), "PRS_JSON": json.dumps([pr_entry(OTHER, repo="mallory/widget")])},
+     merged=set())
+case("CI run naming no PR at its head: nothing to do", "held", base(), env={**multi(), "PRS_JSON": "[]"})
+
+# --- auto_merge_enabled: a refused PR is disarmed at once (Brad, 2026-09-29) --
+case("auto-merge armed on a held doc PR: disarmed, not merged", "held",
+     with_(base(), **{f"/pulls/{PR}": pr(labels=("no-auto-merge",), armed=True),
+                      f"/pulls/{PR}@disarmed": pr(labels=("no-auto-merge",))}), disarmed={PR})
+case("auto-merge armed on a code PR: disarmed, not merged", "held",
+     with_(base(files=("app.py",)), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr()}), disarmed={PR})
+case("auto-merge armed on a mixed Markdown + code PR: disarmed", "held",
+     with_(base(files=("README.md", "src/x.ts")), **{f"/pulls/{PR}": pr(files=2, armed=True), f"/pulls/{PR}@disarmed": pr(files=2)}), disarmed={PR})
+case("auto-merge armed on a fork PR: disarmed", "held",
+     with_(base(), **{f"/pulls/{PR}": pr(head_repo="mallory/widget", armed=True),
+                      f"/pulls/{PR}@disarmed": pr(head_repo="mallory/widget")}), disarmed={PR})
+case("auto-merge armed on a PR whose files cannot be read: disarmed", "held",
+     with_(base(), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr(), f"/pulls/{PR}/files": "__error"}),
+     disarmed={PR})
+case("auto-merge armed on a qualifying doc PR is left alone (it merges)", "merged",
+     with_(base(), **{f"/pulls/{PR}": pr(armed=True)}), disarmed=set())
+case("auto-merge armed on a doc PR whose optional CI failed: disarmed", "held",
+     with_(base(runs=[run_("unittest", "failure")]), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr()}),
+     disarmed={PR})
+case("auto-merge armed on a doc PR whose CI never settled: disarmed", "held",
+     with_(base(runs=[run_("unittest", status="in_progress")]),
+           **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr()}), disarmed={PR})
+case("auto-merge armed, CI turns red in the final snapshot: disarmed", "held",
+     with_(base(), **{f"/pulls/{PR}": pr(armed=True), f"/pulls/{PR}@disarmed": pr(),
+                      f"/commits/{HEAD}/check-runs": {"__seq": [
+                          {"check_runs": [run_("unittest")]}, {"check_runs": [run_("unittest", "failure", rid=2)]}]}}),
+     disarmed={PR})
+case("code PR with auto-merge that will not disarm: red run", "error",
+     {k: v for k, v in with_(base(files=("app.py",)), **{f"/pulls/{PR}": pr(armed=True)}).items()}, disarmed={PR})
 case("merge call succeeds but PR not merged: red run", "error",
      {k: v for k, v in base().items() if not k.endswith("@merged")} | {f"/pulls/{PR}": {"__seq": [pr(), pr(), pr(), pr()]}})
 
@@ -249,8 +331,13 @@ def main():
     wf = yaml.safe_load(WORKFLOW.read_text())
     group = wf["concurrency"]["group"]
     for needle in ("github.event.pull_request.number", "github.event.pull_request.head.sha",
-                   "github.event.workflow_run.pull_requests[0].number", "github.event.workflow_run.head_sha"):
-        assert needle in group, f"concurrency group must key on {needle} (PR number AND head SHA)"
+                   "github.event.workflow_run.head_sha", "github.run_id"):
+        assert needle in group, f"concurrency group must key on {needle}"
+    assert "pull_requests[0]" not in group, "a CI completion must not be keyed on its first PR only"
+    on = wf.get("on", wf.get(True))
+    assert "auto_merge_enabled" in on["pull_request_target"]["types"], "auto_merge_enabled must trigger"
+    assert "paths" not in on["pull_request_target"], "code PRs (no Markdown) must be seen when auto-merge is armed"
+    assert "pull_request" not in on, "never run the PR's own copy of this workflow (org PAT in reach; Codex on #60)"
     step = wf["jobs"]["doc-auto-merge"]["steps"][0]
     static_env = {k: str(v) for k, v in step["env"].items() if "${{" not in str(v)}
     failures = 0
@@ -260,7 +347,7 @@ def main():
         (tmp / "bin").mkdir()
         (tmp / "bin/gh").write_text(STUB)
         (tmp / "bin/gh").chmod(0o755)
-        for name, expect, fx, env_over in CASES:
+        for name, expect, fx, env_over, want_merged, want_disarmed in CASES:
             state = tmp / "state"
             subprocess.run(["rm", "-rf", str(state)], check=True)
             state.mkdir()
@@ -272,14 +359,23 @@ def main():
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True)
             calls = (state / "merge_calls").read_text().splitlines() if (state / "merge_calls").exists() else []
             calls = [json.loads(c) for c in calls]
+            gq = (state / "graphql_calls").read_text().splitlines() if (state / "graphql_calls").exists() else []
+            disarmed_prs = {int(json.loads(c)["id"].replace("PR_", "")) for c in gq}
+            merged_prs = {int(c["path"].split("/")[2]) for c in calls}
             if out.returncode != 0:
                 got = "error"
             elif calls:
                 got = "merged"
             else:
                 got = "held"
+            if want_merged is not None and got != "error":
+                got = "merged" if merged_prs else "held"
             ok = got == expect
-            if got == "merged":
+            if want_merged is not None:
+                ok = ok and merged_prs == set(want_merged) and len(calls) == len(merged_prs)
+            if want_disarmed is not None:
+                ok = ok and disarmed_prs == set(want_disarmed)
+            if got == "merged" and want_merged is None:
                 c = calls[0]
                 ok = ok and len(calls) == 1 and c.get("sha") == HEAD and c.get("merge_method") == "squash" \
                     and c.get("token") == "merge-token"
