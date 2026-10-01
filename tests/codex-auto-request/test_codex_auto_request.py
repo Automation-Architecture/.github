@@ -246,7 +246,7 @@ case("Codex 👀 then a Running row appears on the re-check: skips", "skip",
      env={"BUSY_WAIT_SECONDS": "5"})
 case("draft: skips", "skip", base(draft=True))
 case("closed: skips", "skip", base(state="closed"))
-case("fork PR (dispatch): skips", "skip", base(head_repo="mallory/widget"))
+case("fork PR (head repo differs at re-read): skips", "skip", base(head_repo="mallory/widget"))
 case("deleted head repository: skips", "skip", base(head_repo=None))
 case("head moved during the wait: skips (the newer run decides)", "skip",
      with_(base(), **{f"/pulls/{PR}": pr(head=NEW)}), env=SYNC)
@@ -307,8 +307,10 @@ case("malformed push time: red", "error", base(), env={"PUSHED_AT": "yesterday"}
 
 def check_shape(wf):
     on = wf.get("on", wf.get(True))
-    assert set(on) == {"pull_request_target", "workflow_dispatch"}, \
-        "only default-branch-copy triggers: never pull_request (it runs the PR's copy with the PAT in reach)"
+    assert set(on) == {"pull_request_target"}, \
+        "only pull_request_target: pull_request runs the PR's copy and workflow_dispatch --ref runs a branch's " \
+        "copy, either with the PAT in reach (Codex P1 on .github#71)"
+    assert "github.event_name == 'pull_request_target'" in wf["jobs"]["codex-auto-request"]["if"]
     assert set(on["pull_request_target"]["types"]) == {"opened", "synchronize", "reopened", "ready_for_review", "edited"}, \
         "a base retarget (edited) must re-request: review-verdict ignores older evidence"
     assert "github.event.changes.base != null" in wf["jobs"]["codex-auto-request"]["if"], \
@@ -340,8 +342,7 @@ def check_shape(wf):
         assert "${{" not in run, "no expression is interpolated into a script; pass values via env"
     assert wf["concurrency"]["cancel-in-progress"] is False, \
         "never cancel: a cancelled check on the head reads as red to doc-auto-merge"
-    for needle in ("github.event.pull_request.number", "github.event.inputs.pr_number",
-                   "github.event.pull_request.head.sha"):
+    for needle in ("github.event.pull_request.number", "github.event.pull_request.head.sha"):
         assert needle in wf["concurrency"]["group"], f"concurrency group must key on {needle}"
     decide = steps[0]
     assert decide["id"] == "decide" and decide["env"]["GH_TOKEN"] == "${{ github.token }}"

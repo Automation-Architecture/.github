@@ -23,8 +23,14 @@ name: Codex auto-request
 # item aaa-org-token), the account Codex obeys.
 #
 # ── Threat model: the org PAT never meets PR code ──────────────────────────
-# pull_request_target (and workflow_dispatch) run THIS FILE FROM THE DEFAULT
-# BRANCH, never the PR's copy, so a PR cannot edit what runs. Nothing here
+# pull_request_target runs THIS FILE FROM THE DEFAULT BRANCH, never the PR's
+# copy, so a PR cannot edit what runs. There is deliberately NO
+# workflow_dispatch: `gh workflow run --ref <branch>` runs that BRANCH's copy,
+# so a dispatch trigger would let a modified branch copy receive the PAT
+# (Codex P1 on .github#71). To re-ask by hand, comment `@codex review`.
+# (Residual, not this file's: AAA_ORG_TOKEN is an org secret visible to every
+# repo, so anyone with write access can already reach it with a workflow of
+# their own on a branch push. Narrowing that is a secrets change.) Nothing here
 # checks out, builds or executes PR content. No PR-controlled text (title,
 # body, branch name, comment text) is interpolated into a script: only the
 # PR number and head SHA, both validated. The `decide` step reads the API
@@ -91,12 +97,6 @@ on:
     # Codex evidence older than the latest retarget, so the head needs a new
     # review (Codex P1 on .github#71).
     types: [opened, synchronize, reopened, ready_for_review, edited]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: PR number to evaluate (requests a Codex review if its head has none)
-        required: true
-        type: string
 
 permissions:
   contents: read
@@ -109,16 +109,16 @@ concurrency:
   # first run's marker and skips. Cancelling would leave a `cancelled` check
   # on the head, which doc-auto-merge.yml reads as red. A run for an older
   # head is in another group; after its wait it sees the head moved and skips.
-  group: codex-auto-request-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.pr_number }}-${{ github.event.pull_request.head.sha || 'dispatch' }}
+  group: codex-auto-request-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: false
 
 jobs:
   codex-auto-request:
     if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.draft == false &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       (github.event.action != 'edited' || github.event.changes.base != null))
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -127,7 +127,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           EVENT_HEAD: ${{ github.event.pull_request.head.sha || '' }}
           # synchronize: the push time. Other events: the head commit's date.
           PUSHED_AT: ${{ github.event.action == 'synchronize' && github.event.pull_request.updated_at || '' }}
@@ -360,7 +360,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD: ${{ steps.decide.outputs.head }}
           DEPENDABOT_PR: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
         run: |
@@ -385,7 +385,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           COMMENT_ID: ${{ steps.request.outputs.comment_id }}
         run: |
           set -euo pipefail
