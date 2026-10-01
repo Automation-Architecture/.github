@@ -42,7 +42,7 @@ args = sys.argv[1:]
 if args[:1] != ["api"]:
     sys.exit("stub gh: only `gh api` is supported")
 args = args[1:]
-jq = None; fields = {}; path = None
+jq = None; fields = {}; path = None; method = "GET"
 i = 0
 while i < len(args):
     a = args[i]
@@ -50,8 +50,14 @@ while i < len(args):
     if a in ("-f", "-F"):
         k, _, v = args[i + 1].partition("="); fields[k] = v; i += 2; continue
     if a in ("--paginate",): i += 1; continue
-    if a in ("-X", "--input"): i += 2; continue
+    if a == "-X": method = args[i + 1]; i += 2; continue
+    if a == "--input": i += 2; continue
     path = a; i += 1
+if method == "POST" and path.endswith("/check-runs"):
+    # PUBLISH=1 cases: record the check-run payload (read from stdin).
+    with open(os.environ["FIXTURES"] + ".posted", "a") as f:
+        f.write(sys.stdin.read().replace("\n", " ") + "\n")
+    sys.stdout.write("{}"); sys.exit(0)
 if path == "graphql":
     key = ("graphql:threads:" if "reviewThreads" in fields.get("query", "") else "graphql:") + fields["id"]
 else:
@@ -150,13 +156,15 @@ def badge(p):
     return "**<sub><sub>![P%d Badge](https://img.shields.io/badge/P%d-orange?style=flat)</sub></sub>  Finding" % (p, p)
 
 
-def finding(original, rid=11, login=CODEX, body="Something is wrong here", resolved=False, outdated=None):
-    """An inline review comment that starts a thread. By default a finding on an
-    earlier commit is outdated (a later push rewrote its lines). The harness
-    turns these into the GraphQL review threads and each review's comments."""
+def finding(original, rid=11, login=CODEX, body="Something is wrong here", resolved=False, outdated=None,
+            reply_to=None):
+    """An inline review comment that starts a thread (or, with reply_to, a reply
+    in an existing thread). By default a finding on an earlier commit is
+    outdated (a later push rewrote its lines). The harness turns these into the
+    GraphQL review threads and each review's comments."""
     return {"user": {"login": login}, "pull_request_review_id": rid, "body": body,
             "original_commit_id": original, "commit_id": HEAD, "resolved": resolved,
-            "outdated": (original != HEAD) if outdated is None else outdated}
+            "outdated": (original != HEAD) if outdated is None else outdated, "in_reply_to_id": reply_to}
 
 
 def derive_findings(fx):
@@ -169,13 +177,14 @@ def derive_findings(fx):
     nodes = [{"isResolved": f["resolved"], "isOutdated": f["outdated"], "comments": {"nodes": [{
         "author": {"__typename": "Bot" if f["user"]["login"].endswith("[bot]") else "User",
                    "login": f["user"]["login"].replace("[bot]", "")},
-        "path": "a.py", "body": f["body"]}]}} for f in found]
+        "path": "a.py", "body": f["body"]}]}} for f in found if not f.get("in_reply_to_id")]
     fx["graphql:threads:PR_1"] = {"data": {"node": {"reviewThreads": {
         "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}
     for r in fx.get(f"/pulls/{PR}/reviews") or []:
         if "id" in r:
-            fx[f"/pulls/{PR}/reviews/{r['id']}/comments"] = [
-                {"id": i} for i, f in enumerate(found) if f["pull_request_review_id"] == r["id"]]
+            fx.setdefault(f"/pulls/{PR}/reviews/{r['id']}/comments", [
+                {"id": i, "body": f["body"], "in_reply_to_id": f.get("in_reply_to_id")}
+                for i, f in enumerate(found) if f["pull_request_review_id"] == r["id"]])
     return fx
 
 
@@ -696,6 +705,75 @@ case("no grace wait when the row is not Completed on head", "fail",
      summary(summary_row(sha=OLD[:7]), reacts={"__seq": [[], [reaction()]]}) | {"__env": {"REACTION_GRACE_SECONDS": "15"}})
 
 
+# --- Codex's real notice texts, and notice-only review objects (.github#73) ----
+# The texts Codex really posts (fas-portal#519, .github#71, aaa-runbooks#165).
+USAGE_NOTICE = ("You have reached your Codex usage limits for code reviews. You can see your limits in the "
+                "[Codex usage dashboard](https://chatgpt.com/codex/cloud/settings/usage).")
+ENV_NOTICE = ("To use Codex here, [create an environment for this repo]"
+              "(https://chatgpt.com/codex/cloud/settings/environments).")
+ACCOUNT_NOTICE = "To use Codex here, create a Codex account and connect to github."
+for label, text in (("usage-limit", USAGE_NOTICE), ("environment", ENV_NOTICE), ("account", ACCOUNT_NOTICE)):
+    case(f"Codex {label} notice as the review body on head is not evidence 2", "fail",
+         with_(base(), **{R: [codex_review(HEAD, body=text)]}))
+    case(f"summary + 👍, Codex {label} notice review on head does not veto the row", "success",
+         with_(summary(), **{R: [codex_review(HEAD, body=text)]}), SUMMARY_EVIDENCE)
+    case(f"clean comment carrying the Codex {label} notice is not a clean pass", "fail",
+         with_(base(), extra={f"/issues/{PR}/comments": [issue_comment(
+             CLEAN_BODY.format(sha=HEAD[:10]) + "\n" + text)], **gql("IC_1")}))
+# .github#71 at 17ae535: replying to a Codex thread makes Codex post its
+# environment notice as a review object on the CURRENT head: empty body, one
+# inline comment that is a reply under the old thread.
+ORIG_THREAD = finding(OLD, rid=10, body=badge(2))
+NOTICE_REPLY = finding(OLD, rid=12, body=ENV_NOTICE, reply_to=900)
+case("notice-only review on head (empty body, env-notice reply) is not evidence 2", "fail",
+     with_(base(), **{R: [codex_review(OLD, rid=10), codex_review(HEAD, rid=12, body="")],
+                      C: [ORIG_THREAD, NOTICE_REPLY]}), "no Codex review object on this head")
+case("ten notice-only reviews on head (as on .github#71) are still not evidence 2", "fail",
+     with_(base(), **{R: [codex_review(OLD, rid=10)] + [codex_review(HEAD, rid=20 + i, body="") for i in range(10)],
+                      C: [ORIG_THREAD] + [finding(OLD, rid=20 + i, body=ENV_NOTICE, reply_to=900) for i in range(10)]}),
+     "no Codex review object on this head")
+case("notice-only review whose reply is not a notice is still not a review of the head", "fail",
+     with_(base(), **{R: [codex_review(OLD, rid=10), codex_review(HEAD, rid=12, body="")],
+                      C: [ORIG_THREAD, finding(OLD, rid=12, body="Thanks, noted.", reply_to=900)]}))
+case("empty-body review on head whose only comment is a top-level env notice is not evidence 2", "fail",
+     with_(base(), **{R: [codex_review(HEAD, rid=12, body="")], C: [finding(HEAD, rid=12, body=ENV_NOTICE)]}))
+case("summary + 👍, notice-only review on head does not veto the row", "success",
+     with_(summary(), **{R: [codex_review(OLD, rid=10), codex_review(HEAD, rid=12, body="")],
+                         C: [ORIG_THREAD, NOTICE_REPLY]}), SUMMARY_EVIDENCE)
+case("notice-only reviews plus a real Codex review of the head (P2 only): evidence 2", "success",
+     with_(base(), **{R: [codex_review(HEAD, rid=12, body=""), codex_review(HEAD, rid=13)],
+                      C: [NOTICE_REPLY, finding(HEAD, rid=13, body=badge(2))]}), "a Codex review of this head")
+case("empty-body review with a reply AND a top-level finding is a real review (P2): evidence 2", "success",
+     with_(base(), **{R: [codex_review(HEAD, rid=12, body="")],
+                      C: [NOTICE_REPLY, finding(HEAD, rid=12, body=badge(2))]}), "a Codex review of this head")
+# Only an EMPTY body makes a reply-only review notice-only: a review whose body is
+# Codex's own review header naming this head is a review of the head.
+case("Codex review with a real body whose only comment is a reply is a review of the head", "success",
+     with_(base(), **{R: [codex_review(OLD, rid=10), codex_review(HEAD, rid=12)], C: [ORIG_THREAD, NOTICE_REPLY]}),
+     "a Codex review of this head")
+case("empty-body review on head with no comments left still blocks (deleted findings)", "fail",
+     with_(summary(), **{R: [codex_review(HEAD, rid=12, body="")]}), "no inline findings left")
+case("comments of an empty-body Codex review unreadable: fails closed", "fail",
+     with_(summary(), **{R: [codex_review(HEAD, rid=12, body="")], C: [NOTICE_REPLY],
+                         "__drop": [f"/pulls/{PR}/reviews/12/comments"]}), "could not read the findings")
+case("comments of a real Codex review unreadable: fails closed", "fail",
+     with_(base(), **{R: [codex_review(HEAD, rid=13)], C: [finding(HEAD, rid=13, body=badge(2))],
+                      "__drop": [f"/pulls/{PR}/reviews/13/comments"]}), "could not read the findings")
+
+# --- review/verdict is bound to its PR by external_id (aios-coffee#135) --------
+# (name, fixtures, env, expected external_id or None for none)
+PUBLISH_CASES = [
+    ("published verdict names its PR, base and head in external_id", summary(), {},
+     f"{REPO}#{PR}:{'b' * 40}:{HEAD}:review-verdict"),
+    ("a failing verdict is bound to its PR too", base(), {},
+     f"{REPO}#{PR}:{'b' * 40}:{HEAD}:review-verdict"),
+    ("no PR number and an ambiguous head: published unbound, never a success",
+     with_(base(), **{f"/commits/{HEAD}/pulls": [{"number": PR, "state": "open", "head": {"sha": HEAD}},
+                                                   {"number": 8, "state": "open", "head": {"sha": HEAD}}]}),
+     {"PR_NUMBER": ""}, None),
+]
+
+
 def main():
     assert {"labeled", "unlabeled"} <= set(trigger_types()), "the hold label must re-evaluate the verdict"
     wf = yaml.safe_load(WORKFLOW.read_text())
@@ -718,6 +796,8 @@ def main():
         (tmp / "bin/gh").chmod(0o755)
         for name, expect, fx, contains in CASES:
             fx = derive_findings(dict(fx))
+            for k in fx.pop("__drop", []):
+                fx.pop(k, None)
             if fx.pop("__drop_threads", False):
                 fx.pop("graphql:threads:PR_1", None)
             env_over = fx.pop("__env", {})
@@ -736,7 +816,36 @@ def main():
             print(f"{'PASS' if ok else 'FAIL'}  {name}  (expected {expect}, got {got})")
             if not ok:
                 print(out.stdout[-1500:], out.stderr[-1500:], sep="\n")
-    print(f"\n{len(CASES) - failures}/{len(CASES)} passed")
+        for name, fx, env_over, want in PUBLISH_CASES:
+            fx = derive_findings(dict(fx))
+            (tmp / "fx.json").write_text(json.dumps(fx))
+            for suffix in (".calls", ".posted"):
+                (tmp / ("fx.json" + suffix)).unlink(missing_ok=True)
+            env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
+                   **static_env, "REPO": REPO, "EVENT": "workflow_dispatch", "PR_NUMBER": str(PR),
+                   "HEAD_SHA": HEAD, "PUBLISH": "1", "WAIT_SECONDS": "0", "DETAILS_URL": "x",
+                   "REACTION_GRACE_SECONDS": "0", "FIXTURES": str(tmp / "fx.json"), **env_over}
+            out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True)
+            posted_file = tmp / "fx.json.posted"
+            posted = [json.loads(l) for l in posted_file.read_text().splitlines()] if posted_file.exists() else []
+            ok = out.returncode == 0 and len(posted) == 1 and posted[0].get("head_sha") == HEAD \
+                and posted[0].get("external_id") == want and ("external_id" in posted[0]) == (want is not None)
+            if want is None:
+                ok = ok and posted[0].get("conclusion") != "success"
+            failures += not ok
+            print(f"{'PASS' if ok else 'FAIL'}  {name}  (external_id {posted[0].get('external_id') if posted else '-'})")
+            if not ok:
+                print(out.stdout[-1500:], out.stderr[-1500:], sep="\n")
+    # The step env and the shell default of REVIEW_SKIP_PATTERN must be one value.
+    run_text = step["run"]
+    default = run_text.split('REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-', 1)[1].split('}"', 1)[0]
+    if default != step["env"]["REVIEW_SKIP_PATTERN"]:
+        failures += 1
+        print("FAIL  REVIEW_SKIP_PATTERN env and shell default differ")
+    else:
+        print("PASS  REVIEW_SKIP_PATTERN env and shell default are equal")
+    total = len(CASES) + len(PUBLISH_CASES) + 1
+    print(f"\n{total - failures}/{total} passed")
     return 1 if failures else 0
 
 

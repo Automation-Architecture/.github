@@ -26,6 +26,9 @@ HEAD = "034be02bb328773fbe762ec8c93c14a1bedde66b"
 NEW_HEAD = "1" * 40
 # The last 3 commits of the base branch, newest first (Vercel detection).
 BASE_SHAS = ["a" * 40, "c" * 40, "d" * 40]
+# A base tip that landed after the evaluation (base pin), and the squash commit.
+MOVED = "f" * 40
+MERGE_SHA = "e" * 40
 
 # Stub gh. A fixture value {"__seq": [a, b, ...]} is served one entry per call
 # (the last repeats); with no wait the script reads the PR once to qualify
@@ -100,6 +103,7 @@ def pr(files=1, draft=False, labels=(), head_repo=REPO, head=HEAD, base="main", 
        number=PR, armed=False):
     return {"number": number, "node_id": f"PR_{number}", "auto_merge": {"merge_method": "squash"} if armed else None,
             "state": state, "merged": merged, "draft": draft, "changed_files": files,
+            "merge_commit_sha": MERGE_SHA if merged else None,
             "labels": [{"name": l} for l in labels],
             "head": {"sha": head, "ref": "docs/x", "repo": {"full_name": head_repo} if head_repo else None},
             "base": {"ref": base, "sha": "b" * 40}}
@@ -135,7 +139,15 @@ def base(files=("README.md",), runs=(), statuses=(), required=(), classic=None, 
             [{"type": "required_status_checks", "parameters": {"required_status_checks": [
                 {"context": c, "integration_id": a} for c, a in required]}}] if required else []),
         "/branches/main": {"name": "main", "protection": classic or {"enabled": False}},
+        # The base tip (pinned in the final snapshot, re-read before the merge).
+        "/git/ref/heads/main": tip(BASE_SHAS[0]),
+        # The squash commit lands on the pinned tip.
+        f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[0]}]},
     }
+
+
+def tip(sha):
+    return {"ref": "refs/heads/x", "object": {"sha": sha, "type": "commit"}}
 
 
 def with_(fx, **kw):
@@ -279,7 +291,8 @@ case("classic required check passed: merges", "merged",
      base(runs=[run_("backend")], classic={"enabled": True, "required_status_checks": {
          "contexts": ["backend"], "checks": [{"context": "backend", "app_id": 15368}]}}))
 case("base branch with a slash is URL-encoded for the rules and branch lookups", "merged",
-     with_({k.replace("/branches/main", "/branches/release%2F1.x"): v for k, v in base(base="release/1.x").items()}))
+     with_({k.replace("/branches/main", "/branches/release%2F1.x").replace("/heads/main", "/heads/release/1.x"): v
+            for k, v in base(base="release/1.x").items()}))
 case("check-runs unreadable: never merges", "held", with_(base(), **{f"/commits/{HEAD}/check-runs": "__error"}))
 case("rules unreadable: never merges", "held", with_(base(), **{"/rules/branches/main": "__error"}))
 case("hold label added in the final snapshot stops it", "held",
@@ -400,6 +413,29 @@ case("two Vercel projects on the base, both successful on the head: merges", "me
                     {"context": "Vercel – docs", "state": "success"}]))
 case("a context that only starts with the letters Vercel is not Vercel", "merged",
      base(base_statuses=[[{"context": "VercelBot/lint", "state": "success"}], [], []]))
+# Only "Vercel" and "Vercel – <project>" (en dash) are Vercel's (Codex on skill-shelf#100).
+case("an unrelated 'Vercel <word>' context on the base is not required on the head", "merged",
+     base(base_statuses=[[{"context": "Vercel Preview Comments", "state": "success"}], [], []]))
+case("'Vercel - <p>' with a hyphen is not Vercel's form, not required", "merged",
+     base(base_statuses=[[{"context": "Vercel - web", "state": "success"}], [], []]))
+case("'Vercel – ' with no project name is not required", "merged",
+     base(base_statuses=[[{"context": "Vercel – ", "state": "success"}], [], []]))
+case("'Vercel – <p>' on the base, absent on the head: not merged", "held",
+     base(base_statuses=[[{"context": "Vercel – web", "state": "success"}], [], []]))
+# The Vercel requirement is keyed on the base TIP, not the branch name (Codex on
+# aaa-signatures#13, aaa-watchtower#47, aaa-runbooks#195): a base that advances while
+# waiting is re-read, so a Vercel project new on the newer tip is required.
+case("base advances while waiting onto a tip with a new Vercel project: re-read, not merged", "held",
+     with_(base(), **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[1])]},
+                      "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
+                      f"/commits/{BASE_SHAS[1]}/status": {"statuses": [V_OK]},
+                      f"/commits/{HEAD}/check-runs": {"__seq": [
+                          {"check_runs": [run_("unittest", status="in_progress")]}, {"check_runs": [run_("unittest")]}]}}),
+     env={"WAIT_SECONDS": "3", "POLL_SECONDS": "0"})
+case("Vercel listing that does not start at the pinned tip: never green", "held",
+     with_(base(), **{"/commits": [{"sha": BASE_SHAS[1]}]}))
+case("base tip unreadable while waiting: never green", "held",
+     with_(base(runs=[run_("unittest", status="in_progress")]), **{"/git/ref/heads/main": "__error"}))
 case("base branch commits unreadable: never merges", "held", with_(base(), **{"/commits": "__error"}))
 case("base branch commit status unreadable: never merges", "held",
      with_(base(), **{f"/commits/{BASE_SHAS[1]}/status": "__error"}))
@@ -409,6 +445,7 @@ case("retargeted while waiting onto a Vercel branch: Vercel re-read for the new 
                       "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
                       f"/commits/{BASE_SHAS[1]}/status": {"statuses": [V_OK]},
                       "/rules/branches/dev": [], "/branches/dev": {"name": "dev", "protection": {"enabled": False}},
+                      "/git/ref/heads/dev": tip(BASE_SHAS[1]),
                       f"/commits/{HEAD}/check-runs": {"__seq": [
                           {"check_runs": [run_("unittest", status="in_progress")]}, {"check_runs": [run_("unittest")]}]}}),
      env={"WAIT_SECONDS": "3", "POLL_SECONDS": "0"})
@@ -416,9 +453,31 @@ case("retargeted while waiting away from a Vercel branch: no longer waits on Ver
      with_(base(base_statuses=V_BASE), **{f"/pulls/{PR}": {"__seq": [pr(), pr(base="dev")]},
                       "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
                       "/rules/branches/dev": [], "/branches/dev": {"name": "dev", "protection": {"enabled": False}},
+                      "/git/ref/heads/dev": tip(BASE_SHAS[1]),
+                      f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[1]}]},
                       f"/commits/{HEAD}/check-runs": {"__seq": [
                           {"check_runs": [run_("unittest", status="in_progress")]}, {"check_runs": [run_("unittest")]}]}}),
      env={"WAIT_SECONDS": "5", "POLL_SECONDS": "0"})
+
+# --- The base SHA is pinned (aios-coffee#135 "Pin the base SHA"; up-to-date off) -
+# Base tip reads: one per wait-loop pass, one to pin in the final snapshot, one
+# immediately before the merge call.
+case("base moves after the final snapshot, before the merge call: red run, no merge", "error",
+     with_(base(), **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[0]), tip(MOVED)]}}))
+case("base tip unreadable right before the merge call: red run, no merge", "error",
+     with_(base(), **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[0]), "__error"]}}))
+case("base tip unreadable when pinning the final snapshot: red run, no merge", "error",
+     with_(base(), **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), "__error"]}}))
+case("base tip not a SHA: red run, no merge", "error",
+     with_(base(), **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[0]), tip("main")]}}))
+case("base moved during the wait, stable from the final snapshot on: merges against the new tip", "merged",
+     with_(base(), **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[1])]},
+                      "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
+                      f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[1]}]}}))
+case("squash commit landed on another base (moved inside the round trip): red run after the merge", "error",
+     with_(base(), **{f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": MOVED}]}}))
+case("squash commit parent unreadable: merged, warning only", "merged",
+     with_(base(), **{f"/commits/{MERGE_SHA}": "__error"}))
 
 # --- The merge token: the org PAT or nothing (Codex P1 on aios-coffee#135) ----
 case("no AAA_ORG_TOKEN: a qualifying PR is a red run, never merged", "error", base(),
@@ -490,6 +549,25 @@ case("external_id naming a PR of another repository still counts as a CI result 
 case("check-run with a free-form external_id still counts", "merged",
      base(runs=[{**run_(GATE[0], slug="agency-delivery-gate", app_id=GATE[1]), "external_id": "build-42"}],
           required=[GATE]))
+# review-verdict.yml binds review/verdict the same way (aios-coffee#135 discussion_r4159188087).
+VERDICT = ("review/verdict", 15368)
+
+
+def verdict_run(conclusion, rid, pr_number, repo=REPO):
+    r = run_(VERDICT[0], conclusion, rid=rid, app_id=VERDICT[1])
+    r["external_id"] = f"{repo}#{pr_number}:{'b' * 40}:{HEAD}:review-verdict"
+    return r
+
+
+case("review/verdict: a newer action_required for another PR at the same head does not hold this PR", "merged",
+     base(runs=[verdict_run("success", 1, PR), verdict_run("action_required", 2, OTHER)], required=[VERDICT]))
+case("review/verdict: a newer success for another PR does not stand in for this PR's failure", "held",
+     base(runs=[verdict_run("failure", 1, PR), verdict_run("success", 2, OTHER)], required=[VERDICT]))
+case("review/verdict: only another PR's success at this head: required check missing", "held",
+     base(runs=[verdict_run("success", 2, OTHER)], required=[VERDICT]))
+case("review/verdict: two PRs at one head, each its own verdict: only the passing one merges", "merged",
+     with_(base(runs=[verdict_run("success", 1, PR), verdict_run("action_required", 2, OTHER)], required=[VERDICT]),
+           **second()), env=multi(PR, OTHER), merged={PR})
 case("two PRs at one head, each with its own gate verdict: only the passing one merges", "merged",
      with_(base(runs=[gate_run("success", 1, PR), gate_run("failure", 2, OTHER)], required=[GATE]), **second()),
      env=multi(PR, OTHER), merged={PR})
@@ -502,7 +580,10 @@ ORG_CHECK_WORKFLOWS = {"CI", "PR Autopilot", "quality", "Review verdict", "Revie
                        "Doc auto-merge tests", "Codex auto-request", "Codex auto-request tests", "Python unit tests", "Test archive", "Validate", "schema-lint",
                        "E2E Tests", "DB Migrations", "Demo script", "Migration check (PR)", "PR Quality Gates",
                        "PR gate", "PR-Blocking Rules", "Accessibility — axe-core audit (LKID-94)",
-                       "Visual regression — eGFR chart (LKID-81)"}
+                       "Visual regression — eGFR chart (LKID-81)",
+                       # aaa-portfolio, bare `pull_request:` (Codex on aaa-portfolio#76)
+                       "Portfolio — Sync GitHub activity", "Portfolio — Sync Jira",
+                       "Portfolio — Sync legacy client registry"}
 
 
 def main():
