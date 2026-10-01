@@ -53,7 +53,7 @@ while i < len(args):
 if method != "GET":
     open(os.path.join(state, "writes"), "a").write(method + " " + path + "\n")
     sys.exit("stub gh: the decide step must never write")
-key = path.split("repos/" + os.environ["REPO"], 1)[-1].split("?", 1)[0]
+key = "graphql" if path == "graphql" else path.split("repos/" + os.environ["REPO"], 1)[-1].split("?", 1)[0]
 if key not in fx:
     sys.exit(f"stub gh: no fixture for {key}")
 val = fx[key]
@@ -73,7 +73,7 @@ sys.stdout.write(out.stdout); sys.stderr.write(out.stderr); sys.exit(out.returnc
 
 
 def pr(state="open", draft=False, head=HEAD, head_repo=REPO, user="mac-tuongnh"):
-    return {"number": PR, "state": state, "draft": draft, "user": {"login": user},
+    return {"number": PR, "node_id": f"PR_{PR}", "state": state, "draft": draft, "user": {"login": user},
             "head": {"sha": head, "repo": {"full_name": head_repo} if head_repo else None}}
 
 
@@ -99,8 +99,21 @@ def summary(*rows):
     return comment(CODEX, "\n".join(lines), at="2026-10-01T10:02:00Z")
 
 
-def base(comments=(), reviews=(), reactions=(), **prkw):
+def review(commit=HEAD, state="COMMENTED", at="2026-10-01T10:04:00Z", body="", user=CODEX):
+    return {"user": {"login": user}, "commit_id": commit, "state": state, "submitted_at": at, "body": body}
+
+
+def timeline(*times, more=False):
+    return {"data": {"node": {"timelineItems": {"pageInfo": {"hasPreviousPage": more},
+                                                "nodes": [{"createdAt": t} for t in times]}}}}
+
+
+RETARGET = "2026-10-01T10:30:00Z"
+
+
+def base(comments=(), reviews=(), reactions=(), cutoff=(), **prkw):
     return {
+        "graphql": timeline(*cutoff),
         f"/pulls/{PR}": pr(**prkw),
         f"/commits/{HEAD}": {"commit": {"committer": {"date": PUSHED}}},
         f"/issues/{PR}/comments": list(comments),
@@ -131,7 +144,7 @@ case("bot PR (aaa-dashboard-bot) with no Codex activity: requests", "request", b
 case("synchronize event, nothing on the new head: requests", "request", base(), env=SYNC)
 case("Codex Completed only an OLDER head: requests", "request", base(comments=[summary(("Completed", OLD))]))
 case("Codex review object only on an older head: requests", "request",
-     base(reviews=[{"user": {"login": CODEX}, "commit_id": OLD}]))
+     base(reviews=[review(commit=OLD)]))
 case("Codex review Failed on this head: requests (once)", "request", base(comments=[summary(("Failed", HEAD))]))
 case("'create an environment' reply (aaa-runbooks): requests", "request",
      base(comments=[comment(CODEX, "To use Codex here, [create an environment for this repo](https://x).")]))
@@ -171,7 +184,7 @@ case("Codex Completed + a Failed security row on this head: skips", "skip",
 case("only the LATEST summary comment is read (older one Completed on head is stale)", "request",
      base(comments=[summary(("Completed", HEAD)), summary(("Failed", HEAD))]))
 case("Codex review object on this head: skips", "skip",
-     base(reviews=[{"user": {"login": CODEX}, "commit_id": HEAD}]))
+     base(reviews=[review()]))
 case("already requested once for this head (marker): skips", "skip",
      base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->",
                             at="2026-10-01T10:03:00Z")]))
@@ -206,7 +219,32 @@ case("deleted head repository: skips", "skip", base(head_repo=None))
 case("head moved during the wait: skips (the newer run decides)", "skip",
      with_(base(), **{f"/pulls/{PR}": pr(head=NEW)}), env=SYNC)
 
+# --- only evidence the gate can accept counts (Codex P1s on .github#71) ---------
+case("dismissed Codex review on this head: requests", "request", base(reviews=[review(state="DISMISSED")]))
+case("pending Codex review on this head: requests", "request", base(reviews=[review(state="PENDING")]))
+case("Codex review on this head that is a usage/rate-limit skip notice: requests", "request",
+     base(reviews=[review(body="Codex hit a rate limit; review skipped.")]))
+case("another account's review on this head: requests", "request", base(reviews=[review(user="web3sea")]))
+case("retarget AFTER Codex reviewed the head: requests", "request",
+     base(reviews=[review()], cutoff=[RETARGET]))
+case("retarget AFTER Codex's Completed row: requests", "request",
+     base(comments=[summary(("Completed", HEAD))], cutoff=[RETARGET]))
+case("retarget AFTER our marker for this head: requests again", "request",
+     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->",
+                            at="2026-10-01T10:03:00Z")], cutoff=[RETARGET]))
+case("retarget AFTER a human @codex review: requests", "request",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z")], cutoff=[RETARGET]))
+case("Codex review AFTER the retarget: skips", "skip",
+     base(reviews=[review(at="2026-10-01T10:35:00Z")], cutoff=["2026-09-30T00:00:00Z", RETARGET]))
+case("our marker AFTER the retarget: skips", "skip",
+     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->",
+                            at="2026-10-01T10:31:00Z")], cutoff=[RETARGET]))
+case("Codex row with no readable time once there is a cutoff: requests", "request",
+     base(comments=[summary(("⏳ **Queued**", HEAD))], cutoff=[RETARGET]))
+
 # --- errors (red run, never a request) ------------------------------------------
+case("retarget history unreadable: red", "error", with_(base(), graphql="__error"))
+case("retarget history over 100 events: red", "error", with_(base(), graphql=timeline(RETARGET, more=True)))
 case("PR unreadable: red", "error", with_(base(), **{f"/pulls/{PR}": "__error"}))
 case("comments unreadable: red", "error", with_(base(), **{f"/issues/{PR}/comments": "__error"}))
 case("reviews unreadable: red", "error", with_(base(), **{f"/pulls/{PR}/reviews": "__error"}))
@@ -221,7 +259,13 @@ def check_shape(wf):
     on = wf.get("on", wf.get(True))
     assert set(on) == {"pull_request_target", "workflow_dispatch"}, \
         "only default-branch-copy triggers: never pull_request (it runs the PR's copy with the PAT in reach)"
-    assert set(on["pull_request_target"]["types"]) == {"opened", "synchronize", "reopened", "ready_for_review"}
+    assert set(on["pull_request_target"]["types"]) == {"opened", "synchronize", "reopened", "ready_for_review", "edited"}, \
+        "a base retarget (edited) must re-request: review-verdict ignores older evidence"
+    assert "github.event.changes.base != null" in wf["jobs"]["codex-auto-request"]["if"], \
+        "edited runs only for a retarget, not a title/body edit"
+    verdict = (ROOT / ".github/workflows/review-verdict.yml").read_text()
+    pat = wf["jobs"]["codex-auto-request"]["steps"][0]["env"]["REVIEW_SKIP_PATTERN"]
+    assert f'REVIEW_SKIP_PATTERN: "{pat}"' in verdict, "REVIEW_SKIP_PATTERN must equal review-verdict.yml's"
     assert wf["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "read"}, \
         "GITHUB_TOKEN must stay read-only; the one write uses the PAT"
     job = wf["jobs"]["codex-auto-request"]

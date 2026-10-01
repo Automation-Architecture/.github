@@ -37,12 +37,15 @@ name: Codex auto-request
 # outsider-controlled PR can spend web3sea's Codex quota.
 #
 # ── When it asks, and when it does not ─────────────────────────────────────
-# On opened, synchronize, reopened and ready_for_review of a non-draft,
-# same-repository PR, it first waits DELAY_SECONDS (150) so Codex's own
+# On opened, synchronize, reopened, ready_for_review and a base retarget
+# (edited with changes.base) of a non-draft, same-repository PR, it first waits DELAY_SECONDS (150) so Codex's own
 # auto-review (PR opened / ready / Smart-detect "New commits") can start,
 # then re-reads the PR (still open, not draft, head unchanged; otherwise the
-# run for the newer state decides) and SKIPS when, for the head SHA:
-#   - Codex submitted a review object on it;
+# run for the newer state decides) and SKIPS when, for the head SHA and after
+# the CUTOFF (the latest base retarget or head force-push, the same cutoff
+# review-verdict.yml applies; anything older is ignored, Codex P1 on #71):
+#   - Codex submitted a review object on it that the gate can accept (not
+#     dismissed or pending, not a skip notice matching REVIEW_SKIP_PATTERN);
 #   - Codex's "Codex Review Summary" comment has a row for it that is
 #     Completed, Running, or any status but Failed (Failed is retried);
 #   - this workflow already asked once for it (hidden marker
@@ -81,7 +84,10 @@ name: Codex auto-request
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `edited` only for a base retarget (job `if`): review-verdict.yml rejects
+    # Codex evidence older than the latest retarget, so the head needs a new
+    # review (Codex P1 on .github#71).
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -108,7 +114,8 @@ jobs:
     if: >
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.draft == false &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       (github.event.action != 'edited' || github.event.changes.base != null))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -122,6 +129,8 @@ jobs:
           # synchronize: the push time. Other events: the head commit's date.
           PUSHED_AT: ${{ github.event.action == 'synchronize' && github.event.pull_request.updated_at || '' }}
           CODEX_BOT: "chatgpt-codex-connector[bot]"
+          # Same string as review-verdict.yml's REVIEW_SKIP_PATTERN. Keep in step.
+          REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit"
           DELAY_SECONDS: "150"
           BUSY_WAIT_SECONDS: "300"
           POLL_SECONDS: "30"
@@ -133,6 +142,7 @@ jobs:
           EVENT_HEAD="${EVENT_HEAD:-}"
           PUSHED_AT="${PUSHED_AT:-}"
           CODEX_BOT="${CODEX_BOT:-chatgpt-codex-connector[bot]}"
+          REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit}"
           DELAY_SECONDS="${DELAY_SECONDS:-150}"
           BUSY_WAIT_SECONDS="${BUSY_WAIT_SECONDS:-300}"
           POLL_SECONDS="${POLL_SECONDS:-30}"
@@ -189,29 +199,63 @@ jobs:
             exit 1
           fi
 
+          # CUTOFF: the latest base retarget or head force-push. review-verdict.yml
+          # rejects every Codex review, summary row and clean pass from before it,
+          # so here too nothing older counts: not a review, not a row, not this
+          # workflow's own marker, not a human request (Codex P1 on .github#71).
+          node=$(jq -r '.node_id // ""' <<<"$pr")
+          # shellcheck disable=SC2016 # $id is a GraphQL variable
+          if [ -z "$node" ] || ! CUTOFF=$(gh api graphql -f id="$node" -f query='
+                query($id: ID!) { node(id: $id) { ... on PullRequest {
+                  timelineItems(last: 100, itemTypes: [BASE_REF_CHANGED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
+                    pageInfo { hasPreviousPage }
+                    nodes { ... on BaseRefChangedEvent { createdAt } ... on HeadRefForcePushedEvent { createdAt } } } } } }' \
+                --jq '.data.node.timelineItems
+                      | if .pageInfo.hasPreviousPage != false then error("more than 100 events") else .nodes end
+                      | map(.createdAt // error("event without createdAt")) | max // ""'); then
+            echo "::error::Could not read the retarget and force-push history of #$PR_NUMBER."
+            exit 1
+          fi
+          if [ -n "$CUTOFF" ] && ! [[ "$CUTOFF" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            echo "::error::Unusable retarget time '${CUTOFF}'."
+            exit 1
+          fi
+          if [ -n "$CUTOFF" ] && [[ "$CUTOFF" > "$anchor" ]]; then
+            anchor="$CUTOFF"
+          fi
+
           busy_deadline=$((SECONDS + BUSY_WAIT_SECONDS))
           while true; do
             if ! comments=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" \
                   --jq '.[] | {user: .user.login, type: .user.type, at: .created_at, body: (.body // "")}' | jq -s .) \
                || ! reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
-                  --jq '.[] | {user: .user.login, commit: .commit_id}' | jq -s .) \
+                  --jq '.[] | {user: .user.login, commit: .commit_id, state, at: (.submitted_at // ""), body: (.body // "")}' | jq -s .) \
                || ! reactions=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/reactions?per_page=100" \
                   --jq '.[] | {user: .user.login, content}' | jq -s .); then
               echo "::error::Could not read #$PR_NUMBER's comments, reviews or reactions."
               exit 1
             fi
 
-            n=$(jq --arg bot "$CODEX_BOT" --arg head "$HEAD" \
-                  '[.[] | select(.user == $bot and .commit == $head)] | length' <<<"$reviews")
+            # Only a review the gate can accept: not dismissed or pending, not a
+            # skip notice, after the cutoff (Codex P1 on .github#71).
+            n=$(jq --arg bot "$CODEX_BOT" --arg head "$HEAD" --arg skip "$REVIEW_SKIP_PATTERN" --arg cut "$CUTOFF" '
+                  [.[] | select(.user == $bot and .commit == $head
+                                and (.state | IN("DISMISSED", "PENDING") | not)
+                                and ((.body | test($skip; "i")) | not)
+                                and .at > $cut)] | length' <<<"$reviews")
             [ "$n" -eq 0 ] || decide false "Codex already reviewed ${HEAD:0:7}."
 
             # Rows of Codex's live summary table that name this head (7+ hex prefix):
             # "| 📝 **Code Review** | ✅ **Completed** <time> | `abc1234` | PR opened |"
-            rows=$(jq -r --arg bot "$CODEX_BOT" --arg head "$HEAD" '
+            rows=$(jq -r --arg bot "$CODEX_BOT" --arg head "$HEAD" --arg cut "$CUTOFF" '
                 [.[] | select(.user == $bot and (.body | startswith("<!-- codex-pull-request-review-summary -->")))]
                 | last // {body: ""} | .body | split("\n")[]
                 | capture("\\A\\|[^|]+\\|\\s*(?<status>[^|]*?)\\s*\\|\\s*`(?<sha>[0-9a-f]{7,40})`\\s*\\|") // empty
                 | select(.sha as $s | $head | startswith($s))
+                # A row from before the cutoff (or with no readable time, once
+                # there is a cutoff) is about an older base: not this review.
+                | ((.status | capture("datetime=\"(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})") | .t + "Z") // "") as $t
+                | select($cut == "" or $t > $cut)
                 | .status' <<<"$comments")
             if [ -n "$rows" ]; then
               if grep -q 'Completed' <<<"$rows"; then
@@ -222,8 +266,8 @@ jobs:
               fi
             fi
 
-            n=$(jq --arg m "<!-- codex-auto-request head=$HEAD -->" \
-                  '[.[] | select(.body | contains($m))] | length' <<<"$comments")
+            n=$(jq --arg m "<!-- codex-auto-request head=$HEAD -->" --arg cut "$CUTOFF" \
+                  '[.[] | select((.body | contains($m)) and .at > $cut)] | length' <<<"$comments")
             [ "$n" -eq 0 ] || decide false "already requested once for ${HEAD:0:7} (at most one request per head)."
 
             # A human `@codex review` at/after the push counts unless Codex refused
