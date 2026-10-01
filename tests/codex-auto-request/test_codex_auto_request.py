@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""Offline tests for codex-auto-request.yml.
+"""Offline tests for codex-auto-request.yml (the simplified nudge, Brad 2026-10-01).
 
 Extracts the `decide` step's inline script, puts a stub `gh` first on PATH that
-serves canned API responses, runs it with no waits, and checks the decision it
+serves canned API responses, runs it with no wait, and checks the decision it
 writes to GITHUB_OUTPUT. Also asserts the workflow's security shape (trigger,
 permissions, where the org PAT may appear). Needs python3 + PyYAML, bash, jq.
 
     uv run --with pyyaml python tests/codex-auto-request/test_codex_auto_request.py
 """
-import calendar
 import copy
 import json
 import os
@@ -28,12 +27,14 @@ HEAD = "034be02bb328773fbe762ec8c93c14a1bedde66b"
 OLD = "9f1c2d3e4b5a69788796a5b4c3d2e1f00112233a"
 NEW = "1" * 40
 CODEX = "chatgpt-codex-connector[bot]"
-PUSHED = "2026-10-01T10:00:00Z"
+COMMITTED = "2026-10-01T09:58:00Z"   # head commit's committer date
+PUSHED = "2026-10-01T10:00:00Z"      # synchronize event time
+RETARGET = "2026-10-01T10:30:00Z"    # edited (base changed) event time
 SUMMARY = "<!-- codex-pull-request-review-summary -->"
 
-# Stub gh: `gh api [-X M] [--paginate] [--jq Q] [-f k=v] <path>`. A fixture value
-# {"__seq": [a, b]} is served one entry per call (the last repeats); "__error"
-# fails the call. --jq output matches gh: strings raw, other JSON compact.
+# Stub gh: `gh api [-X M] [--paginate] [--jq Q] [-f k=v] <path>`. "__error" fails
+# the call. --jq output matches gh: strings raw, other JSON compact. Any write
+# fails the case: the decide step must never write.
 STUB = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
 fx = json.load(open(os.environ["FIXTURES"]))
@@ -73,68 +74,38 @@ sys.stdout.write(out.stdout); sys.stderr.write(out.stderr); sys.exit(out.returnc
 '''
 
 
-def pr(state="open", draft=False, head=HEAD, head_repo=REPO, user="mac-tuongnh"):
-    return {"number": PR, "node_id": f"PR_{PR}", "state": state, "draft": draft, "user": {"login": user},
-            "head": {"sha": head, "repo": {"full_name": head_repo} if head_repo else None}}
+def pr(state="open", head=HEAD):
+    return {"number": PR, "state": state, "head": {"sha": head}}
 
 
-def comment(user, body, at="2026-10-01T10:01:00Z", typ=None):
-    return {"user": {"login": user, "type": typ or ("Bot" if user.endswith("[bot]") else "User")},
-            "created_at": at, "body": body}
+def comment(user, body, at="2026-10-01T10:01:00Z"):
+    return {"user": {"login": user}, "created_at": at, "body": body}
+
+
+def row(status, sha, at="2026-10-01T10:03:00"):
+    cells = {"Completed": f'✅ **Completed** <relative-time datetime="{at}.123Z">x</relative-time>',
+             "Running": f'🔄 **Running** since <relative-time datetime="{at}.5Z">x</relative-time>',
+             "Failed": f'⚠️ **Failed** <relative-time datetime="{at}Z">x</relative-time>',
+             "Queued": "⏳ **Queued**"}
+    return f"| 📝 **Code Review** | {cells[status]} | `{sha[:7]}` | PR opened |"
 
 
 def summary(*rows):
-    lines = [SUMMARY, "", "## Codex Review Summary", "", "| Review | Status | Commit | Review trigger |",
-             "| --- | --- | --- | --- |"]
-    for status, sha in rows:
-        if status == "Completed":
-            st = '✅ **Completed** <relative-time datetime="2026-10-01T10:03:00Z">x</relative-time>'
-        elif status == "Running":
-            st = '🔄 **Running** since <relative-time datetime="2026-10-01T10:02:00Z">x</relative-time>'
-        elif status == "Failed":
-            st = '⚠️ **Failed** <relative-time datetime="2026-10-01T10:02:00Z">x</relative-time>'
-        else:
-            st = status
-        lines.append(f"| 📝 **Code Review** | {st} | `{sha[:7]}` | PR opened |")
-    lines += ["", "<details> <summary>About</summary>Comment \"@codex review\".</details>"]
-    return comment(CODEX, "\n".join(lines), at="2026-10-01T10:02:00Z")
+    return comment(CODEX, "\n".join([SUMMARY, "", "## Codex Review Summary", "",
+                                      "| Review | Status | Commit | Review trigger |", "| --- | --- | --- | --- |",
+                                      *rows, "", "<details>Comment \"@codex review\".</details>"]),
+                   at="2026-10-01T10:02:00Z")
 
 
-def review(commit=HEAD, state="COMMENTED", at="2026-10-01T10:04:00Z", body="", user=CODEX):
-    return {"user": {"login": user}, "commit_id": commit, "state": state, "submitted_at": at, "body": body}
+def review(commit=HEAD, at="2026-10-01T10:04:00Z", user=CODEX, state="COMMENTED"):
+    return {"user": {"login": user}, "commit_id": commit, "submitted_at": at, "state": state}
 
 
-def timeline(*times, more=False):
-    return {"data": {"node": {"timelineItems": {"pageInfo": {"hasPreviousPage": more},
-                                                "nodes": [{"createdAt": t} for t in times]}}}}
-
-
-RETARGET = "2026-10-01T10:30:00Z"
-
-
-def thumbs(at="2026-10-01T10:03:03Z", user=CODEX):
-    return {"user": {"login": user}, "content": "+1", "created_at": at}
-
-
-THUMBS = thumbs()
-
-
-def epoch(ts):
-    return str(calendar.timegm(__import__("time").strptime(ts, "%Y-%m-%dT%H:%M:%SZ")))
-
-
-REFUSAL = "To use Codex here, [create a Codex account and connect to github](https://x)."
-
-
-def base(comments=(), reviews=(), reactions=(), cutoff=(), **prkw):
-    return {
-        "graphql": timeline(*cutoff),
-        f"/pulls/{PR}": pr(**prkw),
-        f"/commits/{HEAD}": {"commit": {"committer": {"date": PUSHED}}},
-        f"/issues/{PR}/comments": list(comments),
-        f"/pulls/{PR}/reviews": list(reviews),
-        f"/issues/{PR}/reactions": list(reactions),
-    }
+def base(comments=(), reviews=(), **prkw):
+    return {f"/pulls/{PR}": pr(**prkw),
+            f"/commits/{HEAD}": {"commit": {"committer": {"date": COMMITTED}}},
+            f"/issues/{PR}/comments": list(comments),
+            f"/pulls/{PR}/reviews": list(reviews)}
 
 
 def with_(fx, **kw):
@@ -147,206 +118,109 @@ CASES = []
 
 
 def case(name, expect, fx, env=None):
-    """expect: 'request' (request=true, head=HEAD), 'skip' (request=false) or 'error' (exit != 0)."""
+    """expect: 'nudge' (nudge=true), 'skip' (nudge=false) or 'error' (exit != 0)."""
     CASES.append((name, expect, fx, env or {}))
 
 
-SYNC = {"EVENT_HEAD": HEAD, "PUSHED_AT": PUSHED}
+SYNC = {"EVENT_AT": PUSHED}
+EDIT = {"EVENT_AT": RETARGET, "RETARGET": "true"}
 
-# --- asks ---------------------------------------------------------------------
-case("contractor PR with no Codex activity: requests", "request", base())
-case("bot PR (aaa-dashboard-bot) with no Codex activity: requests", "request", base(user="aaa-dashboard-bot[bot]"))
-case("synchronize event, nothing on the new head: requests", "request", base(), env=SYNC)
-case("Codex Completed only an OLDER head: requests", "request", base(comments=[summary(("Completed", OLD))]))
-case("Codex review object only on an older head: requests", "request",
-     base(reviews=[review(commit=OLD)]))
-case("Codex review Failed on this head: requests (once)", "request", base(comments=[summary(("Failed", HEAD))]))
-case("'create an environment' reply (aaa-runbooks): requests", "request",
+# --- nudges -------------------------------------------------------------------
+case("opened, Codex has not touched the head: nudges", "nudge", base())
+case("synchronize, Codex has not touched the new head: nudges", "nudge", base(), env=SYNC)
+case("Codex rows and reviews only for an OLDER head: nudges", "nudge",
+     base(comments=[summary(row("Completed", OLD))], reviews=[review(commit=OLD)]), env=SYNC)
+case("Codex's 'create an environment' reply is not a row: nudges", "nudge",
      base(comments=[comment(CODEX, "To use Codex here, [create an environment for this repo](https://x).")]))
-case("a bot's @codex review after the push does not count (Codex refuses bots): requests", "request",
-     base(comments=[comment("claude[bot]", "@codex review please", at="2026-10-01T10:05:00Z")]))
-case("github-actions[bot] @codex review does not count: requests", "request",
-     base(comments=[comment("github-actions[bot]", "@codex review", at="2026-10-01T10:05:00Z")]))
-case("a human @codex review BEFORE the push does not count: requests", "request",
-     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T09:59:59Z")]))
-case("a human @codex review that Codex refused (no linked account): requests", "request",
-     base(comments=[comment("mac-tuongnh", "@codex review", at="2026-10-01T10:05:00Z"),
-                    comment(CODEX, "To use Codex here, [create a Codex account and connect to github](https://x).",
-                            at="2026-10-01T10:05:04Z")]))
-case("a quoted mention mid-word does not count: requests", "request",
-     base(comments=[comment("web3sea", "see the note about email@codex reviewers", at="2026-10-01T10:05:00Z")]))
-case("our marker for an OLDER head does not block this head: requests", "request",
-     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={OLD} -->",
-                            at="2026-10-01T09:00:00Z")]))
-case("usage-limit reply on an older head: requests once for the new head", "request",
-     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={OLD} -->", at="2026-10-01T09:00:00Z"),
-                    comment(CODEX, "You have reached your Codex usage limits for code reviews.", at="2026-10-01T09:00:10Z")]))
-case("Codex 👀 on the PR but nothing appears before the busy wait ends: requests", "request",
-     base(reactions=[{"user": {"login": CODEX}, "content": "eyes"}]), env={"BUSY_WAIT_SECONDS": "0"})
-case("Codex 👀 clears on the re-check, still no row: requests", "request",
-     with_(base(), **{f"/issues/{PR}/reactions": {"__seq": [[{"user": {"login": CODEX}, "content": "eyes"}], []]}}),
-     env={"BUSY_WAIT_SECONDS": "5"})
-case("another account's thumbs-up does not matter: requests", "request",
-     base(comments=[summary(("Completed", HEAD))], reactions=[thumbs(user="web3sea")]))
+case("an @codex review from BEFORE the push: nudges", "nudge",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T09:59:59Z")]), env=SYNC)
+case("a mention inside a word is not a request: nudges", "nudge",
+     base(comments=[comment("web3sea", "mail@codex reviewers", at="2026-10-01T10:05:00Z")]))
+case("Codex's own footer text is not a request: nudges", "nudge",
+     base(comments=[comment(CODEX, "Try again later by commenting \u201c@codex review\u201d.", at="2026-10-01T10:05:00Z")]))
+case("another account's review on the head: nudges", "nudge", base(reviews=[review(user="web3sea")]))
 
-# --- skips --------------------------------------------------------------------
-case("Codex Completed on this head + its 👍: skips", "skip",
-     base(comments=[summary(("Completed", HEAD))], reactions=[THUMBS]))
-case("Codex Completed on this head, no 👍 and no review (gate cannot accept): requests once", "request",
-     base(comments=[summary(("Completed", HEAD))]))
-case("Codex Completed, 👍 predates the completion (an older review's): requests", "request",
-     base(comments=[summary(("Completed", HEAD))], reactions=[thumbs("2026-10-01T09:00:00Z")]))
-case("Codex Completed, 👍 arrives on the re-check: skips", "skip",
-     with_(base(comments=[summary(("Completed", HEAD))]),
-           **{f"/issues/{PR}/reactions": {"__seq": [[], [THUMBS]]}}),
-     env={"REACTION_GRACE_SECONDS": "5"})
-case("Codex Completed, no 👍, already requested once for this head: skips", "skip",
-     base(comments=[summary(("Completed", HEAD)),
-                    comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->", at="2026-10-01T10:04:00Z")]))
-case("Codex Running on this head: skips", "skip", base(comments=[summary(("Running", HEAD))]))
-case("Codex row in an unknown (queued) status on this head: skips", "skip",
-     base(comments=[summary(("⏳ **Queued**", HEAD))]))
-case("Codex Completed + a Failed row on this head: requests (the gate needs every row Completed)", "request",
-     base(comments=[summary(("Completed", HEAD), ("Failed", HEAD))]))
-case("Codex Completed + a Running row on this head: skips (still in progress)", "skip",
-     base(comments=[summary(("Completed", HEAD), ("Running", HEAD))]))
-case("Codex Completed + a Failed row, already requested once: skips", "skip",
-     base(comments=[summary(("Completed", HEAD), ("Failed", HEAD)),
-                    comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->", at="2026-10-01T10:03:00Z")]))
-case("only the LATEST summary comment is read (older one Completed on head is stale)", "request",
-     base(comments=[summary(("Completed", HEAD)), summary(("Failed", HEAD))]))
-case("Codex review object on this head: skips", "skip",
-     base(reviews=[review()]))
-case("already requested once for this head (marker): skips", "skip",
-     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->",
-                            at="2026-10-01T10:03:00Z")]))
-case("marker for this head + Codex usage-limit reply: no second request", "skip",
-     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->", at="2026-10-01T10:03:00Z"),
-                    comment(CODEX, "You have reached your Codex usage limits for code reviews.", at="2026-10-01T10:03:05Z")]))
-case("marker for this head, Codex refused it: still no second request (no loop)", "skip",
-     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->", at="2026-10-01T10:03:00Z"),
-                    comment(CODEX, "To use Codex here, [create a Codex account and connect to github](https://x).",
-                            at="2026-10-01T10:03:04Z")]))
-case("marker for this head posted before a later re-push of the same head: skips", "skip",
-     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->",
-                            at="2026-10-01T09:30:00Z")]), env=SYNC)
-case("web3sea commented @codex review after the push: skips", "skip",
-     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:00:30Z")]))
+# --- (a) the head moved / closed ------------------------------------------------
+case("head moved during the wait: skips", "skip", with_(base(), **{f"/pulls/{PR}": pr(head=NEW)}), env=SYNC)
+case("closed during the wait: skips", "skip", base(state="closed"))
+
+# --- (b) Codex already touched the head, ANY status -------------------------------
+for st in ("Completed", "Running", "Queued", "Failed"):
+    case(f"summary row {st} for the head: skips", "skip", base(comments=[summary(row(st, HEAD))]))
+case("row for the head next to a row for an older head: skips", "skip",
+     base(comments=[summary(row("Completed", OLD), row("Failed", HEAD))]))
+case("a row in an OLDER summary comment still counts: skips", "skip",
+     base(comments=[summary(row("Completed", HEAD)), summary(row("Running", OLD))]))
+case("Codex review object on the head (any state): skips", "skip", base(reviews=[review(state="DISMISSED")]))
+
+# --- (c) someone already asked -----------------------------------------------------
+case("web3sea @codex review after the push: skips", "skip",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:00:30Z")]), env=SYNC)
+case("our own earlier nudge for this head: skips (once per head)", "skip",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:03:00Z")]), env=SYNC)
+case("a bot's @codex review after the push also counts (simple rule): skips", "skip",
+     base(comments=[comment("claude[bot]", "@codex review please", at="2026-10-01T10:05:00Z")]), env=SYNC)
 case("@codex security review after the push: skips", "skip",
-     base(comments=[comment("web3sea", "@codex security review", at="2026-10-01T10:00:30Z")]))
-case("human request exactly at the push time counts: skips", "skip",
-     base(comments=[comment("web3sea", "@CODEX REVIEW", at=PUSHED)]))
-case("human request, refusal arrives outside the window (unrelated): skips", "skip",
-     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z"),
-                    comment(CODEX, "To use Codex here, [create a Codex account and connect to github](https://x).",
-                            at="2026-10-01T10:30:00Z")]))
-case("Codex 👀 then a Running row appears on the re-check: skips", "skip",
-     with_(base(reactions=[{"user": {"login": CODEX}, "content": "eyes"}]),
-           **{f"/issues/{PR}/comments": {"__seq": [[], [summary(("Running", HEAD))]]}}),
-     env={"BUSY_WAIT_SECONDS": "5"})
-case("draft: skips", "skip", base(draft=True))
-case("closed: skips", "skip", base(state="closed"))
-case("fork PR (head repo differs at re-read): skips", "skip", base(head_repo="mallory/widget"))
-case("deleted head repository: skips", "skip", base(head_repo=None))
-case("head moved during the wait: skips (the newer run decides)", "skip",
-     with_(base(), **{f"/pulls/{PR}": pr(head=NEW)}), env=SYNC)
+     base(comments=[comment("web3sea", "@codex security review", at="2026-10-01T10:05:00Z")]))
+case("request at exactly the push time counts: skips", "skip",
+     base(comments=[comment("web3sea", "@CODEX REVIEW", at=PUSHED)]), env=SYNC)
+case("opened: a request after the commit date counts: skips", "skip",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T09:59:00Z")]))
 
-# --- only evidence the gate can accept counts (Codex P1s on .github#71) ---------
-case("dismissed Codex review on this head: requests", "request", base(reviews=[review(state="DISMISSED")]))
-case("pending Codex review on this head: requests", "request", base(reviews=[review(state="PENDING")]))
-case("Codex review on this head that is a usage/rate-limit skip notice: requests", "request",
-     base(reviews=[review(body="Codex hit a rate limit; review skipped.")]))
-case("another account's review on this head: requests", "request", base(reviews=[review(user="web3sea")]))
-case("retarget AFTER Codex reviewed the head: requests", "request",
-     base(reviews=[review()], cutoff=[RETARGET]))
-case("retarget AFTER Codex's Completed row: requests", "request",
-     base(comments=[summary(("Completed", HEAD))], reactions=[THUMBS], cutoff=[RETARGET]))
-case("retarget AFTER our marker for this head: requests again", "request",
-     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->",
-                            at="2026-10-01T10:03:00Z")], cutoff=[RETARGET]))
-case("retarget AFTER a human @codex review: requests", "request",
-     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z")], cutoff=[RETARGET]))
-case("Codex review AFTER the retarget: skips", "skip",
-     base(reviews=[review(at="2026-10-01T10:35:00Z")], cutoff=["2026-09-30T00:00:00Z", RETARGET]))
-case("our marker AFTER the retarget: skips", "skip",
-     base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->",
-                            at="2026-10-01T10:31:00Z")], cutoff=[RETARGET]))
-case("Codex row with no readable time once there is a cutoff: requests", "request",
-     base(comments=[summary(("⏳ **Queued**", HEAD))], cutoff=[RETARGET]))
+# --- base retarget (edited with changes.base) --------------------------------------
+case("retarget after Codex Completed the head: nudges again", "nudge",
+     base(comments=[summary(row("Completed", HEAD))], reviews=[review()]), env=EDIT)
+case("retarget after our earlier nudge for the head: nudges again", "nudge",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:03:00Z")]), env=EDIT)
+case("retarget, Codex row for the head AFTER the retarget: skips", "skip",
+     base(comments=[summary(row("Running", HEAD, at="2026-10-01T10:31:00"))]), env=EDIT)
+case("retarget, Codex review on the head AFTER the retarget: skips", "skip",
+     base(reviews=[review(at="2026-10-01T10:32:00Z")]), env=EDIT)
+case("retarget, @codex review AFTER the retarget: skips", "skip",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:31:00Z")]), env=EDIT)
+case("retarget, a head row with no time still counts: skips", "skip",
+     base(comments=[summary(row("Queued", HEAD))]), env=EDIT)
 
-# --- the whole table must be on the head; a fresh request may yet be refused (round 4) ---
-case("Completed + 👍 on this head, but the table also has a row for an older head: requests", "request",
-     base(comments=[summary(("Completed", HEAD), ("Completed", OLD))], reactions=[THUMBS]))
-case("Running on this head + a row for an older head: skips (in progress)", "skip",
-     base(comments=[summary(("Running", HEAD), ("Completed", OLD))]))
-case("young human request, Codex refuses it during the wait: requests", "request",
-     with_(base(), **{f"/issues/{PR}/comments": {"__seq": [
-         [comment("mac-tuongnh", "@codex review", at="2026-10-01T10:05:00Z")],
-         [comment("mac-tuongnh", "@codex review", at="2026-10-01T10:05:00Z"),
-          comment(CODEX, REFUSAL, at="2026-10-01T10:05:04Z")]]}}),
-     env={"NOW_EPOCH": epoch("2026-10-01T10:05:01Z"), "REFUSAL_WINDOW_SECONDS": "6", "POLL_SECONDS": "1"})
-case("young human request, no refusal within the window: skips", "skip",
-     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z")]),
-     env={"NOW_EPOCH": epoch("2026-10-01T10:05:01Z"), "REFUSAL_WINDOW_SECONDS": "2", "POLL_SECONDS": "1"})
-case("human request older than the window, not refused: skips at once", "skip",
-     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z")]),
-     env={"NOW_EPOCH": epoch("2026-10-01T10:08:00Z")})
-
-# --- errors (red run, never a request) ------------------------------------------
-case("retarget history unreadable: red", "error", with_(base(), graphql="__error"))
-case("retarget history over 100 events: red", "error", with_(base(), graphql=timeline(RETARGET, more=True)))
+# --- errors (red run, never a nudge) -------------------------------------------------
 case("PR unreadable: red", "error", with_(base(), **{f"/pulls/{PR}": "__error"}))
 case("comments unreadable: red", "error", with_(base(), **{f"/issues/{PR}/comments": "__error"}))
 case("reviews unreadable: red", "error", with_(base(), **{f"/pulls/{PR}/reviews": "__error"}))
-case("reactions unreadable: red", "error", with_(base(), **{f"/issues/{PR}/reactions": "__error"}))
-case("head commit date unreadable (non-synchronize): red", "error", with_(base(), **{f"/commits/{HEAD}": "__error"}))
-case("non-numeric PR number: red", "error", base(), env={"PR_NUMBER": "7; rm -rf /"})
-case("malformed event head: red", "error", base(), env={"EVENT_HEAD": "$(id)"})
-case("malformed push time: red", "error", base(), env={"PUSHED_AT": "yesterday"})
+case("head commit date unreadable: red", "error", with_(base(), **{f"/commits/{HEAD}": "__error"}))
+case("non-numeric PR number: red", "error", base(), env={"PR_NUMBER": "7; id"})
+case("malformed head: red", "error", base(), env={"EVENT_HEAD": "$(id)"})
+case("malformed event time: red", "error", base(), env={"EVENT_AT": "yesterday"})
+case("retarget with no event time: red", "error", base(), env={"RETARGET": "true"})
 
 
 def check_shape(wf):
     on = wf.get("on", wf.get(True))
     assert set(on) == {"pull_request_target"}, \
-        "only pull_request_target: pull_request runs the PR's copy and workflow_dispatch --ref runs a branch's " \
-        "copy, either with the PAT in reach (Codex P1 on .github#71)"
-    assert "github.event_name == 'pull_request_target'" in wf["jobs"]["codex-auto-request"]["if"]
-    assert set(on["pull_request_target"]["types"]) == {"opened", "synchronize", "reopened", "ready_for_review", "edited"}, \
-        "a base retarget (edited) must re-request: review-verdict ignores older evidence"
-    assert "github.event.changes.base != null" in wf["jobs"]["codex-auto-request"]["if"], \
-        "edited runs only for a retarget, not a title/body edit"
-    verdict = (ROOT / ".github/workflows/review-verdict.yml").read_text()
-    pat = wf["jobs"]["codex-auto-request"]["steps"][0]["env"]["REVIEW_SKIP_PATTERN"]
-    assert f'REVIEW_SKIP_PATTERN: "{pat}"' in verdict, "REVIEW_SKIP_PATTERN must equal review-verdict.yml's"
+        "only pull_request_target: pull_request runs the PR's copy, workflow_dispatch --ref a branch's copy"
+    assert set(on["pull_request_target"]["types"]) == {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
     assert wf["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "read"}, \
-        "GITHUB_TOKEN must stay read-only; the one write uses the PAT"
+        "GITHUB_TOKEN stays read-only; the one write uses the PAT"
     job = wf["jobs"]["codex-auto-request"]
     assert "permissions" not in job, "no job-level permission widening"
-    assert "github.event.pull_request.draft == false" in job["if"]
-    assert "github.event.pull_request.head.repo.full_name == github.repository" in job["if"]
+    for needle in ("github.event_name == 'pull_request_target'", "github.event.pull_request.draft == false",
+                   "github.event.pull_request.head.repo.full_name == github.repository",
+                   "github.event.changes.base != null"):
+        assert needle in job["if"], f"job condition must include {needle}"
     text = WORKFLOW.read_text()
-    assert "actions/checkout" not in text and "uses:" not in text, "no checkout and no third-party action"
+    assert "actions/checkout" not in text and "uses:" not in text, "no checkout and no action"
     assert text.count("secrets.AAA_ORG_TOKEN") == 1, "the org PAT appears exactly once"
     steps = job["steps"]
-    pat_steps = [s for s in steps if "secrets.AAA_ORG_TOKEN" in json.dumps(s)]
-    assert len(pat_steps) == 1 and pat_steps[0]["id"] == "request", "only the request step sees the PAT"
-    req = pat_steps[0]
-    assert req["if"] == "steps.decide.outputs.request == 'true'"
-    assert req["run"].count("gh api") == 1 and "-X POST" in req["run"] and "/comments" in req["run"], \
-        "the PAT makes exactly one API call: the comment"
+    pat = [s for s in steps if "secrets.AAA_ORG_TOKEN" in json.dumps(s)]
+    assert len(pat) == 1 and pat[0]["id"] == "nudge" and pat[0]["if"] == "steps.decide.outputs.nudge == 'true'"
+    assert pat[0]["run"].count("gh api") == 1 and "-X POST" in pat[0]["run"] and "body='@codex review'" in pat[0]["run"], \
+        "the PAT makes exactly one call: the fixed comment"
     for s in steps:
-        run = s.get("run", "")
-        for bad in ("github.event.pull_request.title", "github.event.pull_request.body",
-                    "github.event.pull_request.head.ref", "github.event.comment"):
-            assert bad not in run and bad not in json.dumps(s.get("env", {})), f"never interpolate {bad}"
-        assert "${{" not in run, "no expression is interpolated into a script; pass values via env"
-    assert wf["concurrency"]["cancel-in-progress"] is False, \
-        "never cancel: a cancelled check on the head reads as red to doc-auto-merge"
+        assert "${{" not in s.get("run", ""), "no expression interpolated into a script; pass values via env"
+        for bad in ("pull_request.title", "pull_request.body", "head.ref", "github.event.comment"):
+            assert bad not in json.dumps(s), f"never pass {bad}"
+    assert wf["concurrency"]["cancel-in-progress"] is False, "a cancelled check reads as red to doc-auto-merge"
     for needle in ("github.event.pull_request.number", "github.event.pull_request.head.sha"):
-        assert needle in wf["concurrency"]["group"], f"concurrency group must key on {needle}"
-    decide = steps[0]
-    assert decide["id"] == "decide" and decide["env"]["GH_TOKEN"] == "${{ github.token }}"
-    assert int(decide["env"]["DELAY_SECONDS"]) >= 120, "give Codex's own auto-review 2-3 minutes"
+        assert needle in wf["concurrency"]["group"]
+    assert 150 <= int(steps[0]["env"]["DELAY_SECONDS"]) <= 240, "about 3 minutes for Codex's own review"
 
 
 def main():
@@ -369,31 +243,20 @@ def main():
             outf = state / "github_output"
             outf.write_text("")
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
-                   **static_env, "REPO": REPO, "PR_NUMBER": str(PR), "EVENT_HEAD": "", "PUSHED_AT": "",
-                   "GH_TOKEN": "read-token", "DELAY_SECONDS": "0", "POLL_SECONDS": "0",
-                   "REACTION_GRACE_SECONDS": "0", "GITHUB_OUTPUT": str(outf), "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state),
+                   **static_env, "REPO": REPO, "PR_NUMBER": str(PR), "EVENT_HEAD": HEAD, "EVENT_AT": "",
+                   "RETARGET": "false", "GH_TOKEN": "read-token", "DELAY_SECONDS": "0",
+                   "GITHUB_OUTPUT": str(outf), "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state),
                    **env_over}
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True,
                                  timeout=60)
             kv = dict(l.split("=", 1) for l in outf.read_text().splitlines() if "=" in l)
-            if out.returncode != 0:
-                got = "error"
-            elif kv.get("request") == "true":
-                got = "request"
-            elif kv.get("request") == "false":
-                got = "skip"
-            else:
-                got = "no-decision"
-            ok = got == expect and not (state / "writes").exists()
-            if got == "request":
-                ok = ok and kv.get("head") == HEAD
-            if got == "error":
-                ok = ok and "request" not in kv
+            got = ("error" if out.returncode != 0 else
+                   {"true": "nudge", "false": "skip"}.get(kv.get("nudge"), "no-decision"))
+            ok = got == expect and not (state / "writes").exists() and not (got == "error" and "nudge" in kv)
             failures += not ok
-            last = (out.stdout.strip().splitlines() or [""])[-1]
             print(f"{'PASS' if ok else 'FAIL'}  {name}  (expected {expect}, got {got})")
             if os.environ.get("VERBOSE"):
-                print("      " + last)
+                print("      " + (out.stdout.strip().splitlines() or [""])[-1])
             if not ok:
                 print(out.stdout[-1500:], out.stderr[-1500:], sep="\n")
     print(f"\n{len(CASES) - failures}/{len(CASES)} passed")
