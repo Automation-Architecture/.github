@@ -319,6 +319,13 @@ case("CI run: a PR based in another repository is not evaluated", "held",
      merged=set())
 case("CI run naming no PR at its head: nothing to do", "held", base(), env={**multi(), "PRS_JSON": "[]"})
 
+# --- every event settles, workflow_run included (.github#69 item 1) ----------
+case("CI completion settles, re-qualifies and merges", "merged",
+     with_(base(), **second()), env={**multi(PR, OTHER), "SETTLE_SECONDS": "1"}, merged={PR, OTHER})
+case("CI completion: the PR turns draft during the settle: not merged", "held",
+     with_(base(), **{f"/pulls/{PR}": {"__seq": [pr(), pr(draft=True)]}}),
+     env={**multi(PR), "SETTLE_SECONDS": "1"}, merged=set())
+
 # --- auto_merge_enabled: a refused PR is disarmed at once (Brad, 2026-09-29) --
 case("auto-merge armed on a held doc PR: disarmed, not merged", "held",
      with_(base(), **{f"/pulls/{PR}": pr(labels=("no-auto-merge",), armed=True),
@@ -456,10 +463,14 @@ case("check_run completed naming the PR: merges (same path as workflow_run)", "m
      with_(base(runs=[run_("agency-delivery/gate", slug="agency-delivery-gate", app_id=4242)]),
            **second(files=("app.py",))), env=multi(PR, OTHER), merged={PR})
 
-# Every PR-check workflow name in the org (survey of all repos, 2026-10-01).
-ORG_CHECK_WORKFLOWS = {"CI", "PR Autopilot", "quality", "Review verdict", "Python unit tests", "Test archive",
-                       "Validate", "schema-lint", "E2E Tests", "PR gate", "PR Quality Gates", "PR-Blocking Rules",
-                       "Migration check (PR)", "DB Migrations"}
+# Every PR-check workflow name in the org (survey of all repos, 2026-10-01), plus
+# this repo's own test workflows. The trigger list must equal this set exactly,
+# so a dropped or mistyped name fails here (Codex on .github#70).
+ORG_CHECK_WORKFLOWS = {"CI", "PR Autopilot", "quality", "Review verdict", "Review verdict evidence tests",
+                       "Doc auto-merge tests", "Python unit tests", "Test archive", "Validate", "schema-lint",
+                       "E2E Tests", "DB Migrations", "Demo script", "Migration check (PR)", "PR Quality Gates",
+                       "PR gate", "PR-Blocking Rules", "Accessibility — axe-core audit (LKID-94)",
+                       "Visual regression — eGFR chart (LKID-81)"}
 
 
 def main():
@@ -475,7 +486,8 @@ def main():
     assert "paths" not in on["pull_request_target"], "code PRs (no Markdown) must be seen when auto-merge is armed"
     assert "pull_request" not in on, "never run the PR's own copy of this workflow (org PAT in reach; Codex on #60)"
     names = set(on["workflow_run"]["workflows"])
-    assert ORG_CHECK_WORKFLOWS <= names, f"workflow_run misses {ORG_CHECK_WORKFLOWS - names}"
+    assert names == ORG_CHECK_WORKFLOWS, \
+        f"workflow_run list drifted: missing {ORG_CHECK_WORKFLOWS - names}, unlisted {names - ORG_CHECK_WORKFLOWS}"
     assert wf["name"] not in names, "this workflow must not re-trigger itself"
     assert not any(c in n for n in names for c in "*?["), "workflow_run matches names exactly; no patterns"
     assert on["check_run"]["types"] == ["completed"], "a check from another app completing must re-evaluate"
@@ -487,8 +499,8 @@ def main():
     for needle in ("github.event.check_run.head_sha", "github.event.sha"):
         assert needle in group, f"concurrency group must key on {needle}"
     step = job["steps"][0]
-    assert step["env"]["SETTLE_SECONDS"] == "${{ github.event_name == 'workflow_run' && '0' || '60' }}", \
-        "only workflow_run skips the settle; a check_run or status proves one check only (Codex on .github#68)"
+    assert str(step["env"]["SETTLE_SECONDS"]) == "60", \
+        "every event settles, workflow_run included: one completion proves one workflow only (.github#69 item 1)"
     assert step["env"]["MERGE_TOKEN"] == "${{ secrets.AAA_ORG_TOKEN }}", \
         "MERGE_TOKEN must be the org PAT with no GITHUB_TOKEN fallback (Codex P1 on aios-coffee#135)"
     verdict = (ROOT / ".github/workflows/review-verdict.yml").read_text()
