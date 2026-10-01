@@ -1239,6 +1239,9 @@ jobs:
             # doc-auto-merge.yml ignores a run that names another PR (Codex on
             # aios-coffee#135, discussion_r4159188087). With no PR number (a
             # failed lookup) the run stays unbound, and it is never a success.
+            # external_id is opaque to rulesets: GitHub enforces the newest run
+            # of this name on the commit, so doc-auto-merge.yml also waits while
+            # that newest run is another PR's and has not passed (.github#76).
             local payload external_id=""
             if [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]; then
               external_id="${REPO}#${PR_NUMBER}:${BASE_SHA:-unknown}:${sha}:review-verdict"

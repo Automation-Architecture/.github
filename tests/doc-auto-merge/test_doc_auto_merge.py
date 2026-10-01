@@ -538,8 +538,7 @@ case("gate: this PR's verdict failed, a newer success belongs to another PR at t
      base(runs=[gate_run("failure", 1, PR), gate_run("success", 2, OTHER)], required=[GATE]))
 case("gate: only another PR's success at the same head: required check missing, not merged", "held",
      base(runs=[gate_run("success", 2, OTHER)], required=[GATE]))
-case("gate: this PR's success, a newer failure belongs to another PR: merges", "merged",
-     base(runs=[gate_run("success", 1, PR), gate_run("failure", 2, OTHER)], required=[GATE]))
+
 case("gate: this PR's own success: merges", "merged",
      base(runs=[gate_run("success", 1, PR)], required=[GATE]))
 case("gate: repository name compared case-insensitively", "held",
@@ -559,17 +558,34 @@ def verdict_run(conclusion, rid, pr_number, repo=REPO):
     return r
 
 
-case("review/verdict: a newer action_required for another PR at the same head does not hold this PR", "merged",
+# GitHub enforces the newest run per (app, name) whatever its external_id (Codex on .github#76):
+# this PR's success under another PR's newer non-success waits; it never calls a merge GitHub refuses.
+case("review/verdict: a newer action_required for another PR at the same head: waits, no merge call", "held",
      base(runs=[verdict_run("success", 1, PR), verdict_run("action_required", 2, OTHER)], required=[VERDICT]))
+case("review/verdict: another PR's newer run, then a fresh run for this PR on top: merges", "merged",
+     with_(base(required=[VERDICT]), **{f"/commits/{HEAD}/check-runs": {"__seq": [
+         {"check_runs": [verdict_run("success", 1, PR), verdict_run("action_required", 2, OTHER)]},
+         {"check_runs": [verdict_run("success", 1, PR), verdict_run("action_required", 2, OTHER),
+                         verdict_run("success", 3, PR)]}]}}),
+     env={"WAIT_SECONDS": "5", "POLL_SECONDS": "0"})
+case("review/verdict: another PR's newer run that also passed: merges", "merged",
+     base(runs=[verdict_run("success", 1, PR), verdict_run("success", 2, OTHER)], required=[VERDICT]))
+case("gate: this PR's success under another PR's newer failure: waits, no merge call", "held",
+     base(runs=[gate_run("success", 1, PR), gate_run("failure", 2, OTHER)], required=[GATE]))
+case("an unrequired check's newer run for another PR does not hold this PR", "merged",
+     base(runs=[verdict_run("success", 1, PR), verdict_run("action_required", 2, OTHER)]))
+case("another PR's newer run of an unrequired check, next to a required check that passed: merges", "merged",
+     base(runs=[gate_run("success", 1, PR), verdict_run("success", 2, PR), verdict_run("action_required", 3, OTHER)],
+          required=[(GATE[0], None)]))
 case("review/verdict: a newer success for another PR does not stand in for this PR's failure", "held",
      base(runs=[verdict_run("failure", 1, PR), verdict_run("success", 2, OTHER)], required=[VERDICT]))
 case("review/verdict: only another PR's success at this head: required check missing", "held",
      base(runs=[verdict_run("success", 2, OTHER)], required=[VERDICT]))
-case("review/verdict: two PRs at one head, each its own verdict: only the passing one merges", "merged",
-     with_(base(runs=[verdict_run("success", 1, PR), verdict_run("action_required", 2, OTHER)], required=[VERDICT]),
+case("review/verdict: two PRs at one head, the passing one's run is newest: only it merges", "merged",
+     with_(base(runs=[verdict_run("action_required", 1, OTHER), verdict_run("success", 2, PR)], required=[VERDICT]),
            **second()), env=multi(PR, OTHER), merged={PR})
 case("two PRs at one head, each with its own gate verdict: only the passing one merges", "merged",
-     with_(base(runs=[gate_run("success", 1, PR), gate_run("failure", 2, OTHER)], required=[GATE]), **second()),
+     with_(base(runs=[gate_run("failure", 1, OTHER), gate_run("success", 2, PR)], required=[GATE]), **second()),
      env=multi(PR, OTHER), merged={PR})
 
 # Every PR-check workflow name in the org (survey of all repos, 2026-10-01), plus

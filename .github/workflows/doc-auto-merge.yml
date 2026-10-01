@@ -52,7 +52,12 @@ name: Doc auto-merge
 # review-verdict.yml (`<repo>#<pr>:<base sha>:<head sha>:review-verdict`).
 # Two open PRs at one commit each get their own gate verdict and their own
 # review/verdict; the newest of them must not stand in for the other (Codex
-# P1 and P2 on aios-coffee#135).
+# P1 and P2 on aios-coffee#135). But external_id is opaque to GitHub: a
+# ruleset enforces the newest run of a required check on the commit,
+# whichever PR it belongs to. So a required check that passed for this PR
+# while the commit's newest run of it (another PR's) has not, is PENDING, not
+# green: no merge call GitHub would refuse, and the PR waits for a fresh run
+# of its own (Codex on .github#76).
 # Not counted: this job's own check, and the reviewer checks in
 # IGNORED_CHECKS (Greptile is a reviewer, not CI, and no review is required).
 # In a ruleset repo, `review/verdict` is required, and review-verdict.yml
@@ -509,6 +514,10 @@ jobs:
                 | $m != null and ($m.repo | ascii_downcase) == ($repo | ascii_downcase) and $m.n != $pr;
               ($ign | split(",") | map(sub("^\\s+"; "") | sub("\\s+$"; "")) | map(select(length > 0))) as $ignored
               | ($runs | map(select(other_pr | not)) | newest) as $all
+              # What GitHub itself enforces: the newest run per (app, name) on
+              # the commit, whichever PR it belongs to (external_id is opaque
+              # to rulesets; Codex on .github#76).
+              | ($runs | newest) as $enforced
               # Newest status per context, like check-runs: a retried context
               # must not stay red or pending on its older entry.
               | ($st | group_by(.context) | map(max_by([(.updated_at // ""), (.id // 0)]))) as $st
@@ -535,6 +544,15 @@ jobs:
                  + [$vercel[] | . as $c
                     | select([$st[] | select(.context == $c and .state == "success")] | length == 0)
                     | "\($c) (Vercel status not reported as success on this commit)"]) as $missing
+              # A required check that passed for THIS PR but whose newest run on
+              # the commit belongs to another PR and has not passed: GitHub would
+              # refuse the merge, so wait (never a red run, never a merge).
+              | ([$req[] | . as $r
+                  | $enforced[] | select(.name == $r.context
+                                         and ($r.app == null or $r.app == -1 or .app.id == $r.app)
+                                         and other_pr
+                                         and (.status != "completed" or (.conclusion | ok | not)))
+                  | "\(.name) (\(.conclusion // .status) for PR #\(.external_id | capture("#(?<n>[0-9]+):").n))"]) as $shadowed
               | ([$ci[] | select(.status == "completed"
                     and (.conclusion | IN("failure", "timed_out", "startup_failure", "stale", "cancelled")))
                   | "\(.name) (\(.conclusion))"]
@@ -544,6 +562,7 @@ jobs:
               | if ($red | length) > 0 then "red:" + ($red | join(", "))
                 elif ($running | length) > 0 then "pending:still running or waiting: " + ($running | unique | join(", "))
                 elif ($missing | length) > 0 then "pending:required check(s) not passed yet: " + ($missing | unique | join(", "))
+                elif ($shadowed | length) > 0 then "pending:GitHub enforces the newest run of a required check on this commit, and it belongs to another PR: " + ($shadowed | unique | join(", ")) + "; a fresh run for this PR (e.g. gh workflow run review-verdict.yml -f pr_number=" + $pr + " -f head_sha=<head>) clears it"
                 else "green" end' || echo "pending:could not evaluate the checks"
           }
 
