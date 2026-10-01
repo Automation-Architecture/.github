@@ -649,6 +649,16 @@ case("summary + 👍, DISMISSED Codex findings review on head (P2 only)", "fail"
      with_(summary(), **{R: [codex_review(HEAD, state="DISMISSED")], C: [finding(HEAD, body=badge(2))]}))
 case("summary + 👍, DISMISSED Codex skip-notice review on head", "success",
      with_(summary(), **{R: [codex_review(HEAD, state="DISMISSED", body=SKIP_NOTICE)]}), SUMMARY_EVIDENCE)
+# The review-object check is not redundant with the inline-comment check: a
+# Codex review whose comments sit on an earlier commit's thread (as a Codex
+# reply does: review commit_id = head, comment original_commit_id = old) has no
+# inline comment "on this head", so only the review check keeps it off the row.
+case("summary + 👍, Codex review on head whose comment is on an earlier commit", "success",
+     with_(summary(), **{R: [codex_review(HEAD, rid=12, body="")], C: [finding(OLD, rid=12, body=badge(3))]}),
+     "a Codex review of this head")
+case("summary + 👍, DISMISSED Codex review on head whose comment is on an earlier commit", "fail",
+     with_(summary(), **{R: [codex_review(HEAD, rid=12, state="DISMISSED", body="")],
+                         C: [finding(OLD, rid=12, body=badge(3))]}))
 case("summary + 👍, a skip notice on an earlier commit only", "success",
      with_(summary(), **{R: [codex_review(OLD, body=SKIP_NOTICE)]}), SUMMARY_EVIDENCE)
 case("summary + 👍, Codex reviews unreadable", "fail",
