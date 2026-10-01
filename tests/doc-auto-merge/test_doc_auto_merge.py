@@ -397,6 +397,21 @@ case("base branch commits unreadable: never merges", "held", with_(base(), **{"/
 case("base branch commit status unreadable: never merges", "held",
      with_(base(), **{f"/commits/{BASE_SHAS[1]}/status": "__error"}))
 case("base branch lists no commits: never merges", "held", with_(base(), **{"/commits": []}))
+case("retargeted while waiting onto a Vercel branch: Vercel re-read for the new base, not merged", "held",
+     with_(base(), **{f"/pulls/{PR}": {"__seq": [pr(), pr(base="dev")]},
+                      "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
+                      f"/commits/{BASE_SHAS[1]}/status": {"statuses": [V_OK]},
+                      "/rules/branches/dev": [], "/branches/dev": {"name": "dev", "protection": {"enabled": False}},
+                      f"/commits/{HEAD}/check-runs": {"__seq": [
+                          {"check_runs": [run_("unittest", status="in_progress")]}, {"check_runs": [run_("unittest")]}]}}),
+     env={"WAIT_SECONDS": "3", "POLL_SECONDS": "0"})
+case("retargeted while waiting away from a Vercel branch: no longer waits on Vercel, merges", "merged",
+     with_(base(base_statuses=V_BASE), **{f"/pulls/{PR}": {"__seq": [pr(), pr(base="dev")]},
+                      "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
+                      "/rules/branches/dev": [], "/branches/dev": {"name": "dev", "protection": {"enabled": False}},
+                      f"/commits/{HEAD}/check-runs": {"__seq": [
+                          {"check_runs": [run_("unittest", status="in_progress")]}, {"check_runs": [run_("unittest")]}]}}),
+     env={"WAIT_SECONDS": "5", "POLL_SECONDS": "0"})
 
 # --- The merge token: the org PAT or nothing (Codex P1 on aios-coffee#135) ----
 case("no AAA_ORG_TOKEN: a qualifying PR is a red run, never merged", "error", base(),
@@ -472,6 +487,8 @@ def main():
     for needle in ("github.event.check_run.head_sha", "github.event.sha"):
         assert needle in group, f"concurrency group must key on {needle}"
     step = job["steps"][0]
+    assert step["env"]["SETTLE_SECONDS"] == "${{ github.event_name == 'workflow_run' && '0' || '60' }}", \
+        "only workflow_run skips the settle; a check_run or status proves one check only (Codex on .github#68)"
     assert step["env"]["MERGE_TOKEN"] == "${{ secrets.AAA_ORG_TOKEN }}", \
         "MERGE_TOKEN must be the org PAT with no GITHUB_TOKEN fallback (Codex P1 on aios-coffee#135)"
     verdict = (ROOT / ".github/workflows/review-verdict.yml").read_text()

@@ -220,10 +220,12 @@ jobs:
           MAX_FILES: "300"
           # A Vercel commit-status context: "Vercel" or "Vercel – <project>".
           VERCEL_CONTEXT_PATTERN: '^Vercel( |\z)'
-          # workflow_run, check_run and status need no settle: what they report
-          # has just finished. auto_merge_enabled disarms (if it must) before
+          # workflow_run needs no settle: its commit's CI has just finished. A
+          # check_run or status proves only that ONE check finished, possibly
+          # before slower CI registered, so it settles like a PR event (Codex
+          # on .github#68). auto_merge_enabled disarms (if it must) before
           # any settle.
-          SETTLE_SECONDS: ${{ (github.event_name == 'workflow_run' || github.event_name == 'check_run' || github.event_name == 'status') && '0' || '60' }}
+          SETTLE_SECONDS: ${{ github.event_name == 'workflow_run' && '0' || '60' }}
           WAIT_SECONDS: "1200"
           POLL_SECONDS: "20"
         run: |
@@ -244,8 +246,10 @@ jobs:
           HEAD_HINT="${HEAD_HINT:-}"
           PRS_JSON="${PRS_JSON:-}"
           LOOKUP_PRS="${LOOKUP_PRS:-}"
-          # JSON list of the Vercel contexts the head must carry; empty until read.
+          # JSON list of the Vercel contexts the head must carry, and the base
+          # branch it was read for; empty until read. A retarget re-reads it.
           VERCEL_REQUIRED=""
+          VERCEL_FOR=""
           PR_CUR=""
 
           say() { echo "doc-auto-merge #${PR_NUMBER}: $*"; }
@@ -352,10 +356,12 @@ jobs:
 
           # Sets VERCEL_REQUIRED to the Vercel status contexts found on the last
           # 3 commits of the base branch (a JSON list; [] when the repo does not
-          # deploy with Vercel). Returns non-zero, leaving it empty, when any
-          # read fails: the caller then treats CI as pending, never green.
+          # deploy with Vercel) and VERCEL_FOR to BASE_REF. Returns non-zero,
+          # leaving both empty, when any read fails: CI then reads as pending,
+          # never green.
           vercel_required() {
             local base_enc shas sha st found="[]"
+            VERCEL_REQUIRED=""; VERCEL_FOR=""
             base_enc=$(jq -rn --arg b "$BASE_REF" '$b | @uri')
             if ! shas=$(gh api "/repos/$REPO/commits?sha=$base_enc&per_page=3" --jq '.[].sha'); then
               return 1
@@ -370,6 +376,7 @@ jobs:
                 $f + [$st[] | .context | select(type == "string" and test($pat))] | unique') || return 1
             done
             VERCEL_REQUIRED="$found"
+            VERCEL_FOR="$BASE_REF"
           }
 
           # Prints green, pending:<why> or red:<why> for HEAD. Never exits the
@@ -412,7 +419,7 @@ jobs:
             if ! branch=$(gh api "/repos/$REPO/branches/$base_enc"); then
               echo "pending:could not read branch ${BASE_REF}"; return 0
             fi
-            if [ -z "$VERCEL_REQUIRED" ]; then
+            if [ -z "$VERCEL_REQUIRED" ] || [ "$VERCEL_FOR" != "$BASE_REF" ]; then
               echo "pending:could not read the base branch's Vercel statuses"; return 0
             fi
             jq -rn --argjson runs "$runs" --argjson st "$statuses" --argjson rules "$rules" \
@@ -479,9 +486,9 @@ jobs:
             fi
             deadline=$((SECONDS + WAIT_SECONDS))
             while true; do
-              # Read once per evaluation (retried until it reads): whether the
-              # repo deploys with Vercel does not change while CI runs.
-              [ -n "$VERCEL_REQUIRED" ] || vercel_required || true
+              # Read once per evaluation and base branch (retried until it
+              # reads): a retarget while waiting re-reads it (Codex on .github#68).
+              { [ -n "$VERCEL_REQUIRED" ] && [ "$VERCEL_FOR" = "$BASE_REF" ]; } || vercel_required || true
               state=$(checks_state)
               case "$state" in
                 green) break ;;
@@ -505,7 +512,7 @@ jobs:
             if [ "$BASE_REF" != "$locked_base" ]; then
               done_ "base moved while checking; the run for the new state decides."
             fi
-            [ -n "$VERCEL_REQUIRED" ] || vercel_required || true
+            { [ -n "$VERCEL_REQUIRED" ] && [ "$VERCEL_FOR" = "$BASE_REF" ]; } || vercel_required || true
             state=$(checks_state)
             if [ "$state" != "green" ]; then
               refuse "CI changed in the final snapshot (${state#*:}); not merging. A later CI completion re-evaluates"
