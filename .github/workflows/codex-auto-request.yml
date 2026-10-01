@@ -257,12 +257,14 @@ jobs:
                 | ((.status | capture("datetime=\"(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})") | .t + "Z") // "") as $t
                 | select($cut == "" or $t > $cut)
                 | .status' <<<"$comments")
-            if [ -n "$rows" ]; then
-              if grep -q 'Completed' <<<"$rows"; then
+            # A Failed row wins: review-verdict.yml accepts a summary only when EVERY
+            # row for the head is Completed, so a mixed table is retried (Codex P1
+            # on .github#71). Otherwise all Completed is done, anything else running.
+            if [ -n "$rows" ] && ! grep -q 'Failed' <<<"$rows"; then
+              if ! grep -qv 'Completed' <<<"$rows"; then
                 decide false "Codex's review of ${HEAD:0:7} is Completed."
-              fi
-              if grep -qv 'Failed' <<<"$rows"; then
-                decide false "Codex's review of ${HEAD:0:7} is in progress ($(grep -v Failed <<<"$rows" | head -1 | grep -oE '\*\*[A-Za-z ]+\*\*' | tr -d '*' || true))."
+              else
+                decide false "Codex's review of ${HEAD:0:7} is in progress ($(grep -v Completed <<<"$rows" | head -1 | grep -oE '\*\*[A-Za-z ]+\*\*' | tr -d '*' || true))."
               fi
             fi
 

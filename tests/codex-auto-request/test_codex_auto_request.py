@@ -179,8 +179,13 @@ case("Codex Completed on this head: skips", "skip", base(comments=[summary(("Com
 case("Codex Running on this head: skips", "skip", base(comments=[summary(("Running", HEAD))]))
 case("Codex row in an unknown (queued) status on this head: skips", "skip",
      base(comments=[summary(("⏳ **Queued**", HEAD))]))
-case("Codex Completed + a Failed security row on this head: skips", "skip",
+case("Codex Completed + a Failed row on this head: requests (the gate needs every row Completed)", "request",
      base(comments=[summary(("Completed", HEAD), ("Failed", HEAD))]))
+case("Codex Completed + a Running row on this head: skips (still in progress)", "skip",
+     base(comments=[summary(("Completed", HEAD), ("Running", HEAD))]))
+case("Codex Completed + a Failed row, already requested once: skips", "skip",
+     base(comments=[summary(("Completed", HEAD), ("Failed", HEAD)),
+                    comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->", at="2026-10-01T10:03:00Z")]))
 case("only the LATEST summary comment is read (older one Completed on head is stale)", "request",
      base(comments=[summary(("Completed", HEAD)), summary(("Failed", HEAD))]))
 case("Codex review object on this head: skips", "skip",

@@ -7,12 +7,16 @@ on:
     paths:
       - .github/workflows/codex-auto-request.yml
       - .github/workflows/codex-auto-request-tests.yml
+      # The suite asserts REVIEW_SKIP_PATTERN equals review-verdict.yml's.
+      - .github/workflows/review-verdict.yml
       - tests/codex-auto-request/**
   push:
     branches: [main]
     paths:
       - .github/workflows/codex-auto-request.yml
       - .github/workflows/codex-auto-request-tests.yml
+      # The suite asserts REVIEW_SKIP_PATTERN equals review-verdict.yml's.
+      - .github/workflows/review-verdict.yml
       - tests/codex-auto-request/**
 
 permissions:
