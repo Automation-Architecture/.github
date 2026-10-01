@@ -463,6 +463,37 @@ case("check_run completed naming the PR: merges (same path as workflow_run)", "m
      with_(base(runs=[run_("agency-delivery/gate", slug="agency-delivery-gate", app_id=4242)]),
            **second(files=("app.py",))), env=multi(PR, OTHER), merged={PR})
 
+# --- A PR-bound check counts only for its PR (Codex P1 on aios-coffee#135) ----
+# The gate's check-run external_id is its candidate key, <repo>#<pr>:<base>:<head>:<rev>.
+# Two open PRs at one head commit each get their own; the newest must not stand in for the other.
+GATE = ("agency-delivery/gate", 5021608)
+
+
+def gate_run(conclusion, rid, pr_number, repo=REPO):
+    r = run_(GATE[0], conclusion, slug="agency-delivery-gate", rid=rid, app_id=GATE[1])
+    r["external_id"] = f"{repo}#{pr_number}:{'b' * 40}:{HEAD}:v2.8"
+    return r
+
+
+case("gate: this PR's verdict failed, a newer success belongs to another PR at the same head: not merged", "held",
+     base(runs=[gate_run("failure", 1, PR), gate_run("success", 2, OTHER)], required=[GATE]))
+case("gate: only another PR's success at the same head: required check missing, not merged", "held",
+     base(runs=[gate_run("success", 2, OTHER)], required=[GATE]))
+case("gate: this PR's success, a newer failure belongs to another PR: merges", "merged",
+     base(runs=[gate_run("success", 1, PR), gate_run("failure", 2, OTHER)], required=[GATE]))
+case("gate: this PR's own success: merges", "merged",
+     base(runs=[gate_run("success", 1, PR)], required=[GATE]))
+case("gate: repository name compared case-insensitively", "held",
+     base(runs=[gate_run("failure", 1, PR), gate_run("success", 2, OTHER, repo=REPO.upper())], required=[GATE]))
+case("external_id naming a PR of another repository still counts as a CI result here", "merged",
+     base(runs=[gate_run("success", 2, OTHER, repo="mallory/widget")], required=[GATE]))
+case("check-run with a free-form external_id still counts", "merged",
+     base(runs=[{**run_(GATE[0], slug="agency-delivery-gate", app_id=GATE[1]), "external_id": "build-42"}],
+          required=[GATE]))
+case("two PRs at one head, each with its own gate verdict: only the passing one merges", "merged",
+     with_(base(runs=[gate_run("success", 1, PR), gate_run("failure", 2, OTHER)], required=[GATE]), **second()),
+     env=multi(PR, OTHER), merged={PR})
+
 # Every PR-check workflow name in the org (survey of all repos, 2026-10-01), plus
 # this repo's own test workflows and the canonical Codex auto-request (wave-2 P2s:
 # heygen-video-automation#18, kh-coach#4, hackathon-mark-social#12 and others). The trigger list must equal this set exactly,
