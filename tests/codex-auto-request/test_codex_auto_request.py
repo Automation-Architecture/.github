@@ -224,6 +224,10 @@ case("a type-Bot account without a [bot] suffix does not count: nudges", "nudge"
      base(comments=[comment("renovate", "@codex review", at="2026-10-01T10:05:00Z", type_="Bot")]), env=SYNC)
 case("a [bot] login typed User by the API still does not count: nudges", "nudge",
      base(comments=[comment("claude[bot]", "@codex review", at="2026-10-01T10:05:00Z", type_="User")]), env=SYNC)
+case("a comment and a review by a deleted user (user: null) do not break the run (P2 #72): nudges", "nudge",
+     base(comments=[{"user": None, "created_at": "2026-10-01T10:05:00Z", "body": "LGTM"}],
+          reviews=[{"user": None, "commit_id": HEAD, "submitted_at": "2026-10-01T10:04:00Z", "state": "COMMENTED"}]),
+     env=SYNC)
 case("a bot's request AND a person's request after the push: skips", "skip",
      base(comments=[comment("claude[bot]", "@codex review", at="2026-10-01T10:04:00Z"),
                     comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z")]), env=SYNC)

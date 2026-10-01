@@ -168,9 +168,9 @@ jobs:
           if [ "${AFTER_EVENT:-false}" = true ]; then rows_since="$since"; fi
 
           comments=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" \
-            --jq '.[] | {user: .user.login, type: (.user.type // ""), at: .created_at, body: (.body // "")}' | jq -s .)
+            --jq '.[] | {user: (.user.login // ""), type: (.user.type // ""), at: .created_at, body: (.body // "")}' | jq -s .)
           reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
-            --jq '.[] | {user: .user.login, commit: .commit_id, at: (.submitted_at // "")}' | jq -s .)
+            --jq '.[] | {user: (.user.login // ""), commit: .commit_id, at: (.submitted_at // "")}' | jq -s .)
 
           # (b) a Codex review object on the head (an undated, pending one counts).
           n=$(jq --arg bot "$CODEX_BOT" --arg head "$EVENT_HEAD" --arg since "$rows_since" \
