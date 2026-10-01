@@ -55,13 +55,16 @@ name: Doc auto-merge
 # filter; a code PR is refused, and any armed auto-merge disarmed, before the
 # settle, within seconds). A qualifying PR then waits SETTLE_SECONDS for CI to
 # register its checks, and re-reads them every POLL_SECONDS up to
-# WAIT_SECONDS. These re-evaluate EVERY open PR at the commit they are about,
-# each independently and in parallel, with no settle:
+# WAIT_SECONDS. EVERY event settles, whatever started the run: a completion
+# proves only that ONE workflow or check finished, possibly before slower CI
+# registered on the commit (Codex on .github#68; .github#69 item 1). These
+# re-evaluate EVERY open PR at the commit they are about, each independently
+# and in parallel:
 #   - workflow_run: a PR-check workflow completing. GitHub matches workflow
 #     NAMES exactly (no wildcard is documented), and Actions check-runs fire
-#     no check_run event, so the list is every PR-triggered workflow name in
-#     the org (survey 2026-10-01, below). A repo adding a check workflow
-#     under a new name adds it here;
+#     no check_run event, so the list is a STATIC list of every PR-triggered
+#     workflow name in the org (survey 2026-10-01, below; see "Keeping the
+#     workflow_run list current");
 #   - check_run completed (successfully) by any app other than Actions:
 #     agency-delivery/gate, Vercel Preview Comments and the like;
 #   - status success: an external commit status such as Vercel recovering
@@ -74,6 +77,25 @@ name: Doc auto-merge
 # CI that outlasts WAIT_SECONDS and reports through none of those leaves the
 # PR open with a warning; `gh workflow run doc-auto-merge.yml -R <repo> -f
 # pr_number=<n>` finishes it.
+#
+# ── Keeping the workflow_run list current (static by design) ──────────────
+# The list is deliberately static: GitHub has no wildcard, and a list built
+# at run time cannot be expressed in `on:`. A name missing from it is not
+# unsafe (the PR is still evaluated on its own PR events and on every
+# check_run/status; only the re-trigger on that workflow's completion is
+# lost, so a doc PR whose slowest check is that workflow waits for the
+# WAIT_SECONDS poll or a manual dispatch). A name with no workflow behind it
+# is harmless. When a repo adds a workflow that runs on pull_request or
+# pull_request_target under a NEW `name:`, add the exact name here and to
+# ORG_CHECK_WORKFLOWS in tests/doc-auto-merge/test_doc_auto_merge.py, then
+# re-sync. To re-survey, list every repo's .github/workflows/*.yml whose
+# `on:` holds pull_request or pull_request_target and collect their `name:`
+# values (exclude this file and post-merge jobs gated on `closed`).
+#
+# Vercel "Ignored Build Step" (.github#69 item 2, unverified): if a repo's
+# Vercel project skips a preview build and posts NO status on the head, a doc
+# PR in a repo whose base branch carries a Vercel status waits as pending and
+# is left open with a warning; dispatch as above once confirmed.
 #
 # ── The merge ──────────────────────────────────────────────────────────────
 # Immediately before merging, the PR is read once more (state, draft, hold
@@ -124,6 +146,7 @@ on:
       - "quality"
       - "Review verdict"
       - "Review verdict evidence tests"
+      - "Doc auto-merge tests"
       - "Python unit tests"
       - "Test archive"
       - "Validate"
@@ -220,12 +243,11 @@ jobs:
           MAX_FILES: "300"
           # A Vercel commit-status context: "Vercel" or "Vercel – <project>".
           VERCEL_CONTEXT_PATTERN: '^Vercel( |\z)'
-          # workflow_run needs no settle: its commit's CI has just finished. A
-          # check_run or status proves only that ONE check finished, possibly
-          # before slower CI registered, so it settles like a PR event (Codex
-          # on .github#68). auto_merge_enabled disarms (if it must) before
-          # any settle.
-          SETTLE_SECONDS: ${{ github.event_name == 'workflow_run' && '0' || '60' }}
+          # Every event settles. A workflow_run, check_run or status proves
+          # only that ONE workflow or check finished, possibly before slower
+          # CI registered (Codex on .github#68; .github#69 item 1).
+          # auto_merge_enabled disarms (if it must) before any settle.
+          SETTLE_SECONDS: "60"
           WAIT_SECONDS: "1200"
           POLL_SECONDS: "20"
         run: |

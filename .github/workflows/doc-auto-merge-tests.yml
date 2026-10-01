@@ -1,0 +1,33 @@
+name: Doc auto-merge tests
+
+# Runs the offline suite for doc-auto-merge.yml (.github#69 item 4). It runs
+# the PR's own copy of the workflow script against a stub `gh`: no token, no
+# network calls to GitHub's API, read-only permissions.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/doc-auto-merge.yml
+      - .github/workflows/doc-auto-merge-tests.yml
+      - .github/workflows/review-verdict.yml
+      - tests/doc-auto-merge/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/doc-auto-merge.yml
+      - .github/workflows/doc-auto-merge-tests.yml
+      - .github/workflows/review-verdict.yml
+      - tests/doc-auto-merge/**
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: uv run --python 3.12 --with 'PyYAML>=6,<7' python tests/doc-auto-merge/test_doc_auto_merge.py

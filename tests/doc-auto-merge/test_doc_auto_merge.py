@@ -319,6 +319,13 @@ case("CI run: a PR based in another repository is not evaluated", "held",
      merged=set())
 case("CI run naming no PR at its head: nothing to do", "held", base(), env={**multi(), "PRS_JSON": "[]"})
 
+# --- every event settles, workflow_run included (.github#69 item 1) ----------
+case("CI completion settles, re-qualifies and merges", "merged",
+     with_(base(), **second()), env={**multi(PR, OTHER), "SETTLE_SECONDS": "1"}, merged={PR, OTHER})
+case("CI completion: the PR turns draft during the settle: not merged", "held",
+     with_(base(), **{f"/pulls/{PR}": {"__seq": [pr(), pr(draft=True)]}}),
+     env={**multi(PR), "SETTLE_SECONDS": "1"}, merged=set())
+
 # --- auto_merge_enabled: a refused PR is disarmed at once (Brad, 2026-09-29) --
 case("auto-merge armed on a held doc PR: disarmed, not merged", "held",
      with_(base(), **{f"/pulls/{PR}": pr(labels=("no-auto-merge",), armed=True),
@@ -487,8 +494,8 @@ def main():
     for needle in ("github.event.check_run.head_sha", "github.event.sha"):
         assert needle in group, f"concurrency group must key on {needle}"
     step = job["steps"][0]
-    assert step["env"]["SETTLE_SECONDS"] == "${{ github.event_name == 'workflow_run' && '0' || '60' }}", \
-        "only workflow_run skips the settle; a check_run or status proves one check only (Codex on .github#68)"
+    assert str(step["env"]["SETTLE_SECONDS"]) == "60", \
+        "every event settles, workflow_run included: one completion proves one workflow only (.github#69 item 1)"
     assert step["env"]["MERGE_TOKEN"] == "${{ secrets.AAA_ORG_TOKEN }}", \
         "MERGE_TOKEN must be the org PAT with no GITHUB_TOKEN fallback (Codex P1 on aios-coffee#135)"
     verdict = (ROOT / ".github/workflows/review-verdict.yml").read_text()
