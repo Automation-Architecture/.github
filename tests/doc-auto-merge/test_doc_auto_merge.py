@@ -24,6 +24,8 @@ REPO = "acme/widget"
 PR = 7
 HEAD = "034be02bb328773fbe762ec8c93c14a1bedde66b"
 NEW_HEAD = "1" * 40
+# The last 3 commits of the base branch, newest first (Vercel detection).
+BASE_SHAS = ["a" * 40, "c" * 40, "d" * 40]
 
 # Stub gh. A fixture value {"__seq": [a, b, ...]} is served one entry per call
 # (the last repeats); with no wait the script reads the PR once to qualify
@@ -115,11 +117,15 @@ def actions_run(run, path):
     return {f"/actions/runs/{run}": {"id": run, "path": path}}
 
 
-def base(files=("README.md",), runs=(), statuses=(), required=(), classic=None, **prkw):
+def base(files=("README.md",), runs=(), statuses=(), required=(), classic=None, base_statuses=None, **prkw):
+    """base_statuses: one list of commit statuses per base-branch commit (newest first)."""
     entries = [{"filename": f[0], "previous_filename": f[1]} if isinstance(f, tuple) else {"filename": f}
                for f in files]
     prkw.setdefault("files", len(entries))
+    base_statuses = base_statuses or [[], [], []]
     return {
+        "/commits": [{"sha": s} for s in BASE_SHAS[:len(base_statuses)]],
+        **{f"/commits/{s}/status": {"statuses": list(st)} for s, st in zip(BASE_SHAS, base_statuses)},
         f"/pulls/{PR}": pr(**prkw),
         f"/pulls/{PR}@merged": pr(merged=True, state="closed"),
         f"/pulls/{PR}/files": entries,
@@ -352,6 +358,110 @@ case("merge call succeeds but PR not merged: red run", "error",
      {k: v for k, v in base().items() if not k.endswith("@merged")} | {f"/pulls/{PR}": {"__seq": [pr(), pr(), pr(), pr()]}})
 
 
+# --- Vercel: required where the base branch shows the repo deploys with it ----
+# (Codex on aaa-productization-outreach#14; org survey 2026-10-01)
+V_OK = {"context": "Vercel", "state": "success"}
+V_BASE = [[V_OK], [], []]
+case("Vercel on the base branch, absent on the head: not merged", "held", base(base_statuses=V_BASE))
+case("Vercel on the base branch, successful on the head: merges", "merged",
+     base(base_statuses=V_BASE, statuses=[V_OK]))
+case("Vercel only on an older base commit (tip just merged): still required", "held",
+     base(base_statuses=[[], [], [V_OK]]))
+case("Vercel pending on the base tip still marks the repo as a Vercel repo", "held",
+     base(base_statuses=[[{"context": "Vercel", "state": "pending"}], [], []]))
+case("Vercel failed on the head: not merged", "held",
+     base(base_statuses=V_BASE, statuses=[{"context": "Vercel", "state": "failure"}]))
+case("Vercel pending on the head: not merged", "held",
+     base(base_statuses=V_BASE, statuses=[{"context": "Vercel", "state": "pending"}]))
+case("Vercel failed then redeployed green on the head (newest wins): merges", "merged",
+     base(base_statuses=V_BASE, statuses=[
+         {"id": 1, "context": "Vercel", "state": "failure", "updated_at": "2026-10-01T10:00:00Z"},
+         {"id": 2, "context": "Vercel", "state": "success", "updated_at": "2026-10-01T10:05:00Z"}]))
+case("Vercel absent on the head, then reported while waiting: merges", "merged",
+     with_(base(base_statuses=V_BASE), **{f"/commits/{HEAD}/status": {"__seq": [
+         {"statuses": []}, {"statuses": [V_OK]}]}}),
+     env={"WAIT_SECONDS": "5", "POLL_SECONDS": "0"})
+case("dormant Vercel project (no Vercel status on the base branch): not waited on", "merged", base())
+case("two Vercel projects on the base, one reported on the head: not merged", "held",
+     base(base_statuses=[[{"context": "Vercel – web", "state": "success"},
+                          {"context": "Vercel – docs", "state": "success"}], [], []],
+          statuses=[{"context": "Vercel – web", "state": "success"}]))
+case("two Vercel projects on the base, both successful on the head: merges", "merged",
+     base(base_statuses=[[{"context": "Vercel – web", "state": "success"}],
+                         [{"context": "Vercel – docs", "state": "success"}], []],
+          statuses=[{"context": "Vercel – web", "state": "success"},
+                    {"context": "Vercel – docs", "state": "success"}]))
+case("a context that only starts with the letters Vercel is not Vercel", "merged",
+     base(base_statuses=[[{"context": "VercelBot/lint", "state": "success"}], [], []]))
+case("base branch commits unreadable: never merges", "held", with_(base(), **{"/commits": "__error"}))
+case("base branch commit status unreadable: never merges", "held",
+     with_(base(), **{f"/commits/{BASE_SHAS[1]}/status": "__error"}))
+case("base branch lists no commits: never merges", "held", with_(base(), **{"/commits": []}))
+case("retargeted while waiting onto a Vercel branch: Vercel re-read for the new base, not merged", "held",
+     with_(base(), **{f"/pulls/{PR}": {"__seq": [pr(), pr(base="dev")]},
+                      "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
+                      f"/commits/{BASE_SHAS[1]}/status": {"statuses": [V_OK]},
+                      "/rules/branches/dev": [], "/branches/dev": {"name": "dev", "protection": {"enabled": False}},
+                      f"/commits/{HEAD}/check-runs": {"__seq": [
+                          {"check_runs": [run_("unittest", status="in_progress")]}, {"check_runs": [run_("unittest")]}]}}),
+     env={"WAIT_SECONDS": "3", "POLL_SECONDS": "0"})
+case("retargeted while waiting away from a Vercel branch: no longer waits on Vercel, merges", "merged",
+     with_(base(base_statuses=V_BASE), **{f"/pulls/{PR}": {"__seq": [pr(), pr(base="dev")]},
+                      "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
+                      "/rules/branches/dev": [], "/branches/dev": {"name": "dev", "protection": {"enabled": False}},
+                      f"/commits/{HEAD}/check-runs": {"__seq": [
+                          {"check_runs": [run_("unittest", status="in_progress")]}, {"check_runs": [run_("unittest")]}]}}),
+     env={"WAIT_SECONDS": "5", "POLL_SECONDS": "0"})
+
+# --- The merge token: the org PAT or nothing (Codex P1 on aios-coffee#135) ----
+case("no AAA_ORG_TOKEN: a qualifying PR is a red run, never merged", "error", base(),
+     env={"MERGE_TOKEN": ""})
+case("merge token is GITHUB_TOKEN itself: red run, never merged", "error", base(),
+     env={"MERGE_TOKEN": "read-token"})
+case("no AAA_ORG_TOKEN on a code PR: refused quietly, not red", "held", base(files=("app.py",)),
+     env={"MERGE_TOKEN": ""})
+case("no AAA_ORG_TOKEN, held PR with auto-merge armed: still disarmed", "held",
+     with_(base(), **{f"/pulls/{PR}": pr(labels=("no-auto-merge",), armed=True),
+                      f"/pulls/{PR}@disarmed": pr(labels=("no-auto-merge",))}),
+     env={"MERGE_TOKEN": ""}, disarmed={PR})
+
+# --- File limit: the same as review-verdict's documentation exemption ---------
+case("299 Markdown files: merges", "merged", base(files=tuple(f"docs/{i}.md" for i in range(299))))
+case("300 Markdown files (review-verdict's limit): not merged", "held",
+     base(files=tuple(f"docs/{i}.md" for i in range(300))))
+
+# --- status event: the open PRs at the commit are looked up -------------------
+def at_commit(*prs):
+    return {f"/commits/{HEAD}/pulls": [
+        {"number": n, "state": st, "head": {"sha": h}, "base": {"repo": {"full_name": r}}} for n, st, h, r in prs]}
+
+
+STATUS_ENV = {"LOOKUP_PRS": "true", "PR_NUMBER": "", "HEAD_HINT": HEAD}
+case("status success: the open PR at that commit merges", "merged",
+     with_(base(), **at_commit((PR, "open", HEAD, REPO))), env=STATUS_ENV, merged={PR})
+case("status success: two open PRs at that commit both merge", "merged",
+     with_(base(), **second(), **at_commit((PR, "open", HEAD, REPO), (OTHER, "open", HEAD, REPO))),
+     env=STATUS_ENV, merged={PR, OTHER})
+case("status success: a closed PR, a PR at another head, a PR into another repo are skipped", "held",
+     with_(base(), **at_commit((PR, "closed", HEAD, REPO), (OTHER, "open", NEW_HEAD, REPO),
+                               (9, "open", HEAD, "mallory/widget"))), env=STATUS_ENV, merged=set())
+case("status success on a commit no PR has: nothing to do", "held",
+     with_(base(), **at_commit()), env=STATUS_ENV, merged=set())
+case("status success: PR lookup unreadable is a red run", "error",
+     with_(base(), **{f"/commits/{HEAD}/pulls": "__error"}), env=STATUS_ENV, merged=set())
+case("status event with no commit: red run", "error", base(), env={**STATUS_ENV, "HEAD_HINT": ""}, merged=set())
+
+# --- check_run: another app's check (the delivery gate) re-evaluates ----------
+case("check_run completed naming the PR: merges (same path as workflow_run)", "merged",
+     with_(base(runs=[run_("agency-delivery/gate", slug="agency-delivery-gate", app_id=4242)]),
+           **second(files=("app.py",))), env=multi(PR, OTHER), merged={PR})
+
+# Every PR-check workflow name in the org (survey of all repos, 2026-10-01).
+ORG_CHECK_WORKFLOWS = {"CI", "PR Autopilot", "quality", "Review verdict", "Python unit tests", "Test archive",
+                       "Validate", "schema-lint", "E2E Tests", "PR gate", "PR Quality Gates", "PR-Blocking Rules",
+                       "Migration check (PR)", "DB Migrations"}
+
+
 def main():
     wf = yaml.safe_load(WORKFLOW.read_text())
     group = wf["concurrency"]["group"]
@@ -364,7 +474,26 @@ def main():
     assert "converted_to_draft" in on["pull_request_target"]["types"], "converted_to_draft must trigger (disarm)"
     assert "paths" not in on["pull_request_target"], "code PRs (no Markdown) must be seen when auto-merge is armed"
     assert "pull_request" not in on, "never run the PR's own copy of this workflow (org PAT in reach; Codex on #60)"
-    step = wf["jobs"]["doc-auto-merge"]["steps"][0]
+    names = set(on["workflow_run"]["workflows"])
+    assert ORG_CHECK_WORKFLOWS <= names, f"workflow_run misses {ORG_CHECK_WORKFLOWS - names}"
+    assert wf["name"] not in names, "this workflow must not re-trigger itself"
+    assert not any(c in n for n in names for c in "*?["), "workflow_run matches names exactly; no patterns"
+    assert on["check_run"]["types"] == ["completed"], "a check from another app completing must re-evaluate"
+    assert "status" in on, "an external status (Vercel) recovering must re-evaluate"
+    job = wf["jobs"]["doc-auto-merge"]
+    for needle in ("github.event.check_run.app.slug != 'github-actions'", "github.event.state == 'success'",
+                   "github.event.check_run.pull_requests[0] != null"):
+        assert needle in job["if"], f"job condition must include {needle}"
+    for needle in ("github.event.check_run.head_sha", "github.event.sha"):
+        assert needle in group, f"concurrency group must key on {needle}"
+    step = job["steps"][0]
+    assert step["env"]["SETTLE_SECONDS"] == "${{ github.event_name == 'workflow_run' && '0' || '60' }}", \
+        "only workflow_run skips the settle; a check_run or status proves one check only (Codex on .github#68)"
+    assert step["env"]["MERGE_TOKEN"] == "${{ secrets.AAA_ORG_TOKEN }}", \
+        "MERGE_TOKEN must be the org PAT with no GITHUB_TOKEN fallback (Codex P1 on aios-coffee#135)"
+    verdict = (ROOT / ".github/workflows/review-verdict.yml").read_text()
+    assert f'"$changed" -ge {step["env"]["MAX_FILES"]} ]' in verdict, \
+        "MAX_FILES must equal review-verdict.yml's documentation file limit"
     static_env = {k: str(v) for k, v in step["env"].items() if "${{" not in str(v)}
     failures = 0
     with tempfile.TemporaryDirectory() as tmp:
