@@ -20,6 +20,7 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/codex-auto-request.yml"
+DOC_AUTO_MERGE = ROOT / ".github/workflows/doc-auto-merge.yml"
 
 REPO = "acme/widget"
 PR = 7
@@ -30,6 +31,7 @@ CODEX = "chatgpt-codex-connector[bot]"
 COMMITTED = "2026-10-01T09:58:00Z"   # head commit's committer date
 PUSHED = "2026-10-01T10:00:00Z"      # synchronize event time
 RETARGET = "2026-10-01T10:30:00Z"    # edited (base changed) event time
+READY = "2026-10-01T10:30:00Z"       # ready_for_review event time
 SUMMARY = "<!-- codex-pull-request-review-summary -->"
 
 # Stub gh: `gh api [-X M] [--paginate] [--jq Q] [-f k=v] <path>`. "__error" fails
@@ -74,18 +76,36 @@ sys.stdout.write(out.stdout); sys.stderr.write(out.stderr); sys.exit(out.returnc
 '''
 
 
-def pr(state="open", head=HEAD):
-    return {"number": PR, "state": state, "head": {"sha": head}}
+def pr(state="open", head=HEAD, draft=False, changed=None, files=("app.py",)):
+    return {"number": PR, "state": state, "head": {"sha": head}, "draft": draft,
+            "changed_files": len(files) if changed is None else changed}
 
 
-def comment(user, body, at="2026-10-01T10:01:00Z"):
-    return {"user": {"login": user}, "created_at": at, "body": body}
+def files_(*names, renamed=None):
+    out = [{"filename": n, "status": "modified"} for n in names]
+    for new, old in (renamed or {}).items():
+        out.append({"filename": new, "status": "renamed", "previous_filename": old})
+    return out
 
 
-def row(status, sha, at="2026-10-01T10:03:00"):
-    cells = {"Completed": f'✅ **Completed** <relative-time datetime="{at}.123Z">x</relative-time>',
-             "Running": f'🔄 **Running** since <relative-time datetime="{at}.5Z">x</relative-time>',
-             "Failed": f'⚠️ **Failed** <relative-time datetime="{at}Z">x</relative-time>',
+def seq(*vals):
+    """Successive calls to one endpoint return successive values (the last repeats)."""
+    return {"__seq": list(vals)}
+
+
+def comment(user, body, at="2026-10-01T10:01:00Z", type_=None):
+    login_type = type_ or ("Bot" if user.endswith("[bot]") else "User")
+    return {"user": {"login": user, "type": login_type}, "created_at": at, "body": body}
+
+
+def row(status, sha, at="2026-10-01T10:03:00", dt=None):
+    """dt overrides the whole datetime attribute value (None: the status's usual form)."""
+    stamp = {"Completed": f"{at}.123Z", "Running": f"{at}.5Z", "Failed": f"{at}Z"}.get(status)
+    if dt is not None:
+        stamp = dt
+    cells = {"Completed": f'✅ **Completed** <relative-time datetime="{stamp}">x</relative-time>',
+             "Running": f'🔄 **Running** since <relative-time datetime="{stamp}">x</relative-time>',
+             "Failed": f'⚠️ **Failed** <relative-time datetime="{stamp}">x</relative-time>',
              "Queued": "⏳ **Queued**"}
     return f"| 📝 **Code Review** | {cells[status]} | `{sha[:7]}` | PR opened |"
 
@@ -101,8 +121,11 @@ def review(commit=HEAD, at="2026-10-01T10:04:00Z", user=CODEX, state="COMMENTED"
     return {"user": {"login": user}, "commit_id": commit, "submitted_at": at, "state": state}
 
 
-def base(comments=(), reviews=(), **prkw):
+def base(comments=(), reviews=(), files=("app.py",), renamed=None, **prkw):
+    listed = files_(*files, renamed=renamed)
+    prkw.setdefault("changed", len(listed))
     return {f"/pulls/{PR}": pr(**prkw),
+            f"/pulls/{PR}/files": listed,
             f"/commits/{HEAD}": {"commit": {"committer": {"date": COMMITTED}}},
             f"/issues/{PR}/comments": list(comments),
             f"/pulls/{PR}/reviews": list(reviews)}
@@ -123,7 +146,8 @@ def case(name, expect, fx, env=None):
 
 
 SYNC = {"EVENT_AT": PUSHED}
-EDIT = {"EVENT_AT": RETARGET, "RETARGET": "true"}
+EDIT = {"EVENT_AT": RETARGET, "AFTER_EVENT": "true"}
+READY_ENV = {"EVENT_AT": READY, "AFTER_EVENT": "true"}
 
 # --- nudges -------------------------------------------------------------------
 case("opened, Codex has not touched the head: nudges", "nudge", base())
@@ -140,9 +164,34 @@ case("Codex's own footer text is not a request: nudges", "nudge",
      base(comments=[comment(CODEX, "Try again later by commenting \u201c@codex review\u201d.", at="2026-10-01T10:05:00Z")]))
 case("another account's review on the head: nudges", "nudge", base(reviews=[review(user="web3sea")]))
 
-# --- (a) the head moved / closed ------------------------------------------------
-case("head moved during the wait: skips", "skip", with_(base(), **{f"/pulls/{PR}": pr(head=NEW)}), env=SYNC)
-case("closed during the wait: skips", "skip", base(state="closed"))
+# --- (a) the head moved / closed / back to draft ----------------------------------
+case("head already moved before the wait: skips", "skip", with_(base(), **{f"/pulls/{PR}": pr(head=NEW)}), env=SYNC)
+case("head moved during the wait: skips", "skip",
+     with_(base(), **{f"/pulls/{PR}": seq(pr(), pr(head=NEW))}), env=SYNC)
+case("closed during the wait: skips", "skip", with_(base(), **{f"/pulls/{PR}": seq(pr(), pr(state="closed"))}))
+case("converted to draft during the wait: skips (wave-2 P2)", "skip",
+     with_(base(), **{f"/pulls/{PR}": seq(pr(), pr(draft=True))}), env=SYNC)
+case("already a draft again when the run starts: skips", "skip", base(draft=True))
+case("still open, same head, not a draft after the wait: nudges", "nudge",
+     with_(base(), **{f"/pulls/{PR}": seq(pr(), pr())}), env=SYNC)
+
+# --- Markdown-only PRs are skipped before the wait (doc-auto-merge's definition) ------
+case("Markdown-only PR: skips (the gate needs no Codex review)", "skip",
+     base(files=("README.md", "docs/guide.markdown", "AGENTS.md")))
+case("Markdown-only PR, even with nothing from Codex and no request: skips", "skip",
+     with_(base(files=("CLAUDE.md",)), **{f"/issues/{PR}/comments": "__error", f"/pulls/{PR}/reviews": "__error"}))
+case("Markdown rename from Markdown: skips", "skip", base(files=("a.md",), renamed={"b.md": "old/b.md"}))
+case("Markdown-only and also a draft-free retarget: skips", "skip", base(files=("README.md",)), env=EDIT)
+case(".mdx is code, not Markdown: nudges", "nudge", base(files=("README.md", "docs/page.mdx")))
+case("Markdown plus one code file: nudges", "nudge", base(files=("README.md", "app.py")))
+case("rename from a code file to .md: nudges", "nudge", base(files=("README.md",), renamed={"notes.md": "notes.py"}))
+case("upper-case .MD does not match (case-sensitive, like doc-auto-merge): nudges", "nudge",
+     base(files=("README.MD",)))
+case("300 or more changed files is beyond the doc bound: nudges", "nudge", base(files=("README.md",), changed=300))
+case("file list shorter than changed_files (truncated): nudges", "nudge", base(files=("README.md",), changed=2))
+case("changed_files missing: treated as code, nudges", "nudge",
+     with_(base(files=("README.md",)), **{f"/pulls/{PR}": {"number": PR, "state": "open", "head": {"sha": HEAD}, "draft": False}}))
+case("file list unreadable: red", "error", with_(base(files=("README.md",)), **{f"/pulls/{PR}/files": "__error"}))
 
 # --- (b) Codex already touched the head, ANY status -------------------------------
 for st in ("Completed", "Running", "Queued", "Failed"):
@@ -152,6 +201,10 @@ case("row for the head next to a row for an older head: skips", "skip",
 case("a row in an OLDER summary comment still counts: skips", "skip",
      base(comments=[summary(row("Completed", HEAD)), summary(row("Running", OLD))]))
 case("Codex review object on the head (any state): skips", "skip", base(reviews=[review(state="DISMISSED")]))
+case("a head row whose status has NO datetime counts (no retarget): skips", "skip",
+     base(comments=[summary(row("Queued", HEAD))]))
+case("a head row with an unparseable datetime still counts: skips", "skip",
+     base(comments=[summary(row("Completed", HEAD, dt="soon"))]), env=EDIT)
 case("pending Codex review on the head with no submitted_at: skips", "skip",
      base(reviews=[{"user": {"login": CODEX}, "commit_id": HEAD, "submitted_at": None, "state": "PENDING"}]))
 case("retarget, pending undated Codex review on the head: skips", "skip",
@@ -162,8 +215,18 @@ case("web3sea @codex review after the push: skips", "skip",
      base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:00:30Z")]), env=SYNC)
 case("our own earlier nudge for this head: skips (once per head)", "skip",
      base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:03:00Z")]), env=SYNC)
-case("a bot's @codex review after the push also counts (simple rule): skips", "skip",
-     base(comments=[comment("claude[bot]", "@codex review please", at="2026-10-01T10:05:00Z")]), env=SYNC)
+
+# --- (c) bots' requests never count: Codex refuses them (P1, aaa-profit-run-rate#15) ---
+for bot in ("claude[bot]", "github-actions[bot]", "aaa-dashboard-bot[bot]"):
+    case(f"{bot}'s @codex review after the push does NOT count: nudges", "nudge",
+         base(comments=[comment(bot, "@codex review please", at="2026-10-01T10:05:00Z")]), env=SYNC)
+case("a type-Bot account without a [bot] suffix does not count: nudges", "nudge",
+     base(comments=[comment("renovate", "@codex review", at="2026-10-01T10:05:00Z", type_="Bot")]), env=SYNC)
+case("a [bot] login typed User by the API still does not count: nudges", "nudge",
+     base(comments=[comment("claude[bot]", "@codex review", at="2026-10-01T10:05:00Z", type_="User")]), env=SYNC)
+case("a bot's request AND a person's request after the push: skips", "skip",
+     base(comments=[comment("claude[bot]", "@codex review", at="2026-10-01T10:04:00Z"),
+                    comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z")]), env=SYNC)
 case("@codex security review after the push: skips", "skip",
      base(comments=[comment("web3sea", "@codex security review", at="2026-10-01T10:05:00Z")]))
 case("request at exactly the push time counts: skips", "skip",
@@ -185,6 +248,29 @@ case("retarget, @codex review AFTER the retarget: skips", "skip",
 case("retarget, a head row with no time still counts: skips", "skip",
      base(comments=[summary(row("Queued", HEAD))]), env=EDIT)
 
+# --- summary-row times: Z, fractions, offsets, compared as instants (wave-2 P2s) -----
+for dt, when in (("2026-10-01T10:29:59Z", "before"), ("2026-10-01T10:29:59.999Z", "before"),
+                 ("2026-10-01T10:29:59", "before"), ("2026-10-01T12:29:00+02:00", "before"),
+                 ("2026-10-01T05:29:00-0500", "before"),
+                 ("2026-10-01T10:30:01Z", "after"), ("2026-10-01T10:30:00.5Z", "after"),
+                 ("2026-10-01T12:31:00+02:00", "after"), ("2026-10-01T06:31:00-04:00", "after")):
+    case(f"retarget, head row at {dt} ({when} the retarget): {'nudges' if when == 'before' else 'skips'}",
+         "nudge" if when == "before" else "skip",
+         base(comments=[summary(row("Completed", HEAD, dt=dt))]), env=EDIT)
+
+# --- draft -> ready: count only what came after the ready event (wave-2 P2s) --------
+case("ready, Codex reviewed the head before (while draft / before a draft retarget): nudges", "nudge",
+     base(comments=[summary(row("Completed", HEAD))], reviews=[review()]), env=READY_ENV)
+case("ready, a person's request made while draft (before ready): nudges", "nudge",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:20:00Z")]), env=READY_ENV)
+case("ready, Codex row after the ready event (Draft marked ready): skips", "skip",
+     base(comments=[summary(row("Running", HEAD, at="2026-10-01T10:30:40"))]), env=READY_ENV)
+case("ready, Codex review after the ready event: skips", "skip",
+     base(reviews=[review(at="2026-10-01T10:33:00Z")]), env=READY_ENV)
+case("ready, a person's request after the ready event: skips", "skip",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:31:00Z")]), env=READY_ENV)
+case("ready, nothing at all: nudges", "nudge", base(), env=READY_ENV)
+
 # --- errors (red run, never a nudge) -------------------------------------------------
 case("PR unreadable: red", "error", with_(base(), **{f"/pulls/{PR}": "__error"}))
 case("comments unreadable: red", "error", with_(base(), **{f"/issues/{PR}/comments": "__error"}))
@@ -193,7 +279,7 @@ case("head commit date unreadable: red", "error", with_(base(), **{f"/commits/{H
 case("non-numeric PR number: red", "error", base(), env={"PR_NUMBER": "7; id"})
 case("malformed head: red", "error", base(), env={"EVENT_HEAD": "$(id)"})
 case("malformed event time: red", "error", base(), env={"EVENT_AT": "yesterday"})
-case("retarget with no event time: red", "error", base(), env={"RETARGET": "true"})
+case("retarget or ready with no event time: red", "error", base(), env={"AFTER_EVENT": "true"})
 
 
 def check_shape(wf):
@@ -222,9 +308,25 @@ def check_shape(wf):
         for bad in ("pull_request.title", "pull_request.body", "head.ref", "github.event.comment"):
             assert bad not in json.dumps(s), f"never pass {bad}"
     assert wf["concurrency"]["cancel-in-progress"] is False, "a cancelled check reads as red to doc-auto-merge"
-    for needle in ("github.event.pull_request.number", "github.event.pull_request.head.sha"):
-        assert needle in wf["concurrency"]["group"]
+    group = wf["concurrency"]["group"]
+    for needle in ("github.event.pull_request.number", "github.event.pull_request.head.sha", "github.run_id",
+                   "'shared'", '["opened","synchronize","reopened"]', "github.event.pull_request.draft == false",
+                   "github.event.pull_request.head.repo.full_name == github.repository"):
+        assert needle in group, f"concurrency group must include {needle}"
+    assert "edited" not in group and "ready_for_review" not in group, \
+        "skipped edits, retargets and ready events get their own group (GitHub replaces a pending run)"
     assert 150 <= int(steps[0]["env"]["DELAY_SECONDS"]) <= 240, "about 3 minutes for Codex's own review"
+    env = steps[0]["env"]
+    for action in ("synchronize", "edited", "ready_for_review"):
+        assert f"github.event.action == '{action}'" in env["EVENT_AT"], f"EVENT_AT must be set for {action}"
+    for action in ("edited", "ready_for_review"):
+        assert f"github.event.action == '{action}'" in env["AFTER_EVENT"], f"AFTER_EVENT must be set for {action}"
+    for action in ("opened", "reopened", "synchronize"):
+        assert action not in env["AFTER_EVENT"], f"{action} must count evidence for the head whenever made"
+    # Same Markdown-only definition as doc-auto-merge.yml (keep the two in step).
+    dam_env = yaml.safe_load(DOC_AUTO_MERGE.read_text())["jobs"]["doc-auto-merge"]["steps"][0]["env"]
+    assert env["DOC_ONLY_PATTERN"] == dam_env["DOC_ONLY_PATTERN"], "doc-only pattern drifted from doc-auto-merge.yml"
+    assert env["MAX_DOC_FILES"] == dam_env["MAX_FILES"], "doc-only file bound drifted from doc-auto-merge.yml"
 
 
 def main():
@@ -248,7 +350,7 @@ def main():
             outf.write_text("")
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
                    **static_env, "REPO": REPO, "PR_NUMBER": str(PR), "EVENT_HEAD": HEAD, "EVENT_AT": "",
-                   "RETARGET": "false", "GH_TOKEN": "read-token", "DELAY_SECONDS": "0",
+                   "AFTER_EVENT": "false", "GH_TOKEN": "read-token", "DELAY_SECONDS": "0",
                    "GITHUB_OUTPUT": str(outf), "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state),
                    **env_over}
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True,

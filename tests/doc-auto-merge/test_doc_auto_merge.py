@@ -464,10 +464,11 @@ case("check_run completed naming the PR: merges (same path as workflow_run)", "m
            **second(files=("app.py",))), env=multi(PR, OTHER), merged={PR})
 
 # Every PR-check workflow name in the org (survey of all repos, 2026-10-01), plus
-# this repo's own test workflows. The trigger list must equal this set exactly,
+# this repo's own test workflows and the canonical Codex auto-request (wave-2 P2s:
+# heygen-video-automation#18, kh-coach#4, hackathon-mark-social#12 and others). The trigger list must equal this set exactly,
 # so a dropped or mistyped name fails here (Codex on .github#70).
 ORG_CHECK_WORKFLOWS = {"CI", "PR Autopilot", "quality", "Review verdict", "Review verdict evidence tests",
-                       "Doc auto-merge tests", "Python unit tests", "Test archive", "Validate", "schema-lint",
+                       "Doc auto-merge tests", "Codex auto-request", "Codex auto-request tests", "Python unit tests", "Test archive", "Validate", "schema-lint",
                        "E2E Tests", "DB Migrations", "Demo script", "Migration check (PR)", "PR Quality Gates",
                        "PR gate", "PR-Blocking Rules", "Accessibility — axe-core audit (LKID-94)",
                        "Visual regression — eGFR chart (LKID-81)"}
