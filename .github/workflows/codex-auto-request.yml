@@ -263,6 +263,14 @@ jobs:
                 | ((.status | capture("datetime=\"(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})") | .t + "Z") // "") as $t
                 | select($cut == "" or $t > $cut)
                 | .status + "\t" + $t' <<<"$comments")
+            # Rows naming any OTHER commit: review-verdict.yml requires every row of
+            # the table to name this head, so such a table is never final (Codex P1
+            # on .github#71).
+            other_rows=$(jq -r --arg bot "$CODEX_BOT" --arg head "$HEAD" '
+                [.[] | select(.user == $bot and (.body | startswith("<!-- codex-pull-request-review-summary -->")))]
+                | last // {body: ""} | .body | split("\n")[]
+                | capture("\\A\\|[^|]+\\|\\s*(?<status>[^|]*?)\\s*\\|\\s*`(?<sha>[0-9a-f]{7,40})`\\s*\\|") // empty
+                | select(.sha as $s | $head | startswith($s) | not) | .sha' <<<"$comments")
             # A Failed row wins: review-verdict.yml accepts a summary only when EVERY
             # row for the head is Completed, so a mixed table is retried (Codex P1
             # on .github#71). Otherwise all Completed is done, anything else running.
@@ -271,7 +279,9 @@ jobs:
             # above). Without it, wait REACTION_GRACE_SECONDS (the 👍 trails the
             # edit by seconds), then ask once (Codex P1 on .github#71).
             if [ -n "$rows" ] && ! grep -q 'Failed' <<<"$rows"; then
-              if ! grep -qv 'Completed' <<<"$rows"; then
+              if [ -n "$other_rows" ] && ! grep -qv 'Completed' <<<"$rows"; then
+                say "Codex's summary also has rows for $(tr '\n' ' ' <<<"$other_rows")- the gate needs every row on ${HEAD:0:7}."
+              elif ! grep -qv 'Completed' <<<"$rows"; then
                 done_at=$(cut -f2 <<<"$rows" | sort | tail -1)
                 thumbs=$(jq --arg bot "$CODEX_BOT" --arg t "$done_at" --arg cut "$CUTOFF" \
                            '[.[] | select(.user == $bot and .content == "+1" and .at >= $t and .at > $cut)] | length' <<<"$reactions")
@@ -297,8 +307,12 @@ jobs:
             [ "$n" -eq 0 ] || decide false "already requested once for ${HEAD:0:7} (at most one request per head)."
 
             # A human `@codex review` at/after the push counts unless Codex refused
-            # it ("create a Codex account") within the refusal window.
-            n=$(jq --arg bot "$CODEX_BOT" --arg anchor "$anchor" --argjson win "$REFUSAL_WINDOW_SECONDS" '
+            # it ("create a Codex account") within the refusal window. One younger
+            # than the window may still be refused, and a refusal fires nothing
+            # that re-runs this workflow, so wait it out (Codex P1 on .github#71).
+            # Prints the age in seconds of each unrefused request.
+            now_epoch="${NOW_EPOCH:-$(date -u +%s)}"  # NOW_EPOCH: tests only
+            ages=$(jq -r --arg bot "$CODEX_BOT" --arg anchor "$anchor" --argjson win "$REFUSAL_WINDOW_SECONDS" --argjson now "$now_epoch" '
                 . as $all
                 | [ .[] | select(.type != "Bot" and (.user | endswith("[bot]") | not) and .at >= $anchor
                          and (.body | test("(\\A|\\s)@codex (security )?review\\b"; "i")))
@@ -306,9 +320,23 @@ jobs:
                     | select([ $all[] | select(.user == $bot
                                  and (.body | test("\\ATo use Codex here, \\[create a Codex account"))
                                  and .at >= $t
-                                 and ((.at | fromdateiso8601) - ($t | fromdateiso8601)) <= $win) ] | length == 0) ]
-                | length' <<<"$comments")
-            [ "$n" -eq 0 ] || decide false "someone already asked for a Codex review after ${HEAD:0:7} was pushed."
+                                 and ((.at | fromdateiso8601) - ($t | fromdateiso8601)) <= $win) ] | length == 0)
+                    | $now - ($t | fromdateiso8601) ]
+                | .[]' <<<"$comments")
+            if [ -n "$ages" ]; then
+              if awk -v w="$REFUSAL_WINDOW_SECONDS" '$1 >= w { found = 1 } END { exit !found }' <<<"$ages"; then
+                decide false "someone already asked for a Codex review after ${HEAD:0:7} was pushed."
+              fi
+              if [ -z "${refusal_deadline:-}" ]; then
+                refusal_deadline=$((SECONDS + REFUSAL_WINDOW_SECONDS))
+              fi
+              if [ "$SECONDS" -lt "$refusal_deadline" ]; then
+                say "a \`@codex review\` was posted under ${REFUSAL_WINDOW_SECONDS}s ago; waiting to see whether Codex refuses it."
+                sleep "$POLL_SECONDS"
+                continue
+              fi
+              decide false "someone already asked for a Codex review after ${HEAD:0:7} was pushed (not refused within ${REFUSAL_WINDOW_SECONDS}s)."
+            fi
 
             eyes=$(jq --arg bot "$CODEX_BOT" '[.[] | select(.user == $bot and .content == "eyes")] | length' <<<"$reactions")
             if [ "$eyes" -gt 0 ] && [ "$SECONDS" -lt "$busy_deadline" ]; then

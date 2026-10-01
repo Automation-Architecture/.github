@@ -8,6 +8,7 @@ permissions, where the org PAT may appear). Needs python3 + PyYAML, bash, jq.
 
     uv run --with pyyaml python tests/codex-auto-request/test_codex_auto_request.py
 """
+import calendar
 import copy
 import json
 import os
@@ -116,6 +117,13 @@ def thumbs(at="2026-10-01T10:03:03Z", user=CODEX):
 
 
 THUMBS = thumbs()
+
+
+def epoch(ts):
+    return str(calendar.timegm(__import__("time").strptime(ts, "%Y-%m-%dT%H:%M:%SZ")))
+
+
+REFUSAL = "To use Codex here, [create a Codex account and connect to github](https://x)."
 
 
 def base(comments=(), reviews=(), reactions=(), cutoff=(), **prkw):
@@ -265,6 +273,24 @@ case("our marker AFTER the retarget: skips", "skip",
                             at="2026-10-01T10:31:00Z")], cutoff=[RETARGET]))
 case("Codex row with no readable time once there is a cutoff: requests", "request",
      base(comments=[summary(("⏳ **Queued**", HEAD))], cutoff=[RETARGET]))
+
+# --- the whole table must be on the head; a fresh request may yet be refused (round 4) ---
+case("Completed + 👍 on this head, but the table also has a row for an older head: requests", "request",
+     base(comments=[summary(("Completed", HEAD), ("Completed", OLD))], reactions=[THUMBS]))
+case("Running on this head + a row for an older head: skips (in progress)", "skip",
+     base(comments=[summary(("Running", HEAD), ("Completed", OLD))]))
+case("young human request, Codex refuses it during the wait: requests", "request",
+     with_(base(), **{f"/issues/{PR}/comments": {"__seq": [
+         [comment("mac-tuongnh", "@codex review", at="2026-10-01T10:05:00Z")],
+         [comment("mac-tuongnh", "@codex review", at="2026-10-01T10:05:00Z"),
+          comment(CODEX, REFUSAL, at="2026-10-01T10:05:04Z")]]}}),
+     env={"NOW_EPOCH": epoch("2026-10-01T10:05:01Z"), "REFUSAL_WINDOW_SECONDS": "6", "POLL_SECONDS": "1"})
+case("young human request, no refusal within the window: skips", "skip",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z")]),
+     env={"NOW_EPOCH": epoch("2026-10-01T10:05:01Z"), "REFUSAL_WINDOW_SECONDS": "2", "POLL_SECONDS": "1"})
+case("human request older than the window, not refused: skips at once", "skip",
+     base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:05:00Z")]),
+     env={"NOW_EPOCH": epoch("2026-10-01T10:08:00Z")})
 
 # --- errors (red run, never a request) ------------------------------------------
 case("retarget history unreadable: red", "error", with_(base(), graphql="__error"))
