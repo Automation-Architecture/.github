@@ -42,7 +42,8 @@ name: Review verdict
 #      edited only by the Codex App, whose every table row is Completed on a
 #      7+ hex prefix of this head (and of no other commit the PR carried), PLUS
 #      Codex's 👍 reaction on the PR created after that completion, and no
-#      Codex review or inline comment on this head (full rules at
+#      Codex inline comment, and no Codex review that carries findings (not
+#      pending, not a skip notice), on this head (full rules at
 #      evidence_from_codex_summary). The 👍 is the one reaction that counts:
 #      only the Codex App can make it, and Codex makes it only when every
 #      review finished with no findings;
@@ -349,6 +350,14 @@ jobs:
           # Canonical copy: Automation-Architecture/.github .github/workflows/auto-merge.yml
           # (AAA-711: the better idea; skip notices are status, not a verdict).
           REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit}"
+          # The ONE rule for "this Codex review object carries no findings": a
+          # pending review, or a skip notice (REVIEW_SKIP_PATTERN). A jq prelude
+          # every Codex review check uses, so the findings block, evidence 1b and
+          # evidence 2 cannot drift apart (Codex P1 on aios-coffee#137: 1b used
+          # to reject a clean retry over an earlier skip notice on the head).
+          # Call as `carries_no_findings($skip)` on a review object. It decides
+          # nothing about identity, head or dismissal; each caller does that.
+          CODEX_REVIEW_JQ='def carries_no_findings($skip): .state == "PENDING" or ((.body // "") | test($skip; "i"));'
 
           CHECK_NAME="review/verdict"
 
@@ -493,9 +502,8 @@ jobs:
             # A skip notice (rate or usage limit) or a pending review carries no
             # findings, so an empty comment list there proves no deletion.
             if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" \
-                  '.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
-                                and .state != "PENDING"
-                                and (((.body // "") | test($skip; "i")) | not)) | .id'); then
+                  "$CODEX_REVIEW_JQ"'.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
+                                and (carries_no_findings($skip) | not)) | .id'); then
               CODEX_BLOCKED=1
               fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
               return 0
@@ -649,10 +657,10 @@ jobs:
               return 1
             fi
             local candidates
-            if ! candidates=$(echo "$CODEX_REVIEWS" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" '
+            if ! candidates=$(echo "$CODEX_REVIEWS" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" "$CODEX_REVIEW_JQ"'
                 [.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
-                              and (.state | IN("DISMISSED", "PENDING") | not)
-                              and (((.body // "") | test($skip; "i")) | not))
+                              and .state != "DISMISSED"
+                              and (carries_no_findings($skip) | not))
                      | {submitted_at}]'); then
               fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
               return 1
@@ -842,9 +850,10 @@ jobs:
           #    in another account's name, so this is the part no writer can
           #    forge; it is also Codex's only "no findings" signal in this form
           #    (Completed alone also follows a findings review);
-          #  - no Codex review object and no Codex inline comment on this head:
-          #    a review with findings is judged by evidence 2 and the P0/P1
-          #    block instead, never by the summary row;
+          #  - no Codex inline comment and no Codex review object that carries
+          #    findings on this head: those are judged by evidence 2 and the
+          #    P0/P1 block instead, never by the summary row. A pending review or
+          #    a skip notice carries none (carries_no_findings) and is ignored;
           #  - Codex is not an author of the head commit;
           #  - the row's completion time and the 👍 are both after the latest
           #    retarget or head force-push.
@@ -888,9 +897,23 @@ jobs:
               return 1
             fi
 
-            # Findings on this head go to evidence 2 and the P0/P1 block.
-            if echo "$CODEX_REVIEWS" | jq -e --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" '
-                any(.[]; .user.login == $c and .commit_id == $sha)' >/dev/null; then
+            # Findings on this head go to evidence 2 and the P0/P1 block. A Codex
+            # review object that carries no findings (pending, or a skip notice
+            # such as a usage limit; carries_no_findings, the rule
+            # load_codex_findings uses) is not one: an earlier attempt that
+            # produced nothing must not veto the clean retry (Codex P1 on
+            # aios-coffee#137). Matched on the login alone, never the type, so
+            # a type change can only send more reviews down this refusal. A
+            # DISMISSED review that carries findings still refuses: dismissal
+            # revokes a review as evidence (evidence 2), it does not turn its
+            # findings into a clean pass.
+            local findings_review
+            if ! findings_review=$(echo "$CODEX_REVIEWS" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" "$CODEX_REVIEW_JQ"'
+                any(.[]; .user.login == $c and .commit_id == $sha and (carries_no_findings($skip) | not))'); then
+              fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$findings_review" != "false" ]; then
               fail_closed_reason "Codex posted a review on this head, so its summary row is not a clean pass"
               return 1
             fi
@@ -1209,7 +1232,10 @@ jobs:
           fi
 
           deadline=$((SECONDS + WAIT_SECONDS))
-          reaction_deadline=$((SECONDS + REACTION_GRACE_SECONDS))
+          # The grace window starts when the reviewer wait ends, not when the
+          # run starts: with a 600 s wait, a window counted from the start had
+          # already closed by the time it applied (opportunity-builder#195).
+          reaction_deadline=$((deadline + REACTION_GRACE_SECONDS))
           while true; do
             evaluate_once
             if [ -n "$EVIDENCE" ] || [ "$SUPERSEDED" = "1" ]; then

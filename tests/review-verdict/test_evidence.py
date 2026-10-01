@@ -617,8 +617,42 @@ case("summary + 👍, Codex review on head with P2 only: judged as a review, not
      with_(summary(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))]}), "a Codex review of this head")
 case("summary + 👍, Codex review on head whose findings were deleted", "fail",
      with_(summary(), **{R: [codex_review(HEAD)]}))
-case("summary + 👍, Codex skip-notice review on head", "fail",
-     with_(summary(), **{R: [codex_review(HEAD, body="Codex hit a usage limit: rate limit")]}))
+# A Codex review object that carries no findings (pending, or a skip notice
+# matching REVIEW_SKIP_PATTERN) is the same thing to every check: ignored by the
+# findings block, never evidence 2, and no veto on the summary row (Codex P1 on
+# aios-coffee#137: an earlier attempt that produced nothing rejected the clean retry).
+SKIP_NOTICE = "Codex review skipped: rate limit reached for this repository"
+case("summary + 👍, Codex skip-notice review on head", "success",
+     with_(summary(), **{R: [codex_review(HEAD, body="Codex hit a usage limit: rate limit")]}), SUMMARY_EVIDENCE)
+case("earlier pending Codex review on head, then a clean Completed retry + 👍", "success",
+     with_(summary(), **{R: [codex_review(HEAD, state="PENDING", at=None, body="")]}), SUMMARY_EVIDENCE)
+case("earlier skip-notice Codex review on head, then a clean retry + 👍", "success",
+     with_(summary(summary_row(trigger="Manual request")),
+           **{R: [codex_review(HEAD, body=SKIP_NOTICE, at="2026-09-27T23:09:00Z")]}), SUMMARY_EVIDENCE)
+case("pending and skip-notice reviews on head, then a clean retry + 👍", "success",
+     with_(summary(), **{R: [codex_review(HEAD, rid=11, state="PENDING", at=None, body=""),
+                             codex_review(HEAD, rid=12, body=SKIP_NOTICE)]}), SUMMARY_EVIDENCE)
+case("earlier Codex findings review on head with P1 open, then Completed + 👍", "fail",
+     with_(summary(), **{R: [codex_review(HEAD, rid=11, at="2026-09-27T23:09:00Z")],
+                         C: [finding(HEAD, rid=11, body=badge(1))]}), "unresolved P0/P1")
+case("skip notice ignored, but a findings review on head with P1 open still blocks", "fail",
+     with_(summary(), **{R: [codex_review(HEAD, rid=11, body=SKIP_NOTICE),
+                             codex_review(HEAD, rid=12, at="2026-09-27T23:10:00Z")],
+                         C: [finding(HEAD, rid=12, body=badge(1))]}))
+case("skip notice ignored, a findings review on head with P2 only is judged as a review", "success",
+     with_(summary(), **{R: [codex_review(HEAD, rid=11, body=SKIP_NOTICE),
+                             codex_review(HEAD, rid=12, at="2026-09-27T23:10:00Z")],
+                         C: [finding(HEAD, rid=12, body=badge(2))]}), "a Codex review of this head")
+# Dismissal revokes a review as evidence (evidence 2); it does not turn a review
+# with findings into a clean summary pass.
+case("summary + 👍, DISMISSED Codex findings review on head (P2 only)", "fail",
+     with_(summary(), **{R: [codex_review(HEAD, state="DISMISSED")], C: [finding(HEAD, body=badge(2))]}))
+case("summary + 👍, DISMISSED Codex skip-notice review on head", "success",
+     with_(summary(), **{R: [codex_review(HEAD, state="DISMISSED", body=SKIP_NOTICE)]}), SUMMARY_EVIDENCE)
+case("summary + 👍, a skip notice on an earlier commit only", "success",
+     with_(summary(), **{R: [codex_review(OLD, body=SKIP_NOTICE)]}), SUMMARY_EVIDENCE)
+case("summary + 👍, Codex reviews unreadable", "fail",
+     {k: v for k, v in summary().items() if k != R})
 case("summary + 👍, stray Codex inline comment on head without a review", "fail",
      with_(summary(), **{C: [finding(HEAD, body=badge(3), rid=None)]}))
 case("summary + 👍, inline comments unreadable", "fail",
@@ -639,6 +673,15 @@ case("real summary from opportunity-builder#193 at its head", "success",
 # the row first polls for it within REACTION_GRACE_SECONDS.
 case("👍 arrives during the grace window", "success",
      summary(reacts={"__seq": [[], [reaction()]]}) | {"__env": {"REACTION_GRACE_SECONDS": "15"}}, SUMMARY_EVIDENCE)
+# The grace window opens when the reviewer wait ends, not when the run starts
+# (opportunity-builder#195): a pull_request_target run that waits past the
+# grace length still polls for the 👍. The loop polls every 20 s, then every
+# 10 s in the grace window: reads at ~0, ~20, ~40 s miss it, the read at ~50 s
+# (inside 21 + 25) finds it; a window counted from the start closed at 25 s.
+case("👍 after the reviewer wait, inside a grace window counted from its end", "success",
+     summary(reacts={"__seq": [[], [], [], [reaction()]]})
+     | {"__env": {"EVENT": "pull_request_target", "PR_ACTION": "synchronize",
+                  "WAIT_SECONDS": "21", "REACTION_GRACE_SECONDS": "25"}}, SUMMARY_EVIDENCE)
 case("no grace wait when the row is not Completed on head", "fail",
      summary(summary_row(sha=OLD[:7]), reacts={"__seq": [[], [reaction()]]}) | {"__env": {"REACTION_GRACE_SECONDS": "15"}})
 
