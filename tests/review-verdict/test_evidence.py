@@ -785,6 +785,15 @@ def main():
     if wf.get("name") in listened:
         print(f"FAIL  workflow listens to itself via workflow_run ({wf.get('name')!r})")
         return 1
+    # One publisher group per PR AND head: verdicts are bound to one PR, so two
+    # PRs at one commit must never cancel each other's publisher (Codex P1 on .github#76).
+    group = wf["concurrency"]["group"]
+    for needle in ("github.event.pull_request.number || github.event.inputs.pr_number",
+                   "github.event.pull_request.head.sha || github.event.inputs.head_sha", "github.run_id"):
+        if needle not in group:
+            print(f"FAIL  concurrency group must key on {needle}")
+            return 1
+    print("PASS  concurrency group keys on the PR number and the head SHA")
     step = wf["jobs"]["publish"]["steps"][0]
     static_env = {k: str(v) for k, v in step["env"].items() if "${{" not in str(v)}
     failures = 0

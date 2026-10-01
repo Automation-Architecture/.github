@@ -187,8 +187,12 @@ concurrency:
   # publish nothing, leaving a stale `success` as the latest check.
   # The first operand below MUST equal the job `if` exactly. Change both.
   #
-  # Shared key = the head SHA, and a run publishes only that SHA (see
-  # load_pr), so key and publish target always agree. Evidence for a head is
+  # Shared key = the PR number AND the head SHA, and a run publishes only that
+  # SHA, bound to that PR (see load_pr and the external_id), so key and
+  # publish target always agree. The PR number is part of it because each
+  # verdict is bound to one PR: with the head alone, PR B's publisher would
+  # cancel PR A's at a shared commit and never replace A's verdict, leaving
+  # A's stale success (Codex P1 on .github#76). Evidence for a head is
   # not monotonic (a dismissed review revokes it), which is why publishers are
   # serialized with cancel-in-progress rather than allowed to overlap.
   #
@@ -200,7 +204,7 @@ concurrency:
   # run joins that commit's group and is pinned to it like every other run
   # (Codex on opportunity-builder#165 / aaa-client-dashboard#243: keyed by PR
   # number it could publish a stale `success` after a dismissal).
-  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'push' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
+  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'push' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && format('{0}-{1}', github.event.pull_request.number || github.event.inputs.pr_number, github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
