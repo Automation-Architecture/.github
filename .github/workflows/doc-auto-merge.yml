@@ -45,6 +45,12 @@ name: Doc auto-merge
 # verdict's `publish`), and their real output is the `review/verdict` check.
 # Which workflow a cancelled Actions job belongs to is read from its run
 # (details_url -> actions/runs/<id> -> path), never guessed from its name.
+# A check-run bound to ONE pull request counts only for that PR: one whose
+# external_id starts `<this repo>#<n>:` (the delivery gate's candidate key,
+# `<repo>#<pr>:<base sha>:<head sha>:<policy revision>`) is ignored when
+# evaluating any other PR, even at the same head commit. Two open PRs at one
+# commit each get their own gate verdict; the newest of them must not stand
+# in for the other (Codex P1 on aios-coffee#135).
 # Not counted: this job's own check, and the reviewer checks in
 # IGNORED_CHECKS (Greptile is a reviewer, not CI, and no review is required).
 # In a ruleset repo, `review/verdict` is required, and review-verdict.yml
@@ -449,11 +455,18 @@ jobs:
             fi
             jq -rn --argjson runs "$runs" --argjson st "$statuses" --argjson rules "$rules" \
                 --argjson branch "$branch" --arg job "$JOB_NAME" --arg ign "$IGNORED_CHECKS" \
-                --argjson selfids "$self_ids" --argjson vercel "$VERCEL_REQUIRED" '
+                --argjson selfids "$self_ids" --argjson vercel "$VERCEL_REQUIRED" \
+                --arg repo "$REPO" --arg pr "$PR_NUMBER" '
               def ok: IN("success", "neutral", "skipped");
               def newest: group_by([(.app.slug // ""), .name]) | map(max_by(.id));
+              # Bound to another PR of this repository by its external_id
+              # (`<repo>#<n>:...`, the gate candidate key): skip it for this PR.
+              def other_pr:
+                ([(.external_id // "") | strings
+                  | capture("^(?<repo>[^#:/\\s]+/[^#:/\\s]+)#(?<n>[0-9]+):")] | .[0]) as $m
+                | $m != null and ($m.repo | ascii_downcase) == ($repo | ascii_downcase) and $m.n != $pr;
               ($ign | split(",") | map(sub("^\\s+"; "") | sub("\\s+$"; "")) | map(select(length > 0))) as $ignored
-              | ($runs | newest) as $all
+              | ($runs | map(select(other_pr | not)) | newest) as $all
               # Newest status per context, like check-runs: a retried context
               # must not stay red or pending on its older entry.
               | ($st | group_by(.context) | map(max_by([(.updated_at // ""), (.id // 0)]))) as $st
