@@ -130,9 +130,9 @@ jobs:
           reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
             --jq '.[] | {user: .user.login, commit: .commit_id, at: (.submitted_at // "")}' | jq -s .)
 
-          # (b) a Codex review object on the head.
+          # (b) a Codex review object on the head (an undated, pending one counts).
           n=$(jq --arg bot "$CODEX_BOT" --arg head "$EVENT_HEAD" --arg since "$rows_since" \
-                '[.[] | select(.user == $bot and .commit == $head and .at > $since)] | length' <<<"$reviews")
+                '[.[] | select(.user == $bot and .commit == $head and (.at == "" or .at > $since))] | length' <<<"$reviews")
           [ "$n" -eq 0 ] || decide false "Codex has a review on ${EVENT_HEAD:0:7}."
 
           # (b) a row of any status for the head in Codex's summary comment:

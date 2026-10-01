@@ -152,6 +152,10 @@ case("row for the head next to a row for an older head: skips", "skip",
 case("a row in an OLDER summary comment still counts: skips", "skip",
      base(comments=[summary(row("Completed", HEAD)), summary(row("Running", OLD))]))
 case("Codex review object on the head (any state): skips", "skip", base(reviews=[review(state="DISMISSED")]))
+case("pending Codex review on the head with no submitted_at: skips", "skip",
+     base(reviews=[{"user": {"login": CODEX}, "commit_id": HEAD, "submitted_at": None, "state": "PENDING"}]))
+case("retarget, pending undated Codex review on the head: skips", "skip",
+     base(reviews=[{"user": {"login": CODEX}, "commit_id": HEAD, "submitted_at": None, "state": "PENDING"}]), env=EDIT)
 
 # --- (c) someone already asked -----------------------------------------------------
 case("web3sea @codex review after the push: skips", "skip",
