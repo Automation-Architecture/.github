@@ -59,6 +59,13 @@ else:
 if key not in fx:
     sys.stderr.write("stub gh: no fixture for %s\n" % key); sys.exit(1)
 v = fx[key]
+if isinstance(v, dict) and "__seq" in v:
+    # Successive calls get successive values; the last one repeats.
+    ctr = os.environ["FIXTURES"] + ".calls"
+    calls = json.load(open(ctr)) if os.path.exists(ctr) else {}
+    i = calls.get(key, 0); calls[key] = i + 1
+    json.dump(calls, open(ctr, "w"))
+    v = v["__seq"][min(i, len(v["__seq"]) - 1)]
 if isinstance(v, dict) and "__pages" in v:
     sys.stdout.write("".join(json.dumps(pg) for pg in v["__pages"])); sys.exit(0)
 data = json.dumps(v)
@@ -491,6 +498,151 @@ case("review threads unreadable", "fail",
      {k: v for k, v in with_(clean(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))]}).items()} | {"__drop_threads": True})
 
 
+# --- Evidence 1b: Codex review summary Completed on the head + Codex's 👍 -----
+# Codex's current clean signal (opportunity-builder#193, aaa-client-dashboard#263):
+# no "Didn't find any major issues" comment; the live summary table turns to
+# Completed on the head and Codex reacts 👍 on the PR.
+SUMMARY_EVIDENCE = "the Codex review summary"
+DONE_AT = "2026-09-27T23:11:50.934144Z"   # row completion; the 👍 lands seconds later
+
+
+def summary_row(sha=HEAD[:7], status=None, kind="📝 **Code Review**", trigger="PR opened", at=DONE_AT):
+    status = status if status is not None else (
+        '✅ **Completed** <relative-time datetime="%s">%s</relative-time>' % (at, at))
+    return "| %s | %s | `%s` | %s |" % (kind, status, sha, trigger)
+
+
+def summary_body(*rows):
+    rows = rows or (summary_row(),)
+    return ("<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\n"
+            "This comment shows the latest Codex review activity on this pull request.\n\n"
+            "| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n"
+            + "\n".join(rows) +
+            "\n\n\n\n<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n"
+            "Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts "
+            "with 👍 once all reviews finish with no findings.\n\n</details>")
+
+
+def reaction(content="+1", login=CODEX, utype="User", at="2026-09-27T23:11:54Z"):
+    return {"user": {"login": login, "type": utype}, "content": content, "created_at": at}
+
+
+def gql_summary(node="IC_S", login=CODEX_APP, edited="2026-09-27T23:11:51Z", editor=CODEX_APP, last_edit=CODEX_APP):
+    return {"graphql:" + node: {"data": {"node": {
+        "lastEditedAt": edited, "author": {"login": login},
+        "editor": {"login": editor} if editor else None,
+        "userContentEdits": {"nodes": [{"editor": {"login": last_edit}}] if last_edit else []}}}}}
+
+
+def summary(*rows, body=None, reacts=None, login=CODEX, utype="Bot", app=CODEX_APP, gq=None, at="2026-09-27T23:08:10Z"):
+    b = base()
+    b[f"/issues/{PR}/comments"] = [issue_comment(body if body is not None else summary_body(*rows),
+                                                 login=login, utype=utype, app=app, node="IC_S", at=at)]
+    b[f"/issues/{PR}/reactions"] = [reaction()] if reacts is None else reacts
+    b.update(gq if gq is not None else gql_summary())
+    return b
+
+
+I = f"/issues/{PR}/reactions"
+case("summary Completed on head + Codex 👍", "success", summary(), SUMMARY_EVIDENCE)
+case("summary row naming the full 40-hex head", "success", summary(summary_row(sha=HEAD)), SUMMARY_EVIDENCE)
+case("summary never edited (created Completed) + 👍", "success",
+     summary(gq=gql_summary(edited=None, editor=None, last_edit=None)), SUMMARY_EVIDENCE)
+case("summary: two review rows, both Completed on head", "success",
+     summary(summary_row(), summary_row(kind="🔒 **Security Review**", trigger="Manual request")), SUMMARY_EVIDENCE)
+# The 👍 is required: it is Codex's only "no findings" signal in this form, and the
+# one part a writer cannot forge (Completed also follows a findings review).
+case("summary Completed on head, no 👍", "fail", summary(reacts=[]), "has not reacted")
+case("summary Completed on head, 👍 by a human", "fail", summary(reacts=[reaction(login="dev", utype="User")]))
+# The reactions API reports the Codex bot as type "User" (opportunity-builder#193,
+# 2026-10-01); the "[bot]" login is what no person can hold.
+case("summary Completed on head, Codex 👍 typed User as the reactions API serves it", "success",
+     summary(reacts=[reaction(utype="User")]), SUMMARY_EVIDENCE)
+case("summary Completed on head, 👍 by a login without the [bot] suffix", "fail",
+     summary(reacts=[reaction(login=CODEX_APP, utype="User")]))
+case("summary Completed on head, Codex reacted 👀 only", "fail", summary(reacts=[reaction(content="eyes")]))
+case("summary Completed on head, Codex reacted 👎", "fail", summary(reacts=[reaction(content="-1")]))
+case("summary Completed on head, Codex 👍 predates the completion", "fail",
+     summary(reacts=[reaction(at="2026-09-27T23:05:00Z")]))
+case("summary Completed on head, 👍 in the completion second counts", "success",
+     summary(reacts=[reaction(at="2026-09-27T23:11:50Z")]), SUMMARY_EVIDENCE)
+case("reactions unreadable", "fail", {k: v for k, v in summary().items() if k != I})
+case("summary row names an earlier commit (👍 after the push)", "fail", summary(summary_row(sha=OLD[:7])))
+case("summary row names a commit this PR never carried", "fail", summary(summary_row(sha="abcdef0")))
+case("summary row with a 6-hex commit", "fail", summary(summary_row(sha=HEAD[:6])))
+case("summary row still Running on head", "fail",
+     summary(summary_row(status='🔄 **Running** since <relative-time datetime="%s">x</relative-time>' % DONE_AT)))
+case("summary row Failed on head", "fail", summary(summary_row(status="❌ **Failed**")))
+case("summary: one row Completed, one Running", "fail",
+     summary(summary_row(), summary_row(kind="🔒 **Security Review**",
+                                        status='🔄 **Running** since <relative-time datetime="%s">x</relative-time>' % DONE_AT)))
+case("summary: one row on head, one on an earlier commit", "fail",
+     summary(summary_row(), summary_row(sha=OLD[:7], kind="🔒 **Security Review**")))
+case("summary table with no review rows", "fail",
+     summary(body=summary_body("").replace("| --- | --- | --- | --- |\n\n", "| --- | --- | --- | --- |\n")))
+case("summary row with two commits in it", "fail",
+     summary(summary_row(sha=HEAD[:7] + "` `" + OLD[:7])))
+case("summary marker not at the start", "fail", summary(body="Quoting Codex:\n" + summary_body()))
+case("human comment quoting the summary", "fail", summary(login="dev", utype="User", app=None))
+case("Codex-like login not posted via the App", "fail", summary(app=None))
+case("GraphQL author is not the Codex App", "fail", summary(gq=gql_summary(login="mallory")))
+case("summary last edited by a writer", "fail", summary(gq=gql_summary(editor="mallory", last_edit="mallory")))
+case("summary editor is Codex but the newest edit is a writer's", "fail", summary(gq=gql_summary(last_edit="mallory")))
+case("summary edited but its edit history is empty", "fail", summary(gq=gql_summary(last_edit=None)))
+case("summary GraphQL lookup fails", "fail", {k: v for k, v in summary().items() if not k.startswith("graphql:IC_S")})
+case("summary + 👍, but Codex authored the head commit", "fail",
+     with_(summary(), **{f"/commits/{HEAD}": {"author": {"login": CODEX}, "committer": {"login": "web-flow"}}}))
+case("summary completed before a retarget", "fail",
+     with_(summary(), extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:20:00Z"))))
+case("summary completed after a head force-push", "success",
+     with_(summary(), extra=timeline(("HeadRefForcePushedEvent", FP_EARLY, OLD))), SUMMARY_EVIDENCE)
+case("summary completed after a retarget but the 👍 predates it", "fail",
+     with_(summary(reacts=[reaction(at="2026-09-27T23:11:52Z")]),
+           extra=timeline(("BaseRefChangedEvent", "2026-09-27T23:11:51Z"))))
+COLLIDE7 = HEAD[:7] + "f" * 33
+case("another PR commit shares the 7-hex summary prefix", "fail",
+     with_(summary(), **{f"/pulls/{PR}/commits": [{"sha": COLLIDE7}, {"sha": HEAD}]}))
+case("force-push replaced a head sharing the 7-hex summary prefix", "fail",
+     with_(summary(), extra={**timeline(("HeadRefForcePushedEvent", FP_EARLY, COLLIDE7)), **compare(COLLIDE7, [COLLIDE7])}))
+case("PR commit list unreadable (summary path)", "fail",
+     {k: v for k, v in summary().items() if k != f"/pulls/{PR}/commits"})
+# Findings on the head are never judged by the summary row.
+case("summary + 👍, open P1 Codex finding on head", "fail",
+     with_(summary(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(1))]}))
+case("summary + 👍, P1 raised earlier that still applies", "fail",
+     with_(summary(), **{R: [codex_review(OLD)], C: [finding(OLD, body=badge(1), outdated=False)]}))
+case("summary + 👍, P1 raised earlier, now outdated", "success",
+     with_(summary(), **{R: [codex_review(OLD)], C: [finding(OLD, body=badge(1))]}), SUMMARY_EVIDENCE)
+case("summary + 👍, Codex review on head with P2 only: judged as a review, not the row", "success",
+     with_(summary(), **{R: [codex_review(HEAD)], C: [finding(HEAD, body=badge(2))]}), "a Codex review of this head")
+case("summary + 👍, Codex review on head whose findings were deleted", "fail",
+     with_(summary(), **{R: [codex_review(HEAD)]}))
+case("summary + 👍, Codex skip-notice review on head", "fail",
+     with_(summary(), **{R: [codex_review(HEAD, body="Codex hit a usage limit: rate limit")]}))
+case("summary + 👍, stray Codex inline comment on head without a review", "fail",
+     with_(summary(), **{C: [finding(HEAD, body=badge(3), rid=None)]}))
+case("summary + 👍, inline comments unreadable", "fail",
+     {k: v for k, v in summary().items() if k != C})
+case("real summary from opportunity-builder#193 at its head", "success",
+     summary(body=(
+         "<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\nThis comment shows the latest "
+         "Codex review activity on this pull request.\n\n| Review | Status | Commit | Review trigger |\n"
+         "| --- | --- | --- | --- |\n| 📝 **Code Review** | ✅ **Completed** <relative-time datetime=\""
+         "2026-09-27T23:11:50.934144Z\">2026-09-27T23:11:50.934144Z</relative-time> | `%s` | PR opened |\n\n\n\n"
+         "<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n[Your team has set up Codex to review "
+         "pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered "
+         "when you\n- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\" or "
+         "\"@codex security review\".\n\nCodex reacts with 👀 while any review is running, comments if it has "
+         "suggestions, and reacts with 👍 once all reviews finish with no findings.\n\n</details>") % HEAD[:7]),
+     SUMMARY_EVIDENCE)
+# The 👍 trails the Completed edit by seconds and fires no event: a run that sees
+# the row first polls for it within REACTION_GRACE_SECONDS.
+case("👍 arrives during the grace window", "success",
+     summary(reacts={"__seq": [[], [reaction()]]}) | {"__env": {"REACTION_GRACE_SECONDS": "15"}}, SUMMARY_EVIDENCE)
+case("no grace wait when the row is not Completed on head", "fail",
+     summary(summary_row(sha=OLD[:7]), reacts={"__seq": [[], [reaction()]]}) | {"__env": {"REACTION_GRACE_SECONDS": "15"}})
+
+
 def main():
     assert {"labeled", "unlabeled"} <= set(trigger_types()), "the hold label must re-evaluate the verdict"
     wf = yaml.safe_load(WORKFLOW.read_text())
@@ -517,9 +669,11 @@ def main():
                 fx.pop("graphql:threads:PR_1", None)
             env_over = fx.pop("__env", {})
             (tmp / "fx.json").write_text(json.dumps(fx))
+            (tmp / "fx.json.calls").unlink(missing_ok=True)
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
                    **static_env, "REPO": REPO, "EVENT": "workflow_dispatch", "PR_NUMBER": str(PR),
                    "HEAD_SHA": HEAD, "PUBLISH": "0", "WAIT_SECONDS": "0", "DETAILS_URL": "x",
+                   "REACTION_GRACE_SECONDS": "0",
                    "FIXTURES": str(tmp / "fx.json"), **env_over}
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True)
             verdict = next((l for l in out.stdout.splitlines() if l.startswith("Verdict:")), "")

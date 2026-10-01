@@ -30,13 +30,22 @@ name: Review verdict
 # THRESHOLD (Brad, 2026-09-29): pass when Codex has reviewed the current head
 # and no P0/P1 Codex finding is open. P2/P3 findings never fail it.
 #
-# Evidence counted for every other PR (Codex only; nothing else,
-# reactions never):
+# Evidence counted for every other PR (Codex only; nothing else; no
+# reaction except Codex's own 👍 inside evidence 1b):
 #   1. Codex's clean result for this head: an ISSUE comment on this PR,
 #      authored by the chatgpt-codex-connector App itself (never a human
 #      quoting it), never edited, opening "Codex Review: Didn't find any major
 #      issues" and naming exactly one "Reviewed commit" that is a 10+ hex
 #      prefix of this head (full rules at evidence_from_codex_comment);
+#   1b. Codex's clean result in its current form (from 2026-09-29 Codex often
+#      posts no clean comment): its "Codex Review Summary" issue comment, last
+#      edited only by the Codex App, whose every table row is Completed on a
+#      7+ hex prefix of this head (and of no other commit the PR carried), PLUS
+#      Codex's 👍 reaction on the PR created after that completion, and no
+#      Codex review or inline comment on this head (full rules at
+#      evidence_from_codex_summary). The 👍 is the one reaction that counts:
+#      only the Codex App can make it, and Codex makes it only when every
+#      review finished with no findings;
 #   2. a Codex review object whose commit_id is this head, not dismissed, not
 #      a skip notice, submitted after the latest retarget or head force-push.
 #      Codex posts one to carry findings; the rule below decides whether they
@@ -301,6 +310,8 @@ jobs:
           REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit"
           # Codex lands a few minutes after a push. Other events evaluate once.
           WAIT_SECONDS: ${{ github.event_name == 'pull_request_target' && '600' || '0' }}
+          # Codex's 👍 lands a few seconds after its summary edit relays here.
+          REACTION_GRACE_SECONDS: "90"
           PUBLISH: "1"
         run: |
           # review/verdict adapter (AAA-728 / AAA-730), canonical copy.
@@ -310,8 +321,10 @@ jobs:
           # on the repos it targets. The adapter judges no code; Codex is the
           # reviewer.
           #
-          # Evidence (nothing else counts; reactions never count): a clean Codex
-          # issue comment naming the head as its reviewed commit. Any Codex
+          # Evidence (nothing else counts; no reaction but Codex's own 👍 in the
+          # summary form): a clean Codex issue comment naming the head as its
+          # reviewed commit, or Codex's review summary Completed on the head
+          # with its 👍. Any Codex
           # finding on the head (inline comment or review object) fails the
           # verdict. Greptile, humans and other bots are never read.
           #
@@ -326,6 +339,7 @@ jobs:
           PR_ACTION="${PR_ACTION:-}"
           PUBLISH="${PUBLISH:-1}"
           WAIT_SECONDS="${WAIT_SECONDS:-0}"
+          REACTION_GRACE_SECONDS="${REACTION_GRACE_SECONDS:-90}"
           CODEX_BOT="${CODEX_BOT:-chatgpt-codex-connector[bot]}"
           CODEX_APP="${CODEX_APP:-chatgpt-codex-connector}"
           # \z, not $: jq's $ also matches before a TRAILING newline, and a
@@ -349,6 +363,10 @@ jobs:
           # 1 = the verdict fails for this head: Codex has findings on it, or
           # they could not be read. Nothing overrides it.
           CODEX_BLOCKED=0
+          # 1 = the Codex summary shows this head clean in every way except the
+          # 👍, which trails the edit by seconds and fires no event; the main
+          # loop then polls for up to REACTION_GRACE_SECONDS.
+          AWAIT_REACTION=0
           PR_JSON=""
           # Documentation-only file-list result for this run's head: "" = not
           # yet read, "doc" = every file is Markdown, anything else = why not.
@@ -580,6 +598,51 @@ jobs:
             return 0
           }
 
+          # Every commit this PR has carried: its current commit list, plus each
+          # head a force-push replaced and that head's history past the base.
+          # Sets CARRIED_SHAS (JSON array). Needs load_cutoff's TIMELINE. Used
+          # to show that a short commit prefix in Codex output names only this
+          # head (Greptile P1 on aios-coffee#122, Codex P1 on
+          # opportunity-builder#178). Returns 1, with a reason, when unreadable.
+          load_carried_shas() {
+            # The list endpoint stops at 250, so a longer PR refuses.
+            if ! [[ "$PR_COMMIT_COUNT" =~ ^[0-9]+$ ]] || [ "$PR_COMMIT_COUNT" -gt 250 ]; then
+              fail_closed_reason "#$PR_NUMBER has ${PR_COMMIT_COUNT:-an unknown number of} commits, too many to show a short commit prefix names only this head"
+              return 1
+            fi
+            local pr_shas
+            if ! pr_shas=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/commits" --jq '.[]' | jq -s 'map(.sha)'); then
+              fail_closed_reason "could not list the commits of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$pr_shas" | jq 'length')" -ne "$PR_COMMIT_COUNT" ]; then
+              fail_closed_reason "the commit list of #$PR_NUMBER is incomplete, so a short commit prefix cannot be shown to name only this head"
+              return 1
+            fi
+            # Add every head a force-push replaced, and its history past the base.
+            local replaced oid history
+            if ! replaced=$(echo "$TIMELINE" | jq -r '
+                [.data.node.timelineItems.nodes[] | select(has("beforeCommit"))
+                  | (.beforeCommit.oid // error("force-push without a before commit"))] | unique | .[]'); then
+              fail_closed_reason "a head force-push on #$PR_NUMBER does not record the commit it replaced"
+              return 1
+            fi
+            for oid in $replaced; do
+              # Paged: one response lists at most 250 commits (Greptile P1 on
+              # aios-coffee#122); every page repeats total_commits.
+              if ! history=$(gh api --paginate "/repos/$REPO/compare/$BASE_SHA...$oid?per_page=100" \
+                  | jq -es --arg oid "$oid" '([.[].commits[].sha] | unique) as $s
+                      | if ($s | length) == .[0].total_commits
+                        then [$oid] + $s else error("incomplete") end'); then
+                fail_closed_reason "could not list the full history of ${oid:0:10}, a head replaced by a force-push, so a short commit prefix cannot be shown to name only this head"
+                return 1
+              fi
+              pr_shas=$(jq -n --argjson a "$pr_shas" --argjson b "$history" '$a + $b | unique')
+            done
+            CARRIED_SHAS="$pr_shas"
+            return 0
+          }
+
           # Evidence 2: a Codex review object on this head (see the header).
           evidence_from_codex_review() {
             if [ "$CODEX_BLOCKED" = "1" ]; then
@@ -702,7 +765,7 @@ jobs:
             # Bind to this base and this line of heads: only comments posted after
             # the latest retarget or head force-push count.
             load_cutoff || return 1
-            local timeline="$TIMELINE" cutoff="$CUTOFF"
+            local cutoff="$CUTOFF"
             if [ -n "$cutoff" ]; then
               # Strictly after: a comment in the same second as the event refuses.
               if ! candidates=$(echo "$candidates" | jq --arg cut "$cutoff" '
@@ -717,41 +780,10 @@ jobs:
               fi
             fi
 
-            # A Reviewed commit prefix must name only this head among the PR's
-            # commits. The list endpoint stops at 250, so a longer PR refuses.
-            if ! [[ "$PR_COMMIT_COUNT" =~ ^[0-9]+$ ]] || [ "$PR_COMMIT_COUNT" -gt 250 ]; then
-              fail_closed_reason "#$PR_NUMBER has ${PR_COMMIT_COUNT:-an unknown number of} commits, too many to show a Reviewed commit prefix names only this head"
-              return 1
-            fi
-            local pr_shas
-            if ! pr_shas=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/commits" --jq '.[]' | jq -s 'map(.sha)'); then
-              fail_closed_reason "could not list the commits of #$PR_NUMBER"
-              return 1
-            fi
-            if [ "$(echo "$pr_shas" | jq 'length')" -ne "$PR_COMMIT_COUNT" ]; then
-              fail_closed_reason "the commit list of #$PR_NUMBER is incomplete, so a Reviewed commit prefix cannot be shown to name only this head"
-              return 1
-            fi
-            # Add every head a force-push replaced, and its history past the base.
-            local replaced oid history
-            if ! replaced=$(echo "$timeline" | jq -r '
-                [.data.node.timelineItems.nodes[] | select(has("beforeCommit"))
-                  | (.beforeCommit.oid // error("force-push without a before commit"))] | unique | .[]'); then
-              fail_closed_reason "a head force-push on #$PR_NUMBER does not record the commit it replaced"
-              return 1
-            fi
-            for oid in $replaced; do
-              # Paged: one response lists at most 250 commits (Greptile P1 on
-              # aios-coffee#122); every page repeats total_commits.
-              if ! history=$(gh api --paginate "/repos/$REPO/compare/$BASE_SHA...$oid?per_page=100" \
-                  | jq -es --arg oid "$oid" '([.[].commits[].sha] | unique) as $s
-                      | if ($s | length) == .[0].total_commits
-                        then [$oid] + $s else error("incomplete") end'); then
-                fail_closed_reason "could not list the full history of ${oid:0:10}, a head replaced by a force-push, so a Reviewed commit prefix cannot be shown to name only this head"
-                return 1
-              fi
-              pr_shas=$(jq -n --argjson a "$pr_shas" --argjson b "$history" '$a + $b | unique')
-            done
+            # A Reviewed commit prefix must name only this head among the
+            # commits this PR has carried.
+            load_carried_shas || return 1
+            local pr_shas="$CARRIED_SHAS"
             if ! candidates=$(echo "$candidates" | jq --argjson shas "$pr_shas" --arg sha "$HEAD_SHA" '
                 map(.reviewed as $r | select([$shas[] | select(. != $sha and startswith($r))] | length == 0))'); then
               fail_closed_reason "could not check Codex Reviewed commit prefixes against the commits of #$PR_NUMBER"
@@ -782,6 +814,177 @@ jobs:
               fi
             done
             fail_closed_reason "clean Codex comment(s) name this head but were edited or unreadable, so they do not count"
+            return 1
+          }
+
+          # Evidence 1b: Codex's clean pass in its CURRENT form (observed from
+          # 2026-09-29): Codex no longer always posts the "Didn't find any major
+          # issues" comment. It keeps one live "Codex Review Summary" issue
+          # comment whose table row turns to Completed with the reviewed short
+          # SHA, and reacts 👍 on the PR when every review finished with no
+          # findings (its own text: "reacts with 👍 once all reviews finish with
+          # no findings"). Survey of 120 org PRs, 2026-10-01: 106 of 106
+          # Completed-on-head rows with no Codex review on the head carried a
+          # Codex 👍 created after the head was pushed; 10 of 10 with a findings
+          # review on the head had none. Every test below must hold:
+          #  - the comment is by the Codex App's bot account, posted via the
+          #    App, and OPENS with Codex's summary marker;
+          #  - its CURRENT text is Codex's own: never edited, or last edited by
+          #    the Codex App (GraphQL editor and newest userContentEdit). The
+          #    table is edited by design (Running -> Completed), so "never
+          #    edited" cannot apply; a writer's edit makes them the editor and
+          #    refuses;
+          #  - the table has at least one review row and EVERY row is
+          #    "✅ **Completed** <time>" naming exactly one commit, a 7-40 hex
+          #    prefix of this head and of no other commit this PR has carried;
+          #  - the 👍 (+1) reaction on the PR by the Codex bot exists, created at
+          #    or after the row's completion second. A reaction cannot be made
+          #    in another account's name, so this is the part no writer can
+          #    forge; it is also Codex's only "no findings" signal in this form
+          #    (Completed alone also follows a findings review);
+          #  - no Codex review object and no Codex inline comment on this head:
+          #    a review with findings is judged by evidence 2 and the P0/P1
+          #    block instead, never by the summary row;
+          #  - Codex is not an author of the head commit;
+          #  - the row's completion time and the 👍 are both after the latest
+          #    retarget or head force-push.
+          # The 👍 can trail the "Completed" edit by a few seconds and fires no
+          # event, so evaluate_once sets AWAIT_REACTION when it alone is
+          # missing and the main loop polls for up to REACTION_GRACE_SECONDS.
+          # RESIDUAL, accepted: the row's prefix is 7 hex, not 10, so the
+          # base-moves-to-contain-the-reviewed-commit residual above needs a
+          # cheaper (28-bit) precomputed collision. Every other step is
+          # unchanged.
+          evidence_from_codex_summary() {
+            if [ "$CODEX_BLOCKED" = "1" ]; then
+              return 1
+            fi
+            local comments candidates n
+            if ! comments=$(gh api --paginate "/repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[]' | jq -s '.'); then
+              fail_closed_reason "could not read issue comments for #$PR_NUMBER"
+              return 1
+            fi
+            # Per comment: the review rows of its table, each parsed strictly.
+            # A row that does not parse yields null, which refuses the comment.
+            if ! candidates=$(echo "$comments" | jq --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
+                  --arg sha "$HEAD_SHA" '
+              def rows: [split("\n")[] | select(startswith("|"))] | .[2:]
+                | map(capture("\\A\\| [^|]+ \\| ✅ \\*\\*Completed\\*\\* <relative-time datetime=\"(?<at>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?Z\">[^|<]*</relative-time> \\| `(?<sha>[0-9a-f]{7,40})` \\| [^|]+ \\|\\z") // null);
+              [.[]
+                | select(
+                    .user.login == $bot and .user.type == "Bot"
+                    and (.performed_via_github_app.slug // "") == $app
+                    and ((.body // "") | test("\\A<!-- codex-pull-request-review-summary -->\n")))
+                | ((.body // "") | rows) as $r
+                | select(($r | length) > 0 and all($r[]; . != null and (.sha as $s | $sha | startswith($s))))
+                | {node_id, shas: ($r | map(.sha) | unique), completed: ($r | map(.at + "Z") | max)}
+              ]'); then
+              fail_closed_reason "could not evaluate the Codex review summary for #$PR_NUMBER"
+              return 1
+            fi
+            n=$(echo "$candidates" | jq 'length')
+            if [ "$n" -eq 0 ]; then
+              fail_closed_reason "no Codex review summary shows a Completed review of this head"
+              return 1
+            fi
+
+            # Findings on this head go to evidence 2 and the P0/P1 block.
+            if echo "$CODEX_REVIEWS" | jq -e --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" '
+                any(.[]; .user.login == $c and .commit_id == $sha)' >/dev/null; then
+              fail_closed_reason "Codex posted a review on this head, so its summary row is not a clean pass"
+              return 1
+            fi
+            local inline
+            if ! inline=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/comments" --jq '.[]' | jq -s --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" '
+                [.[] | select(.user.login == $c and ((.original_commit_id // "") == $sha or (.commit_id // "") == $sha and (.original_commit_id // "") == ""))] | length'); then
+              fail_closed_reason "could not read the inline comments of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$inline" != "0" ]; then
+              fail_closed_reason "Codex left inline comment(s) on this head, so its summary row is not a clean pass"
+              return 1
+            fi
+
+            local pushers
+            if ! pushers=$(last_push_logins_json); then
+              fail_closed_reason "could not read the author of head $HEAD_SHA"
+              return 1
+            fi
+            if echo "$pushers" | jq -e --arg c "$CODEX_BOT" 'index($c)' >/dev/null; then
+              fail_closed_reason "the author of the last push is ${CODEX_BOT}, who is not trusted evidence for this head"
+              return 1
+            fi
+
+            load_cutoff || return 1
+            local cutoff="$CUTOFF"
+            local parse='def parse: sub("\\.[0-9]+";"") | sub("\\+00:00$";"Z") | fromdateiso8601;'
+            if [ -n "$cutoff" ]; then
+              if ! candidates=$(echo "$candidates" | jq --arg cut "$cutoff" "$parse"'
+                  ($cut | parse) as $c | map(select((.completed | parse) > $c))'); then
+                fail_closed_reason "could not compare the Codex summary time with the retarget and head force-push history"
+                return 1
+              fi
+              if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+                fail_closed_reason "the Codex review summary for this head completed before the latest retarget or head force-push (${cutoff}), so it may cover a different diff"
+                return 1
+              fi
+            fi
+
+            load_carried_shas || return 1
+            if ! candidates=$(echo "$candidates" | jq --argjson shas "$CARRIED_SHAS" --arg sha "$HEAD_SHA" '
+                map(select(all(.shas[]; . as $r | [$shas[] | select(. != $sha and startswith($r))] | length == 0)))'); then
+              fail_closed_reason "could not check the Codex summary commit prefix against the commits of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+              fail_closed_reason "the commit prefix in the Codex review summary also matches another commit this PR has carried, so it does not identify this head"
+              return 1
+            fi
+
+            # Matched on the login alone: the reactions API reports the Codex
+            # bot as type "User" (checked 2026-10-01 on opportunity-builder#193),
+            # unlike the comments and reviews APIs. A "[bot]" login is still
+            # unforgeable: only a GitHub App account can carry that suffix.
+            local reactions
+            if ! reactions=$(gh api --paginate "/repos/$REPO/issues/$PR_NUMBER/reactions?content=%2B1&per_page=100" --jq '.[]' | jq -s --arg c "$CODEX_BOT" '
+                [.[] | select(.user.login == $c and .content == "+1") | .created_at]'); then
+              fail_closed_reason "could not read the reactions on #$PR_NUMBER"
+              return 1
+            fi
+
+            local node meta ok completed
+            for node in $(echo "$candidates" | jq -r '.[].node_id'); do
+              # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
+              if ! meta=$(gh api graphql -f id="$node" -f query='
+                  query($id: ID!) { node(id: $id) { ... on IssueComment {
+                    lastEditedAt author { login } editor { login }
+                    userContentEdits(first: 1) { nodes { editor { login } } } } } }'); then
+                continue
+              fi
+              ok=$(echo "$meta" | jq -r --arg app "$CODEX_APP" '
+                .data.node as $c
+                | if $c == null then "no"
+                  elif ($c.author.login // "") != $app then "no"
+                  elif $c.lastEditedAt == null then "yes"
+                  elif ($c.editor.login // "") != $app then "no"
+                  elif (($c.userContentEdits.nodes // []) | length) == 0 then "no"
+                  elif ($c.userContentEdits.nodes[0].editor.login // "") != $app then "no"
+                  else "yes" end')
+              if [ "$ok" != "yes" ]; then
+                continue
+              fi
+              completed=$(echo "$candidates" | jq -r --arg node "$node" '.[] | select(.node_id == $node) | .completed')
+              if ! echo "$reactions" | jq -e --arg fin "$completed" --arg cut "$cutoff" "$parse"'
+                  ($fin | parse) as $d
+                  | any(.[]; (parse) as $t | $t >= $d and ($cut == "" or $t > ($cut | parse)))' >/dev/null; then
+                AWAIT_REACTION=1
+                fail_closed_reason "the Codex review summary shows this head Completed, but Codex has not reacted 👍 (no findings) since it completed"
+                return 1
+              fi
+              EVIDENCE="a clean Codex result for this head: the Codex review summary (by ${CODEX_BOT}, last edited by the ${CODEX_APP} app) shows every review Completed on ${HEAD_SHA:0:7}, a prefix of no other commit this PR has carried, Codex reacted 👍 (no findings) after it completed, Codex left no review or inline comment on this head, all after the latest retarget or head force-push, and no unresolved P0/P1 Codex finding"
+              return 0
+            done
+            fail_closed_reason "the Codex review summary naming this head was last edited by someone other than Codex, or is unreadable, so it does not count"
             return 1
           }
 
@@ -864,6 +1067,7 @@ jobs:
             CONCLUSION="action_required"
             TITLE="Waiting for a clean Codex review"
             CODEX_BLOCKED=0
+            AWAIT_REACTION=0
 
             # Identity first so a fail-closed verdict can still land on the head SHA.
             if ! resolve_pr; then
@@ -905,12 +1109,17 @@ jobs:
               TITLE="Reviewed by Codex"
               return 0
             fi
+            if evidence_from_codex_summary; then
+              CONCLUSION="success"
+              TITLE="Reviewed by Codex"
+              return 0
+            fi
             if evidence_from_codex_review; then
               CONCLUSION="success"
               TITLE="Reviewed by Codex"
               return 0
             fi
-            fail_closed_reason "only Codex's review of this head counts; reactions, Greptile and human approvals are not evidence"
+            fail_closed_reason "only Codex's review of this head counts; Greptile, human approvals and any reaction but Codex's own 👍 on a Completed summary are not evidence"
             return 0
           }
 
@@ -1000,10 +1209,21 @@ jobs:
           fi
 
           deadline=$((SECONDS + WAIT_SECONDS))
+          reaction_deadline=$((SECONDS + REACTION_GRACE_SECONDS))
           while true; do
             evaluate_once
-            if [ -n "$EVIDENCE" ] || [ "$SUPERSEDED" = "1" ] || [ "$SECONDS" -ge "$deadline" ]; then
+            if [ -n "$EVIDENCE" ] || [ "$SUPERSEDED" = "1" ]; then
               break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              # Past the reviewer wait, keep polling only while the 👍 alone is
+              # missing, and only within its grace window.
+              if [ "$AWAIT_REACTION" != "1" ] || [ "$SECONDS" -ge "$reaction_deadline" ]; then
+                break
+              fi
+              echo "Codex summary shows this head Completed; waiting up to ${REACTION_GRACE_SECONDS}s for its 👍."
+              sleep 10
+              continue
             fi
             printf 'No evidence yet; waiting for a clean Codex result on this head, up to %ss.\n' \
               "$WAIT_SECONDS"
