@@ -1,0 +1,317 @@
+name: Codex auto-request
+
+# CANONICAL COPY (Automation-Architecture/.github). Edit here, never in a repo.
+#
+# Comments `@codex review` on a new or updated non-draft PR whose head commit
+# has no Codex review yet (Brad, 2026-10-01). The org gate requires Codex on
+# the CURRENT head, and Codex's own auto-review skips PRs by some contractors
+# (mac-tuongnh, seanpham99), bot PRs (aaa-dashboard-bot) and everything in
+# aaa-runbooks ("create an environment for this repo"), while a manual
+# `@codex review` from web3sea is honoured there.
+#
+# ── Whom Codex obeys (evidence, 2026-10-01) ────────────────────────────────
+# Codex maps the COMMENTER's GitHub account to a linked ChatGPT/Codex account.
+# A bot's request is refused: on aaa-runbooks#165 `@codex review` from
+# claude[bot] got "To use Codex here, create a Codex account and connect to
+# github" within 4 s, twice (2026-09-26, 2026-09-28), while web3sea's
+# `@codex review` on the same PR and head ran a "Manual request" review
+# (2026-09-28). OpenAI documents the same mapping (team automations run "for
+# everyone with a linked ChatGPT account"; openai/codex#11881). A comment
+# made with GITHUB_TOKEN is posted by github-actions[bot], so it would be
+# refused too. The request is therefore posted with AAA_ORG_TOKEN (classic
+# PAT of web3sea, org-wide repo + workflow scope; 1Password vault aaa-APIs,
+# item aaa-org-token), the account Codex obeys.
+#
+# ── Threat model: the org PAT never meets PR code ──────────────────────────
+# pull_request_target (and workflow_dispatch) run THIS FILE FROM THE DEFAULT
+# BRANCH, never the PR's copy, so a PR cannot edit what runs. Nothing here
+# checks out, builds or executes PR content. No PR-controlled text (title,
+# body, branch name, comment text) is interpolated into a script: only the
+# PR number and head SHA, both validated. The `decide` step reads the API
+# with a READ-ONLY GITHUB_TOKEN (permissions below). The PAT exists only in
+# the env of the `request` step, whose single command posts one fixed comment
+# (`@codex review` plus a hidden marker naming the head SHA) to this PR. Do
+# not add a checkout, an action from a third party, or any other use of the
+# PAT to this file. Never trigger it on `pull_request` (that runs the PR's
+# own copy, with the secret in reach). Fork PRs are skipped: no
+# outsider-controlled PR can spend web3sea's Codex quota.
+#
+# ── When it asks, and when it does not ─────────────────────────────────────
+# On opened, synchronize, reopened and ready_for_review of a non-draft,
+# same-repository PR, it first waits DELAY_SECONDS (150) so Codex's own
+# auto-review (PR opened / ready / Smart-detect "New commits") can start,
+# then re-reads the PR (still open, not draft, head unchanged; otherwise the
+# run for the newer state decides) and SKIPS when, for the head SHA:
+#   - Codex submitted a review object on it;
+#   - Codex's "Codex Review Summary" comment has a row for it that is
+#     Completed, Running, or any status but Failed (Failed is retried);
+#   - this workflow already asked once for it (hidden marker
+#     `<!-- codex-auto-request head=<sha> -->`, any age): AT MOST ONE REQUEST
+#     PER HEAD, so a usage-limit or error reply never becomes a loop;
+#   - a non-bot account commented `@codex review` (or `@codex security
+#     review`) at or after the head was pushed, and Codex did not answer it
+#     with "create a Codex account" within 120 s. Bot requests never count
+#     (Codex refuses them, see above).
+# While Codex shows 👀 on the PR (a review is running) with no row for the
+# head yet, it re-checks every POLL_SECONDS up to BUSY_WAIT_SECONDS, then
+# asks. "Head pushed" is the event time for synchronize and the head
+# commit's committer date otherwise (a comment made after a local commit but
+# before its push would count; accepted).
+# Usage limits: when Codex's latest reply is "You have reached your Codex
+# usage limits", the run says so; the one-per-head marker is what stops a
+# re-request loop. A new head gets one new request.
+#
+# Known gaps (accepted, documented):
+#   - Dependabot PRs: GitHub withholds Actions secrets from
+#     pull_request_target runs on a PR Dependabot opened, so the request step
+#     has no PAT. The run says so and stays green. Closing it needs
+#     AAA_ORG_TOKEN as an org Dependabot secret (Brad's call) or a manual
+#     `@codex review`.
+#   - A decide/request race of a few seconds with a manual `@codex review`
+#     can produce two requests for one head; Codex runs one review per
+#     request, so the cost is one extra review.
+#   - GitHub keeps one PENDING run per concurrency group: a third event for
+#     the same head inside one run's wait cancels the queued second one (a
+#     `cancelled` check on that head). Rare; the running first run decides.
+#
+# Observability: every run ends `codex-auto-request #<n>: <decision>`.
+# Missing AAA_ORG_TOKEN on a non-Dependabot PR is ::error (red). After
+# posting, the `confirm` step waits up to 90 s for Codex's 👀 on the request
+# and emits ::warning if Codex refused it or did not react.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to evaluate (requests a Codex review if its head has none)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  # One decision at a time per PR AND head, queued, never cancelled: a second
+  # event for the same head (reopened, ready_for_review) waits, then sees the
+  # first run's marker and skips. Cancelling would leave a `cancelled` check
+  # on the head, which doc-auto-merge.yml reads as red. A run for an older
+  # head is in another group; after its wait it sees the head moved and skips.
+  group: codex-auto-request-${{ github.repository }}-${{ github.event.pull_request.number || github.event.inputs.pr_number }}-${{ github.event.pull_request.head.sha || 'dispatch' }}
+  cancel-in-progress: false
+
+jobs:
+  codex-auto-request:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.draft == false &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Decide whether the head needs a Codex request
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          EVENT_HEAD: ${{ github.event.pull_request.head.sha || '' }}
+          # synchronize: the push time. Other events: the head commit's date.
+          PUSHED_AT: ${{ github.event.action == 'synchronize' && github.event.pull_request.updated_at || '' }}
+          CODEX_BOT: "chatgpt-codex-connector[bot]"
+          DELAY_SECONDS: "150"
+          BUSY_WAIT_SECONDS: "300"
+          POLL_SECONDS: "30"
+          REFUSAL_WINDOW_SECONDS: "120"
+        run: |
+          set -euo pipefail
+          REPO="${REPO:?REPO is required}"
+          PR_NUMBER="${PR_NUMBER:-}"
+          EVENT_HEAD="${EVENT_HEAD:-}"
+          PUSHED_AT="${PUSHED_AT:-}"
+          CODEX_BOT="${CODEX_BOT:-chatgpt-codex-connector[bot]}"
+          DELAY_SECONDS="${DELAY_SECONDS:-150}"
+          BUSY_WAIT_SECONDS="${BUSY_WAIT_SECONDS:-300}"
+          POLL_SECONDS="${POLL_SECONDS:-30}"
+          REFUSAL_WINDOW_SECONDS="${REFUSAL_WINDOW_SECONDS:-120}"
+          OUT="${GITHUB_OUTPUT:-/dev/null}"
+          say() { echo "codex-auto-request #${PR_NUMBER}: $*"; }
+          decide() { # <request:true|false> <reason>
+            say "$2"
+            echo "request=$1" >> "$OUT"
+            if [ "$1" = true ]; then echo "head=$HEAD" >> "$OUT"; fi
+            exit 0
+          }
+          if ! [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]]; then
+            echo "::error::PR number '${PR_NUMBER}' is not a PR number."
+            exit 1
+          fi
+          if [ -n "$EVENT_HEAD" ] && ! [[ "$EVENT_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Event head '${EVENT_HEAD}' is not a commit SHA."
+            exit 1
+          fi
+          if [ "$DELAY_SECONDS" -gt 0 ]; then
+            say "waiting ${DELAY_SECONDS}s for Codex's own review to start."
+            sleep "$DELAY_SECONDS"
+          fi
+
+          if ! pr=$(gh api "repos/$REPO/pulls/$PR_NUMBER"); then
+            echo "::error::Could not read #$PR_NUMBER."
+            exit 1
+          fi
+          state=$(jq -r '.state // ""' <<<"$pr")
+          draft=$(jq -r '.draft // false' <<<"$pr")
+          HEAD=$(jq -r '.head.sha // ""' <<<"$pr")
+          head_repo=$(jq -r '.head.repo.full_name // ""' <<<"$pr")
+          [ "$state" = open ] || decide false "PR is ${state:-unreadable}; nothing to request."
+          [ "$draft" = false ] || decide false "draft; ready_for_review re-evaluates."
+          [ "$head_repo" = "$REPO" ] || decide false "head is in ${head_repo:-a deleted repository}, not $REPO; fork PRs are never auto-requested."
+          if ! [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not read a head SHA for #$PR_NUMBER."
+            exit 1
+          fi
+          if [ -n "$EVENT_HEAD" ] && [ "$HEAD" != "$EVENT_HEAD" ]; then
+            decide false "head moved ${EVENT_HEAD:0:7} -> ${HEAD:0:7}; the run for the new head decides."
+          fi
+
+          anchor="$PUSHED_AT"
+          if [ -z "$anchor" ]; then
+            if ! anchor=$(gh api "repos/$REPO/commits/$HEAD" --jq '.commit.committer.date // ""') || [ -z "$anchor" ]; then
+              echo "::error::Could not read the date of ${HEAD:0:7}."
+              exit 1
+            fi
+          fi
+          if ! [[ "$anchor" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            echo "::error::Unusable push time '${anchor}'."
+            exit 1
+          fi
+
+          busy_deadline=$((SECONDS + BUSY_WAIT_SECONDS))
+          while true; do
+            if ! comments=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" \
+                  --jq '.[] | {user: .user.login, type: .user.type, at: .created_at, body: (.body // "")}' | jq -s .) \
+               || ! reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
+                  --jq '.[] | {user: .user.login, commit: .commit_id}' | jq -s .) \
+               || ! reactions=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/reactions?per_page=100" \
+                  --jq '.[] | {user: .user.login, content}' | jq -s .); then
+              echo "::error::Could not read #$PR_NUMBER's comments, reviews or reactions."
+              exit 1
+            fi
+
+            n=$(jq --arg bot "$CODEX_BOT" --arg head "$HEAD" \
+                  '[.[] | select(.user == $bot and .commit == $head)] | length' <<<"$reviews")
+            [ "$n" -eq 0 ] || decide false "Codex already reviewed ${HEAD:0:7}."
+
+            # Rows of Codex's live summary table that name this head (7+ hex prefix):
+            # "| 📝 **Code Review** | ✅ **Completed** <time> | `abc1234` | PR opened |"
+            rows=$(jq -r --arg bot "$CODEX_BOT" --arg head "$HEAD" '
+                [.[] | select(.user == $bot and (.body | startswith("<!-- codex-pull-request-review-summary -->")))]
+                | last // {body: ""} | .body | split("\n")[]
+                | capture("\\A\\|[^|]+\\|\\s*(?<status>[^|]*?)\\s*\\|\\s*`(?<sha>[0-9a-f]{7,40})`\\s*\\|") // empty
+                | select(.sha as $s | $head | startswith($s))
+                | .status' <<<"$comments")
+            if [ -n "$rows" ]; then
+              if grep -q 'Completed' <<<"$rows"; then
+                decide false "Codex's review of ${HEAD:0:7} is Completed."
+              fi
+              if grep -qv 'Failed' <<<"$rows"; then
+                decide false "Codex's review of ${HEAD:0:7} is in progress ($(grep -v Failed <<<"$rows" | head -1 | grep -oE '\*\*[A-Za-z ]+\*\*' | tr -d '*' || true))."
+              fi
+            fi
+
+            n=$(jq --arg m "<!-- codex-auto-request head=$HEAD -->" \
+                  '[.[] | select(.body | contains($m))] | length' <<<"$comments")
+            [ "$n" -eq 0 ] || decide false "already requested once for ${HEAD:0:7} (at most one request per head)."
+
+            # A human `@codex review` at/after the push counts unless Codex refused
+            # it ("create a Codex account") within the refusal window.
+            n=$(jq --arg bot "$CODEX_BOT" --arg anchor "$anchor" --argjson win "$REFUSAL_WINDOW_SECONDS" '
+                . as $all
+                | [ .[] | select(.type != "Bot" and (.user | endswith("[bot]") | not) and .at >= $anchor
+                         and (.body | test("(\\A|\\s)@codex (security )?review\\b"; "i")))
+                    | .at as $t
+                    | select([ $all[] | select(.user == $bot
+                                 and (.body | test("\\ATo use Codex here, \\[create a Codex account"))
+                                 and .at >= $t
+                                 and ((.at | fromdateiso8601) - ($t | fromdateiso8601)) <= $win) ] | length == 0) ]
+                | length' <<<"$comments")
+            [ "$n" -eq 0 ] || decide false "someone already asked for a Codex review after ${HEAD:0:7} was pushed."
+
+            eyes=$(jq --arg bot "$CODEX_BOT" '[.[] | select(.user == $bot and .content == "eyes")] | length' <<<"$reactions")
+            if [ "$eyes" -gt 0 ] && [ "$SECONDS" -lt "$busy_deadline" ]; then
+              say "Codex shows 👀 (a review is running) with no row for ${HEAD:0:7} yet; re-checking in ${POLL_SECONDS}s."
+              sleep "$POLL_SECONDS"
+              continue
+            fi
+            break
+          done
+
+          last=$(jq -r --arg bot "$CODEX_BOT" '[.[] | select(.user == $bot and (.body | startswith("<!-- codex-pull-request-review-summary -->") | not))] | last // {body: ""} | .body' <<<"$comments")
+          note=""
+          if grep -q 'reached your Codex usage limits' <<<"$last"; then
+            note=" Codex's latest reply is a usage-limit notice; this is the one request for this head."
+          fi
+          decide true "no Codex review of ${HEAD:0:7}; requesting one.${note}"
+
+      - name: Request a Codex review (the only use of the org PAT)
+        id: request
+        if: steps.decide.outputs.request == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          HEAD: ${{ steps.decide.outputs.head }}
+          DEPENDABOT_PR: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            if [ "$DEPENDABOT_PR" = true ]; then
+              echo "codex-auto-request #$PR_NUMBER: Dependabot PR; GitHub withholds AAA_ORG_TOKEN from this run. Comment \`@codex review\` by hand."
+              exit 0
+            fi
+            echo "::error::AAA_ORG_TOKEN is not available; a request from github-actions[bot] would be refused by Codex. Not requesting."
+            exit 1
+          fi
+          [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad head '$HEAD'"; exit 1; }
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "::error::bad PR number"; exit 1; }
+          id=$(gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" \
+                 -f body="$(printf '@codex review\n\n<!-- codex-auto-request head=%s -->' "$HEAD")" --jq '.id')
+          echo "comment_id=$id" >> "$GITHUB_OUTPUT"
+          echo "codex-auto-request #$PR_NUMBER: requested a Codex review of ${HEAD:0:7} (comment $id)."
+
+      - name: Confirm Codex picked the request up
+        if: steps.request.outputs.comment_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+          COMMENT_ID: ${{ steps.request.outputs.comment_id }}
+        run: |
+          set -euo pipefail
+          [[ "$COMMENT_ID" =~ ^[0-9]+$ ]] || { echo "::error::bad comment id"; exit 1; }
+          # count <path> <jq emitting one id per match>; an unreadable page counts 0
+          # (on an HTTP error `gh api --jq` prints the error JSON to stdout, so
+          # only bare numeric ids are counted).
+          count() { { gh api --paginate "$1" --jq "$2" 2>/dev/null || true; } | grep -cE '^[0-9]+$' || true; }
+          codex='"chatgpt-codex-connector[bot]"'
+          for _ in 1 2 3 4 5 6; do
+            sleep 15
+            # Codex shows 👀 on the request (or on the PR) while the review runs.
+            seen=$(( $(count "repos/$REPO/issues/comments/$COMMENT_ID/reactions" ".[] | select(.user.login == $codex and .content == \"eyes\") | .id") \
+                   + $(count "repos/$REPO/issues/$PR_NUMBER/reactions" ".[] | select(.user.login == $codex and .content == \"eyes\") | .id") ))
+            if [ "$seen" -gt 0 ]; then
+              echo "codex-auto-request #$PR_NUMBER: Codex acknowledged the request (👀)."
+              exit 0
+            fi
+            # Only Codex replies made after the request count (comment ids increase).
+            refused=$(count "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" \
+                        ".[] | select(.id > $COMMENT_ID and .user.login == $codex and (.body | startswith(\"To use Codex here\"))) | .id")
+            if [ "$refused" -gt 0 ]; then
+              echo "::warning::Codex answered the request on #$PR_NUMBER with a 'To use Codex here' setup message instead of reviewing."
+              exit 0
+            fi
+          done
+          echo "::warning::Codex did not react to the request on #$PR_NUMBER within 90s."
