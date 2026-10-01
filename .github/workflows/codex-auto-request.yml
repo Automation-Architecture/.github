@@ -46,8 +46,11 @@ name: Codex auto-request
 # review-verdict.yml applies; anything older is ignored, Codex P1 on #71):
 #   - Codex submitted a review object on it that the gate can accept (not
 #     dismissed or pending, not a skip notice matching REVIEW_SKIP_PATTERN);
-#   - Codex's "Codex Review Summary" comment has a row for it that is
-#     Completed, Running, or any status but Failed (Failed is retried);
+#   - Codex's "Codex Review Summary" comment has rows for it that are all
+#     Completed AND Codex reacted 👍 on the PR at/after the completion (what
+#     review-verdict.yml accepts; a Completed table with no 👍 is retried
+#     after REACTION_GRACE_SECONDS), or any row is Running or another
+#     non-final status. A Failed row is always retried;
 #   - this workflow already asked once for it (hidden marker
 #     `<!-- codex-auto-request head=<sha> -->`, any age): AT MOST ONE REQUEST
 #     PER HEAD, so a usage-limit or error reply never becomes a loop;
@@ -135,6 +138,8 @@ jobs:
           BUSY_WAIT_SECONDS: "300"
           POLL_SECONDS: "30"
           REFUSAL_WINDOW_SECONDS: "120"
+          # Same grace as review-verdict.yml's REACTION_GRACE_SECONDS.
+          REACTION_GRACE_SECONDS: "90"
         run: |
           set -euo pipefail
           REPO="${REPO:?REPO is required}"
@@ -147,6 +152,7 @@ jobs:
           BUSY_WAIT_SECONDS="${BUSY_WAIT_SECONDS:-300}"
           POLL_SECONDS="${POLL_SECONDS:-30}"
           REFUSAL_WINDOW_SECONDS="${REFUSAL_WINDOW_SECONDS:-120}"
+          REACTION_GRACE_SECONDS="${REACTION_GRACE_SECONDS:-90}"
           OUT="${GITHUB_OUTPUT:-/dev/null}"
           say() { echo "codex-auto-request #${PR_NUMBER}: $*"; }
           decide() { # <request:true|false> <reason>
@@ -231,7 +237,7 @@ jobs:
                || ! reviews=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" \
                   --jq '.[] | {user: .user.login, commit: .commit_id, state, at: (.submitted_at // ""), body: (.body // "")}' | jq -s .) \
                || ! reactions=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/reactions?per_page=100" \
-                  --jq '.[] | {user: .user.login, content}' | jq -s .); then
+                  --jq '.[] | {user: .user.login, content, at: (.created_at // "")}' | jq -s .); then
               echo "::error::Could not read #$PR_NUMBER's comments, reviews or reactions."
               exit 1
             fi
@@ -256,13 +262,31 @@ jobs:
                 # there is a cutoff) is about an older base: not this review.
                 | ((.status | capture("datetime=\"(?<t>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})") | .t + "Z") // "") as $t
                 | select($cut == "" or $t > $cut)
-                | .status' <<<"$comments")
+                | .status + "\t" + $t' <<<"$comments")
             # A Failed row wins: review-verdict.yml accepts a summary only when EVERY
             # row for the head is Completed, so a mixed table is retried (Codex P1
             # on .github#71). Otherwise all Completed is done, anything else running.
+            # All Completed is final only with the evidence the gate needs: Codex's
+            # 👍 on the PR at/after the completion (or a review object, checked
+            # above). Without it, wait REACTION_GRACE_SECONDS (the 👍 trails the
+            # edit by seconds), then ask once (Codex P1 on .github#71).
             if [ -n "$rows" ] && ! grep -q 'Failed' <<<"$rows"; then
               if ! grep -qv 'Completed' <<<"$rows"; then
-                decide false "Codex's review of ${HEAD:0:7} is Completed."
+                done_at=$(cut -f2 <<<"$rows" | sort | tail -1)
+                thumbs=$(jq --arg bot "$CODEX_BOT" --arg t "$done_at" --arg cut "$CUTOFF" \
+                           '[.[] | select(.user == $bot and .content == "+1" and .at >= $t and .at > $cut)] | length' <<<"$reactions")
+                if [ "$thumbs" -gt 0 ]; then
+                  decide false "Codex's review of ${HEAD:0:7} is Completed with its 👍."
+                fi
+                if [ -z "${reaction_deadline:-}" ]; then
+                  reaction_deadline=$((SECONDS + REACTION_GRACE_SECONDS))
+                fi
+                if [ "$SECONDS" -lt "$reaction_deadline" ]; then
+                  say "Codex's review of ${HEAD:0:7} is Completed but has no 👍 yet; re-checking in ${POLL_SECONDS}s."
+                  sleep "$POLL_SECONDS"
+                  continue
+                fi
+                say "Codex's review of ${HEAD:0:7} is Completed with no 👍 and no review: the gate cannot accept it."
               else
                 decide false "Codex's review of ${HEAD:0:7} is in progress ($(grep -v Completed <<<"$rows" | head -1 | grep -oE '\*\*[A-Za-z ]+\*\*' | tr -d '*' || true))."
               fi

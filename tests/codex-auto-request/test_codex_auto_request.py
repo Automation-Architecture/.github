@@ -111,6 +111,13 @@ def timeline(*times, more=False):
 RETARGET = "2026-10-01T10:30:00Z"
 
 
+def thumbs(at="2026-10-01T10:03:03Z", user=CODEX):
+    return {"user": {"login": user}, "content": "+1", "created_at": at}
+
+
+THUMBS = thumbs()
+
+
 def base(comments=(), reviews=(), reactions=(), cutoff=(), **prkw):
     return {
         "graphql": timeline(*cutoff),
@@ -172,10 +179,22 @@ case("Codex 👀 clears on the re-check, still no row: requests", "request",
      with_(base(), **{f"/issues/{PR}/reactions": {"__seq": [[{"user": {"login": CODEX}, "content": "eyes"}], []]}}),
      env={"BUSY_WAIT_SECONDS": "5"})
 case("another account's thumbs-up does not matter: requests", "request",
-     base(reactions=[{"user": {"login": "web3sea"}, "content": "+1"}]))
+     base(comments=[summary(("Completed", HEAD))], reactions=[thumbs(user="web3sea")]))
 
 # --- skips --------------------------------------------------------------------
-case("Codex Completed on this head: skips", "skip", base(comments=[summary(("Completed", HEAD))]))
+case("Codex Completed on this head + its 👍: skips", "skip",
+     base(comments=[summary(("Completed", HEAD))], reactions=[THUMBS]))
+case("Codex Completed on this head, no 👍 and no review (gate cannot accept): requests once", "request",
+     base(comments=[summary(("Completed", HEAD))]))
+case("Codex Completed, 👍 predates the completion (an older review's): requests", "request",
+     base(comments=[summary(("Completed", HEAD))], reactions=[thumbs("2026-10-01T09:00:00Z")]))
+case("Codex Completed, 👍 arrives on the re-check: skips", "skip",
+     with_(base(comments=[summary(("Completed", HEAD))]),
+           **{f"/issues/{PR}/reactions": {"__seq": [[], [THUMBS]]}}),
+     env={"REACTION_GRACE_SECONDS": "5"})
+case("Codex Completed, no 👍, already requested once for this head: skips", "skip",
+     base(comments=[summary(("Completed", HEAD)),
+                    comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->", at="2026-10-01T10:04:00Z")]))
 case("Codex Running on this head: skips", "skip", base(comments=[summary(("Running", HEAD))]))
 case("Codex row in an unknown (queued) status on this head: skips", "skip",
      base(comments=[summary(("⏳ **Queued**", HEAD))]))
@@ -233,7 +252,7 @@ case("another account's review on this head: requests", "request", base(reviews=
 case("retarget AFTER Codex reviewed the head: requests", "request",
      base(reviews=[review()], cutoff=[RETARGET]))
 case("retarget AFTER Codex's Completed row: requests", "request",
-     base(comments=[summary(("Completed", HEAD))], cutoff=[RETARGET]))
+     base(comments=[summary(("Completed", HEAD))], reactions=[THUMBS], cutoff=[RETARGET]))
 case("retarget AFTER our marker for this head: requests again", "request",
      base(comments=[comment("web3sea", f"@codex review\n\n<!-- codex-auto-request head={HEAD} -->",
                             at="2026-10-01T10:03:00Z")], cutoff=[RETARGET]))
@@ -325,7 +344,7 @@ def main():
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
                    **static_env, "REPO": REPO, "PR_NUMBER": str(PR), "EVENT_HEAD": "", "PUSHED_AT": "",
                    "GH_TOKEN": "read-token", "DELAY_SECONDS": "0", "POLL_SECONDS": "0",
-                   "GITHUB_OUTPUT": str(outf), "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state),
+                   "REACTION_GRACE_SECONDS": "0", "GITHUB_OUTPUT": str(outf), "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state),
                    **env_over}
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True,
                                  timeout=60)
