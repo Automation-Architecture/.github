@@ -29,6 +29,8 @@ BASE_SHAS = ["a" * 40, "c" * 40, "d" * 40]
 # A base tip that landed after the evaluation (base pin), and the squash commit.
 MOVED = "f" * 40
 MERGE_SHA = "e" * 40
+# The PR's `.base.sha` as the pulls API reports it (not the tip; see base()).
+PR_BASE = "b" * 40
 
 # Stub gh. A fixture value {"__seq": [a, b, ...]} is served one entry per call
 # (the last repeats); with no wait the script reads the PR once to qualify
@@ -100,13 +102,13 @@ sys.stdout.write(data)
 
 
 def pr(files=1, draft=False, labels=(), head_repo=REPO, head=HEAD, base="main", merged=False, state="open",
-       number=PR, armed=False):
+       number=PR, armed=False, base_sha=PR_BASE):
     return {"number": number, "node_id": f"PR_{number}", "auto_merge": {"merge_method": "squash"} if armed else None,
             "state": state, "merged": merged, "draft": draft, "changed_files": files,
             "merge_commit_sha": MERGE_SHA if merged else None,
             "labels": [{"name": l} for l in labels],
             "head": {"sha": head, "ref": "docs/x", "repo": {"full_name": head_repo} if head_repo else None},
-            "base": {"ref": base, "sha": "b" * 40}}
+            "base": {"ref": base, "sha": base_sha}}
 
 
 def run_(name, conclusion="success", status="completed", slug="github-actions", rid=1, app_id=15368, run=None):
@@ -143,6 +145,9 @@ def base(files=("README.md",), runs=(), statuses=(), required=(), classic=None, 
         "/git/ref/heads/main": tip(BASE_SHAS[0]),
         # The squash commit lands on the pinned tip.
         f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[0]}]},
+        # The PR's `.base.sha` ("b" * 40) lags the tip, as GitHub leaves it: it is
+        # the merge base of the head and the tip (aaa-client-dashboard#247).
+        f"/compare/{BASE_SHAS[0]}...{HEAD}": {"merge_base_commit": {"sha": PR_BASE}},
     }
 
 
@@ -159,11 +164,12 @@ def with_(fx, **kw):
 CASES = []
 
 
-def case(name, expect, fx, env=None, merged=None, disarmed=None):
+def case(name, expect, fx, env=None, merged=None, disarmed=None, says=None):
     """expect: 'merged' or 'held' (no merge call, exit 0) or 'error' (exit != 0, no merge).
     merged: the exact set of PR numbers that must be merged (multi-PR cases).
-    disarmed: the exact set of PR numbers whose native auto-merge must be disabled."""
-    CASES.append((name, expect, fx, env or {}, merged, disarmed))
+    disarmed: the exact set of PR numbers whose native auto-merge must be disabled.
+    says: a substring the run's stdout must contain (e.g. pending vs red)."""
+    CASES.append((name, expect, fx, env or {}, merged, disarmed, says))
 
 
 OTHER = 8
@@ -476,8 +482,11 @@ case("base moved during the wait, stable from the final snapshot on: merges agai
                       f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[1]}]}}))
 case("squash commit landed on another base (moved inside the round trip): red run after the merge", "error",
      with_(base(), **{f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": MOVED}]}}))
-case("squash commit parent unreadable: merged, warning only", "merged",
-     with_(base(), **{f"/commits/{MERGE_SHA}": "__error"}))
+# Codex P2 on the wave-4 re-syncs (aaa-aios#217 and others): unverifiable is red.
+case("squash commit parent unreadable: merged, but a red run", "error",
+     with_(base(), **{f"/commits/{MERGE_SHA}": "__error"}), says="parent could not be read")
+case("squash commit with no parent: merged, but a red run", "error",
+     with_(base(), **{f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": []}}), says="parent could not be read")
 
 # --- The merge token: the org PAT or nothing (Codex P1 on aios-coffee#135) ----
 case("no AAA_ORG_TOKEN: a qualifying PR is a red run, never merged", "error", base(),
@@ -588,6 +597,93 @@ case("two PRs at one head, each with its own gate verdict: only the passing one 
      with_(base(runs=[gate_run("failure", 1, OTHER), gate_run("success", 2, PR)], required=[GATE]), **second()),
      env=multi(PR, OTHER), merged={PR})
 
+# --- A check bound to THIS PR counts only for the candidate merged ------------
+# (Codex P1 on the wave-4 re-syncs: aaa-pr-bot#50, aaa-aios#217, qa-template#8 ...)
+# Its key's head must be HEAD and its base this PR's `.base.sha` (read in the same
+# snapshot) and either the pinned tip or the merge base of HEAD and the tip.
+OLD_BASE = "9" * 40
+
+
+def bound(name, conclusion, rid, base_sha=PR_BASE, head=HEAD, tag="v2.8", pr_number=PR, slug="agency-delivery-gate",
+          app_id=None, run=None, key=None):
+    r = run_(name, conclusion, slug=slug, rid=rid, app_id=app_id or GATE[1], run=run)
+    r["external_id"] = key if key is not None else f"{REPO}#{pr_number}:{base_sha}:{head}:{tag}"
+    return r
+
+
+case("bound: keyed on the merge base (`.base.sha` lags the tip, as GitHub leaves it): merges", "merged",
+     base(runs=[bound(GATE[0], "success", 1)], required=[GATE]))
+case("bound: keyed on the tip, `.base.sha` is the tip: merges without a compare", "merged",
+     with_(base(runs=[bound(GATE[0], "success", 1, base_sha=BASE_SHAS[0])], required=[GATE],
+                base_sha=BASE_SHAS[0]), **{f"/compare/{BASE_SHAS[0]}...{HEAD}": "__error"}))
+case("bound: success for an older base of this PR: pending, not merged, not red", "held",
+     base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE]),
+     says="bound to an older candidate of this PR")
+case("bound: failure for an older base of this PR is not red; an unrequired one does not hold", "merged",
+     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE)]))
+case("bound: failure for an older base, required and newest (GitHub enforces it): pending, not red", "held",
+     base(runs=[bound(GATE[0], "success", 1), bound(GATE[0], "failure", 2, base_sha=OLD_BASE)], required=[GATE]),
+     says="older candidate of this PR (base 9999999")
+case("bound: `.base.sha` is neither the tip nor the merge base: the key it names is stale, not merged", "held",
+     base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE], base_sha=OLD_BASE),
+     says="older candidate")
+case("bound: keyed on the merge base, but `.base.sha` now names another commit: not merged", "held",
+     base(runs=[bound(GATE[0], "success", 1)], required=[GATE], base_sha=OLD_BASE), says="older candidate")
+case("bound: another head in the key: not merged", "held",
+     base(runs=[bound(GATE[0], "success", 1, head=NEW_HEAD)], required=[GATE]), says="older candidate")
+case("bound: a key naming this PR that does not parse: not merged", "held",
+     base(runs=[bound(GATE[0], "success", 1, key=f"{REPO}#{PR}:main:v2.8")], required=[GATE]),
+     says="older candidate")
+case("bound: merge base unreadable while `.base.sha` lags: the bound check is not trusted", "held",
+     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
+           **{f"/compare/{BASE_SHAS[0]}...{HEAD}": "__error"}), says="older candidate")
+case("unbound checks are unaffected by an unreadable merge base: merges", "merged",
+     with_(base(runs=GREEN_CI), **{f"/compare/{BASE_SHAS[0]}...{HEAD}": "__error"}))
+# The Codex scenario: the base advances and GitHub refreshes `.base.sha` before
+# the final snapshot; the gate has not yet published for the new candidate.
+case("bound: `.base.sha` moves to the new tip before the final snapshot, gate still on the old key: not merged",
+     "held",
+     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
+           **{f"/pulls/{PR}": {"__seq": [pr(), pr(base_sha=BASE_SHAS[1])]},
+              "/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[1])]},
+              "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
+              f"/compare/{BASE_SHAS[1]}...{HEAD}": {"merge_base_commit": {"sha": BASE_SHAS[1]}}}),
+     says="CI changed in the final snapshot")
+case("bound: the tip advances, `.base.sha` and the merge base stay: the gate candidate is unchanged, merges",
+     "merged",
+     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
+           **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[1])]},
+              "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
+              f"/compare/{BASE_SHAS[1]}...{HEAD}": {"merge_base_commit": {"sha": PR_BASE}},
+              f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[1]}]}}))
+case("bound: the tip is rewritten so the key base is no longer the merge base: not merged", "held",
+     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
+           **{f"/compare/{BASE_SHAS[0]}...{HEAD}": {"merge_base_commit": {"sha": OLD_BASE}}}),
+     says="older candidate")
+case("review/verdict bound to an older base: same rule as the gate", "held",
+     base(runs=[bound(VERDICT[0], "success", 1, base_sha=OLD_BASE, tag="review-verdict", slug="github-actions",
+                      app_id=VERDICT[1])], required=[VERDICT]), says="older candidate")
+
+# --- Cancelled exceptions are taken AFTER the PR scoping ----------------------
+# (Codex P1 on aios-marketing-landing-page#36, iprefer-hygraph#16; P2 on aios-docs#9)
+# This PR's newest review-verdict job is cancelled (superseded); another PR's newer
+# run of the same name succeeded. Scoping removes the other PR's run, and the
+# cancelled one must still be recognised as review-verdict's.
+case("cancelled review-verdict run of this PR under another PR's newer success: not red, merges", "merged",
+     with_(base(runs=[bound("review/verdict", "cancelled", 1, tag="review-verdict", slug="github-actions",
+                            app_id=VERDICT[1], run=900),
+                      bound("review/verdict", "success", 2, pr_number=OTHER, tag="review-verdict",
+                            slug="github-actions", app_id=VERDICT[1])]),
+           **actions_run(900, ".github/workflows/review-verdict.yml")))
+case("cancelled CI run of this PR under another PR's newer success: still red", "held",
+     with_(base(runs=[bound("build", "cancelled", 1, tag="x", slug="github-actions", app_id=VERDICT[1], run=901),
+                      bound("build", "success", 2, pr_number=OTHER, tag="x", slug="github-actions",
+                            app_id=VERDICT[1])]),
+           **actions_run(901, ".github/workflows/ci.yml")), says="CI is not green")
+case("a cancelled run of an older candidate of this PR is neither red nor an exception lookup", "merged",
+     base(runs=[bound("review/verdict", "cancelled", 1, base_sha=OLD_BASE, tag="review-verdict",
+                      slug="github-actions", app_id=VERDICT[1], run=902)]))
+
 # Every PR-check workflow name in the org (survey of all repos, 2026-10-01), plus
 # this repo's own test workflows and the canonical Codex auto-request (wave-2 P2s:
 # heygen-video-automation#18, kh-coach#4, hackathon-mark-social#12 and others). The trigger list must equal this set exactly,
@@ -643,7 +739,7 @@ def main():
         (tmp / "bin").mkdir()
         (tmp / "bin/gh").write_text(STUB)
         (tmp / "bin/gh").chmod(0o755)
-        for name, expect, fx, env_over, want_merged, want_disarmed in CASES:
+        for name, expect, fx, env_over, want_merged, want_disarmed, says in CASES:
             state = tmp / "state"
             subprocess.run(["rm", "-rf", str(state)], check=True)
             state.mkdir()
@@ -667,6 +763,8 @@ def main():
             if want_merged is not None and got != "error":
                 got = "merged" if merged_prs else "held"
             ok = got == expect
+            if says is not None:
+                ok = ok and says in out.stdout
             if want_merged is not None:
                 ok = ok and merged_prs == set(want_merged) and len(calls) == len(merged_prs)
             if want_disarmed is not None:
