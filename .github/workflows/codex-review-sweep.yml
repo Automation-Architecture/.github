@@ -23,8 +23,12 @@ name: Codex review sweep
 #   - same-repository PR (forks never spend the Codex quota);
 #   - its head commit is at least MIN_AGE_SECONDS old, so the event path and
 #     Codex's own auto-review go first;
-#   - the head carries an `agency-delivery/gate` check run, i.e. the org gate
-#     judges this PR and will want Codex;
+#   - the head carries an `agency-delivery/gate` check run from the delivery
+#     App (id 5021608, producer-pinned), i.e. the org gate evaluates this PR
+#     under the merge policy (Codex required on every code PR). Deliberately
+#     NOT narrowed to repos whose rulesets enforce the gate or review/verdict:
+#     the policy applies org-wide (AGENTS.md), and the PRs this exists for
+#     (au-group's Dependabot PRs) are in a repo with no required checks;
 #   - it is not Markdown-only (doc-auto-merge.yml's definition), unless held
 #     by the `no-auto-merge` label (or its labels are unreadable);
 #   - (b) Codex's summary comment has no row of ANY status for the head and
@@ -35,9 +39,11 @@ name: Codex review sweep
 #   - Codex's latest comment since the head was committed is not a
 #     usage-limit notice (no spam while the quota is exhausted; a person's
 #     `@codex review` after the quota resets is the way out).
+# After a base retarget (the latest BaseRefChangedEvent), (b), (c) and the
+# notice check count only what came after it, as review-verdict and the event
+# path do, so a missed or failed retarget run is caught here too.
 # At most MAX_POSTS nudges per run. "Since the head was committed" uses the
-# head commit's committer date: GitHub records no push time. A retarget is
-# not special-cased here (the event path handles it).
+# head commit's committer date: GitHub records no push time.
 #
 # ── Threat model ──────────────────────────────────────────────────────────
 # - Triggers: schedule, and workflow_dispatch from main only (job condition):
@@ -82,6 +88,8 @@ jobs:
           TARGETS_FILE: ${{ runner.temp }}/codex-review-sweep-targets
           CODEX_BOT: "chatgpt-codex-connector[bot]"
           GATE_CHECK: "agency-delivery/gate"
+          # The delivery App that produces the gate check (producer pin).
+          GATE_APP_ID: "5021608"
           MAX_POSTS: "10"
           MIN_AGE_SECONDS: "900"
           # doc-auto-merge.yml's definition of a Markdown-only PR.
@@ -98,6 +106,7 @@ jobs:
           [ -n "${GH_TOKEN:-}" ] || { echo "::error::AAA_ORG_TOKEN is not available; cannot read the org's PRs."; exit 1; }
           [[ "$ORG" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::bad org"; exit 1; }
           [[ "${MAX_POSTS:-10}" =~ ^[0-9]+$ ]] || { echo "::error::bad MAX_POSTS"; exit 1; }
+          [[ "${GATE_APP_ID:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::bad GATE_APP_ID"; exit 1; }
           now="${NOW_EPOCH:-$(date -u +%s)}"
           : > "$TARGETS_FILE"
 
@@ -105,7 +114,7 @@ jobs:
           # cannot be read (every call is checked: errexit does not apply in
           # a function called from a condition).
           check_pr() {
-            local repo=$1 n=$2 pr st draft head hrepo changed files kind held since sepoch comments reviews x
+            local repo=$1 n=$2 pr st draft head hrepo changed files kind held since sepoch comments reviews x retarget rows_since
             pr=$(gh api "repos/$repo/pulls/$n") || return 2
             IFS='|' read -r st draft head hrepo < <(jq -r '[.state, (.draft | tostring), (.head.sha // ""), (.head.repo.full_name // "")] | join("|")' <<<"$pr") || return 2
             [ "$st" = open ] || { echo "skip: not open"; return 0; }
@@ -118,9 +127,27 @@ jobs:
             sepoch=$(jq -rn --arg t "$since" '$t | fromdateiso8601') || return 2
             [ $((now - sepoch)) -ge "${MIN_AGE_SECONDS:-900}" ] || { echo "skip: head ${head:0:7} is under ${MIN_AGE_SECONDS:-900}s old"; return 0; }
 
-            x=$(gh api "repos/$repo/commits/$head/check-runs?check_name=${GATE_CHECK//\//%2F}&per_page=1" --jq '.total_count') || return 2
+            x=$(gh api "repos/$repo/commits/$head/check-runs?check_name=${GATE_CHECK//\//%2F}&per_page=100" \
+                  --jq "[.check_runs[]? | select(.app.id == ${GATE_APP_ID})] | length") || return 2
             [[ "$x" =~ ^[0-9]+$ ]] || return 2
-            [ "$x" -gt 0 ] || { echo "skip: no $GATE_CHECK check on ${head:0:7}"; return 0; }
+            [ "$x" -gt 0 ] || { echo "skip: no $GATE_CHECK check from App $GATE_APP_ID on ${head:0:7}"; return 0; }
+
+            # A base retarget makes earlier Codex evidence stale (review-verdict
+            # drops it after the latest BaseRefChangedEvent): after one, rows,
+            # reviews and requests count only from the retarget on, exactly as
+            # the event path does for an `edited` (base changed) event.
+            retarget=$(gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$n" -f query='
+                  query($owner: String!, $name: String!, $number: Int!) {
+                    repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+                      timelineItems(itemTypes: [BASE_REF_CHANGED_EVENT], last: 1) {
+                        nodes { ... on BaseRefChangedEvent { createdAt } } } } } }' \
+                  --jq '.data.repository.pullRequest.timelineItems.nodes[0].createdAt // ""') || return 2
+            [ -z "$retarget" ] || [[ "$retarget" =~ $ts ]] || return 2
+            rows_since=""
+            if [ -n "$retarget" ]; then
+              rows_since="$retarget"
+              [[ "$retarget" < "$since" ]] || since="$retarget"
+            fi
 
             # Markdown-only (doc-auto-merge.yml's definition), unless held.
             changed=$(jq -r '.changed_files // empty' <<<"$pr") || return 2
@@ -140,18 +167,30 @@ jobs:
             comments=$(gh api --paginate "repos/$repo/issues/$n/comments?per_page=100" \
               --jq '.[] | {user: (.user.login // ""), type: (.user.type // ""), at: .created_at, body: (.body // "")}' | jq -s .) || return 2
             reviews=$(gh api --paginate "repos/$repo/pulls/$n/reviews?per_page=100" \
-              --jq '.[] | {user: (.user.login // ""), commit: .commit_id}' | jq -s .) || return 2
+              --jq '.[] | {user: (.user.login // ""), commit: .commit_id, at: (.submitted_at // "")}' | jq -s .) || return 2
 
-            # (b) a Codex review object on the head.
-            x=$(jq --arg bot "$CODEX_BOT" --arg head "$head" '[.[] | select(.user == $bot and .commit == $head)] | length' <<<"$reviews") || return 2
+            # (b) a Codex review object on the head (an undated, pending one counts).
+            x=$(jq --arg bot "$CODEX_BOT" --arg head "$head" --arg since "$rows_since" \
+                  '[.[] | select(.user == $bot and .commit == $head and (.at == "" or .at > $since))] | length' <<<"$reviews") || return 2
             [ "$x" -eq 0 ] || { echo "skip: Codex has a review on ${head:0:7}"; return 0; }
 
-            # (b) a row of any status for the head in Codex's summary comment.
-            x=$(jq --arg bot "$CODEX_BOT" --arg head "$head" '
-                  [ .[] | select(.user == $bot and (.body | startswith("<!-- codex-pull-request-review-summary -->")))
+            # (b) a row of any status for the head in Codex's summary comment;
+            # after a retarget only rows timed after it (same jq as the event path).
+            x=$(jq --arg bot "$CODEX_BOT" --arg head "$head" --arg since "$rows_since" '
+                  def epoch: [ try (capture("\\A(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?\\z")
+                               | (.d + "Z" | fromdateiso8601) + ("0" + (.f // "") | tonumber)
+                                 - (if (.z // "Z") == "Z" then 0
+                                    else (.z | gsub(":"; "")) as $z
+                                         | ($z[1:3] | tonumber) * 3600 + ($z[3:5] | tonumber) * 60
+                                         | if $z[0:1] == "-" then 0 - . else . end end)) catch empty ] | .[0];
+                  (if $since == "" then null else ($since | epoch) end) as $s
+                  | [ .[] | select(.user == $bot and (.body | startswith("<!-- codex-pull-request-review-summary -->")))
                     | .body | split("\n")[]
                     | capture("\\A\\|[^|]+\\|(?<status>[^|]*)\\|\\s*`(?<sha>[0-9a-f]{7,40})`\\s*\\|") // empty
-                    | select(.sha as $s | $head | startswith($s)) ] | length' <<<"$comments") || return 2
+                    | select(.sha as $x | $head | startswith($x))
+                    | ([.status | scan("datetime=\"([^\"]*)\"") | .[0]] | .[0]) as $raw
+                    | (if $raw == null then null else ($raw | epoch) end) as $t
+                    | select($s == null or $t == null or $t > $s) ] | length' <<<"$comments") || return 2
             [ "$x" -eq 0 ] || { echo "skip: Codex's summary has a row for ${head:0:7}"; return 0; }
 
             # (c) a person's `@codex review` (or `@codex security review`) since the head.

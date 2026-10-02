@@ -55,6 +55,8 @@ while i < len(args):
     if a == "--paginate": i += 1; continue
     path = a; i += 1
 key = path.split("?", 1)[0]
+if key == "graphql":
+    key = "graphql " + fields.get("owner", "") + "/" + fields.get("name", "") + "#" + fields.get("number", "")
 open(os.path.join(state, "calls"), "a").write(json.dumps({"method": method, "path": path, "fields": fields,
                                                           "token": os.environ.get("GH_TOKEN", "")}) + "\n")
 if method != "GET":
@@ -88,7 +90,8 @@ def summary(status, head, at="2025-10-01T11:05:00Z"):
 
 
 def pr_fx(repo, n, head, *, state="open", draft=False, fork=False, committed=OLD_ENOUGH, gate=1,
-          files=("app.py",), renamed=None, changed=None, labels=(), comments=(), reviews=()):
+          files=("app.py",), renamed=None, changed=None, labels=(), comments=(), reviews=(), retarget=None,
+          gate_app=5021608):
     """Fixtures for one PR in `repo`."""
     listed = [{"filename": f, "status": "modified"} for f in files]
     for new, old in (renamed or {}).items():
@@ -101,7 +104,10 @@ def pr_fx(repo, n, head, *, state="open", draft=False, fork=False, committed=OLD
                            "changed_files": len(listed) if changed is None else changed,
                            "labels": [{"name": l} for l in labels], "user": {"login": "dependabot[bot]"}},
         f"{r}/commits/{head}": {"commit": {"committer": {"date": committed}}},
-        f"{r}/commits/{head}/check-runs": gate if isinstance(gate, str) else {"total_count": gate, "check_runs": []},
+        f"{r}/commits/{head}/check-runs": gate if isinstance(gate, str) else
+            {"total_count": gate, "check_runs": [{"name": GATE, "app": {"id": gate_app}} for _ in range(gate)]},
+        f"graphql {full}#{n}": retarget if retarget == "__error" else
+            {"data": {"repository": {"pullRequest": {"timelineItems": {"nodes": [{"createdAt": retarget}] if retarget else []}}}}},
         f"{r}/pulls/{n}/files": listed,
         f"{r}/issues/{n}/comments": list(comments),
         f"{r}/pulls/{n}/reviews": list(reviews),
@@ -183,6 +189,29 @@ case("Markdown-only: skipped", one(files=("README.md", "docs/a.markdown")), [])
 case("Markdown rename from Markdown: skipped", one(files=("a.md",), renamed={"b.md": "old/b.md"}), [])
 case("Markdown with an unrelated label: skipped", one(files=("README.md",), labels=("documentation",)), [])
 
+case("gate-named check from another producer (not the delivery App): skipped", one(gate_app=15368), [])
+
+# --- base retarget: evidence before the latest BaseRefChangedEvent is stale (Codex P1, #78) ---
+RT = "2025-10-01T11:30:00Z"
+case("retarget after Codex Completed the head: nudged again",
+     one(retarget=RT, comments=[summary(f'✅ **Completed** <relative-time datetime="2025-10-01T11:05:00.1Z">x</relative-time>', A)],
+         reviews=[{"user": {"login": CODEX}, "commit_id": A, "submitted_at": "2025-10-01T11:06:00Z"}]),
+     ["widget#7"])
+case("retarget after a person's earlier request: nudged again",
+     one(retarget=RT, comments=[comment("web3sea", "@codex review", at="2025-10-01T11:10:00Z")]), ["widget#7"])
+case("retarget, Codex row for the head AFTER it: skipped",
+     one(retarget=RT, comments=[summary(f'🔄 **Running** since <relative-time datetime="2025-10-01T11:31:00Z">x</relative-time>', A)]),
+     [])
+case("retarget, Codex review on the head AFTER it: skipped",
+     one(retarget=RT, reviews=[{"user": {"login": CODEX}, "commit_id": A, "submitted_at": "2025-10-01T11:32:00Z"}]), [])
+case("retarget, a person's request AFTER it: skipped",
+     one(retarget=RT, comments=[comment("web3sea", "@codex review", at="2025-10-01T11:31:00Z")]), [])
+case("retarget, an untimed head row still counts: skipped", one(retarget=RT, comments=[summary("⏳ **Queued**", A)]), [])
+case("retarget BEFORE the head commit: requests count from the commit, rows after the retarget",
+     one(retarget="2025-10-01T10:00:00Z", comments=[comment("web3sea", "@codex review", at="2025-10-01T10:30:00Z")]),
+     ["widget#7"])
+case("retarget lookup fails: unreadable, not nudged", one(retarget="__error"), [], expect_unreadable="1")
+
 # --- many PRs, ordering, cap, isolation of failures ------------------------------------
 many = world(*[("widget", n, pr_fx("widget", n, sha("0123456789abcdef"[n % 16]) if n < 16 else sha("f")))
                for n in range(1, 15)])
@@ -254,6 +283,13 @@ def check_shape(wf):
     assert env["HOLD_LABEL"] == ev["HOLD_LABEL"] == rv["HOLD_LABEL"]
     assert env["CODEX_BOT"] == ev["CODEX_BOT"]
     ev_run = yaml.safe_load(EVENT_WORKFLOW.read_text())["jobs"]["codex-auto-request"]["steps"][0]["run"]
+    import re
+    ev_rows = re.search(r"def epoch:.*?\] \| length'", ev_run, re.S).group(0)
+    sw_rows = re.search(r"def epoch:.*?\] \| length'", find["run"], re.S).group(0)
+    assert " ".join(ev_rows.split()).replace("$head", "H") == " ".join(sw_rows.split()).replace("$head", "H"), \
+        "summary-row jq drifted from codex-auto-request.yml"
+    assert env["GATE_APP_ID"] == "5021608", "the gate check is pinned to the delivery App"
+    assert "BASE_REF_CHANGED_EVENT" in find["run"], "retarget cutoff as in review-verdict"
     for shared in ('@codex (security )?review\\\\b', 'startswith("<!-- codex-pull-request-review-summary -->")',
                    '(?<sha>[0-9a-f]{7,40})', '.type != "Bot" and (.user | endswith("[bot]") | not)'):
         assert shared in find["run"] and shared in ev_run, f"rule drifted from codex-auto-request.yml: {shared}"
