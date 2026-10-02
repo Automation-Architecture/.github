@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -101,6 +102,17 @@ class Tests(unittest.TestCase):
             self.assertNotIn(forbidden, source + workflow)
         self.assertNotIn("write", workflow.split("permissions:", 1)[1].split("concurrency:", 1)[0])
         self.assertIn("persist-credentials: false", workflow)
+
+    def test_required_check_contract(self):
+        policy = json.loads((ROOT / "rulesets/github-delivery-gate.json").read_text())
+        self.assertEqual(policy["bypass_actors"], [])
+        requirements = policy["rules"][0]["parameters"]
+        self.assertTrue(requirements["strict_required_status_checks_policy"])
+        checks = {row["context"]: row["integration_id"] for row in requirements["required_status_checks"]}
+        self.assertEqual(checks, {"agency-delivery/gate": 5021608, "rollout monitor tests": 15368})
+        workflow = (ROOT / ".github/workflows/rollout-monitor-tests.yml").read_text()
+        self.assertIn("name: rollout monitor tests", workflow)
+        self.assertNotIn("paths:", workflow)  # Required check must exist on every PR.
 
 
 if __name__ == "__main__":

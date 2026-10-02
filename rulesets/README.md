@@ -13,6 +13,7 @@ all repos: PR required, no force-push, no deletion, no approvals) is not stored 
 | File | Ruleset | State |
 |---|---|---|
 | `aaa-merge-gates.json` | `aaa-merge-gates` | **Active ruleset, id `23649946`.** Targets aaa-client-dashboard and opportunity-builder. Matches the live ruleset as of 2026-09-29. |
+| `github-delivery-gate.json` | `.github App-owned delivery Gate` | Desired repository protection for `.github`; verify live installation and ID in the [cutover record](../docs/rollout-monitor.md). Adds App-owned Gate and always-run monitor tests, no bypass actors. |
 
 ## aaa-merge-gates
 
