@@ -1,0 +1,23 @@
+name: Rollout monitor tests
+on:
+  pull_request:
+    paths:
+      - .github/workflows/rollout-monitor*.yml
+      - scripts/rollout_monitor.py
+      - tests/rollout-monitor/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/rollout-monitor*.yml
+      - scripts/rollout_monitor.py
+      - tests/rollout-monitor/**
+permissions:
+  contents: read
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests/rollout-monitor -v
