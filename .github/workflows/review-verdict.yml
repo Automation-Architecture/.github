@@ -48,9 +48,11 @@ name: Review verdict
 #      only the Codex App can make it, and Codex makes it only when every
 #      review finished with no findings;
 #   2. a Codex review object whose commit_id is this head, not dismissed, not
-#      a skip notice, submitted after the latest retarget or head force-push.
-#      Codex posts one to carry findings; the rule below decides whether they
-#      block.
+#      a skip notice, not notice-only (an empty body whose inline comments are
+#      all replies or notices: Codex's "create an environment" reply under a
+#      thread, .github#73), submitted after the latest retarget or head
+#      force-push. Codex posts one to carry findings; the rule below decides
+#      whether they block.
 # CODEX P0/P1 FINDINGS BLOCK: the verdict fails, whatever else exists, when
 #   - an unresolved, not-outdated review thread started by Codex has severity
 #     P0 or P1, read from the badge Codex puts in the body
@@ -143,7 +145,9 @@ name: Review verdict
 #                         outlive the policy (Codex P1 on .github#55).
 #   workflow_dispatch   — re-evaluate one PR: pr_number AND its head_sha.
 # A new head always gets a new check. Re-runs POST a fresh completed run of
-# the same name; the latest one is what GitHub uses.
+# the same name; the latest one is what GitHub uses. Each run carries an
+# external_id naming its PR (`<owner/repo>#<pr>:<base>:<head>:review-verdict`),
+# so a consumer can keep two PRs at one head apart (doc-auto-merge.yml does).
 
 on:
   pull_request_target:
@@ -183,8 +187,12 @@ concurrency:
   # publish nothing, leaving a stale `success` as the latest check.
   # The first operand below MUST equal the job `if` exactly. Change both.
   #
-  # Shared key = the head SHA, and a run publishes only that SHA (see
-  # load_pr), so key and publish target always agree. Evidence for a head is
+  # Shared key = the PR number AND the head SHA, and a run publishes only that
+  # SHA, bound to that PR (see load_pr and the external_id), so key and
+  # publish target always agree. The PR number is part of it because each
+  # verdict is bound to one PR: with the head alone, PR B's publisher would
+  # cancel PR A's at a shared commit and never replace A's verdict, leaving
+  # A's stale success (Codex P1 on .github#76). Evidence for a head is
   # not monotonic (a dismissed review revokes it), which is why publishers are
   # serialized with cancel-in-progress rather than allowed to overlap.
   #
@@ -196,7 +204,7 @@ concurrency:
   # run joins that commit's group and is pinned to it like every other run
   # (Codex on opportunity-builder#165 / aaa-client-dashboard#243: keyed by PR
   # number it could publish a stale `success` after a dismissal).
-  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'push' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && (github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
+  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'push' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && format('{0}-{1}', github.event.pull_request.number || github.event.inputs.pr_number, github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
@@ -307,8 +315,13 @@ jobs:
           # The documentation-only exemption. Same values as doc-auto-merge.yml.
           DOC_ONLY_PATTERN: '\.(md|markdown)\z'
           HOLD_LABEL: "no-auto-merge"
-          # Same string as auto-merge.yml's REVIEW_SKIP_PATTERN. Keep in step.
-          REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit"
+          # Codex notices that are status, not a review: generic skip wording,
+          # plus the texts Codex really posts (case-insensitive): "You have
+          # reached your Codex usage limits for code reviews" (fas-portal#519),
+          # "To use Codex here, create an environment for this repo" and "To use
+          # Codex here, create a Codex account..." (.github#71, aaa-runbooks#165).
+          # The shell default below repeats it; keep the two equal (tested).
+          REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit|reached your codex usage limits?|to use codex here"
           # Codex lands a few minutes after a push. Other events evaluate once.
           WAIT_SECONDS: ${{ github.event_name == 'pull_request_target' && '600' || '0' }}
           # Codex's 👍 lands a few seconds after its summary edit relays here.
@@ -347,9 +360,9 @@ jobs:
           # filename is a byte string, so anchor at the absolute end.
           DOC_ONLY_PATTERN="${DOC_ONLY_PATTERN:-\.(md|markdown)\z}"
           HOLD_LABEL="${HOLD_LABEL:-no-auto-merge}"
-          # Canonical copy: Automation-Architecture/.github .github/workflows/auto-merge.yml
-          # (AAA-711: the better idea; skip notices are status, not a verdict).
-          REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit}"
+          # Same value as the step env above (AAA-711: skip notices are status,
+          # not a verdict). auto-merge.yml, its old partner, was retired (#65).
+          REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit|reached your codex usage limits?|to use codex here}"
           # The ONE rule for "this Codex review object carries no findings": a
           # pending review, or a skip notice (REVIEW_SKIP_PATTERN). A jq prelude
           # every Codex review check uses, so the findings block, evidence 1b and
@@ -357,7 +370,19 @@ jobs:
           # to reject a clean retry over an earlier skip notice on the head).
           # Call as `carries_no_findings($skip)` on a review object. It decides
           # nothing about identity, head or dismissal; each caller does that.
-          CODEX_REVIEW_JQ='def carries_no_findings($skip): .state == "PENDING" or ((.body // "") | test($skip; "i"));'
+          # A NOTICE-ONLY review carries none either (.github#73): an empty body
+          # whose inline comments (attached as ._comments by load_codex_findings,
+          # for Codex reviews on this head) are all replies to existing threads
+          # or skip notices. Replying to a Codex thread makes Codex post "To use
+          # Codex here, create an environment for this repo" as exactly such a
+          # review, with commit_id = the current head (.github#71 at 17ae535:
+          # 10 of them); it is not a review of the head. Fails closed: comments
+          # never read, or none at all, is not notice-only.
+          # shellcheck disable=SC2016 # $skip is a jq variable, not shell
+          CODEX_REVIEW_JQ='def notice_only($skip): ((.body // "") | test("\\A\\s*\\z"))
+            and ((._comments | type) == "array") and ((._comments | length) > 0)
+            and all(._comments[]; .in_reply_to_id != null or ((.body // "") | test($skip; "i")));
+          def carries_no_findings($skip): .state == "PENDING" or ((.body // "") | test($skip; "i")) or notice_only($skip);'
 
           CHECK_NAME="review/verdict"
 
@@ -490,35 +515,49 @@ jobs:
           load_codex_findings() {
             CODEX_BLOCKED=0
             CODEX_REVIEWS="[]"
-            local reviews ids id n
+            local reviews ids id cm
             if ! reviews=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews" --jq '.[]' | jq -s '.'); then
               CODEX_BLOCKED=1
               fail_closed_reason "could not read reviews for #$PR_NUMBER, so Codex findings cannot be ruled out"
               return 0
             fi
-            CODEX_REVIEWS="$reviews"
-            # A Codex review object on this head with no inline comments left:
-            # its findings were deleted, so their severity is unreadable.
-            # A skip notice (rate or usage limit) or a pending review carries no
-            # findings, so an empty comment list there proves no deletion.
-            if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" \
-                  "$CODEX_REVIEW_JQ"'.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
-                                and (carries_no_findings($skip) | not)) | .id'); then
+            # Attach its inline comments (._comments: in_reply_to_id + body) to
+            # every Codex review on this head that is neither pending nor a skip
+            # notice by its body, so carries_no_findings can tell a notice-only
+            # review (a reply under a thread) from a review of the head. Matched
+            # on the login alone, like evidence 1b. Unreadable fails closed.
+            if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" '
+                  .[] | select(.user.login == $c and .commit_id == $sha and .state != "PENDING"
+                               and (((.body // "") | test($skip; "i")) | not)) | .id'); then
               CODEX_BLOCKED=1
               fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
               return 0
             fi
             for id in $ids; do
-              if ! n=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews/$id/comments" --jq '.[] | .id' | wc -l | tr -d ' '); then
+              if ! [[ "$id" =~ ^[0-9]+$ ]] \
+                 || ! cm=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews/$id/comments" --jq '.[] | {in_reply_to_id, body}' | jq -s '.') \
+                 || ! reviews=$(echo "$reviews" | jq --argjson id "$id" --argjson cm "$cm" 'map(if .id == $id then ._comments = $cm else . end)'); then
                 CODEX_BLOCKED=1
                 fail_closed_reason "could not read the findings of Codex review $id"
                 return 0
               fi
-              if [ "$n" -eq 0 ]; then
-                CODEX_BLOCKED=1
-                fail_closed_reason "Codex review $id on this head has no inline findings left (deleted), so their severity cannot be read; push a fix and get a new Codex review"
-                return 0
-              fi
+            done
+            CODEX_REVIEWS="$reviews"
+            # A Codex review object on this head with no inline comments left:
+            # its findings were deleted, so their severity is unreadable.
+            # A skip notice (rate or usage limit), a notice-only review or a
+            # pending review carries no findings, so it proves no deletion.
+            if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" \
+                  "$CODEX_REVIEW_JQ"'.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
+                                and (carries_no_findings($skip) | not) and ((._comments // []) | length) == 0) | .id'); then
+              CODEX_BLOCKED=1
+              fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
+              return 0
+            fi
+            for id in $ids; do
+              CODEX_BLOCKED=1
+              fail_closed_reason "Codex review $id on this head has no inline findings left (deleted), so their severity cannot be read; push a fix and get a new Codex review"
+              return 0
             done
             # Unresolved, not-outdated Codex threads of severity P0/P1 (or no
             # readable severity), paged 100 at a time.
@@ -1198,9 +1237,22 @@ jobs:
               return 0
             fi
 
-            local payload
+            # Bound to its PR by external_id, in the delivery gate's candidate-key
+            # form `<owner/repo>#<pr>:<base sha>:<head sha>:<tag>`: two open PRs at
+            # one head commit each get their own review/verdict, and
+            # doc-auto-merge.yml ignores a run that names another PR (Codex on
+            # aios-coffee#135, discussion_r4159188087). With no PR number (a
+            # failed lookup) the run stays unbound, and it is never a success.
+            # external_id is opaque to rulesets: GitHub enforces the newest run
+            # of this name on the commit, so doc-auto-merge.yml also waits while
+            # that newest run is another PR's and has not passed (.github#76).
+            local payload external_id=""
+            if [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]; then
+              external_id="${REPO}#${PR_NUMBER}:${BASE_SHA:-unknown}:${sha}:review-verdict"
+            fi
             payload=$(jq -n \
               --arg name "$CHECK_NAME" \
+              --arg external_id "$external_id" \
               --arg sha "$sha" \
               --arg conclusion "$conclusion" \
               --arg title "$title" \
@@ -1213,7 +1265,7 @@ jobs:
                 conclusion: $conclusion,
                 details_url: $details,
                 output: { title: $title, summary: $summary }
-              }')
+              } + (if $external_id == "" then {} else {external_id: $external_id} end)')
             echo "$payload" | gh api -X POST "/repos/$REPO/check-runs" --input - >/dev/null
           }
 
