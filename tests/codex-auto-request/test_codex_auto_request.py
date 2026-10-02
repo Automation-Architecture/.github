@@ -76,9 +76,10 @@ sys.stdout.write(out.stdout); sys.stderr.write(out.stderr); sys.exit(out.returnc
 '''
 
 
-def pr(state="open", head=HEAD, draft=False, changed=None, files=("app.py",)):
+def pr(state="open", head=HEAD, draft=False, changed=None, files=("app.py",), labels=()):
     return {"number": PR, "state": state, "head": {"sha": head}, "draft": draft,
-            "changed_files": len(files) if changed is None else changed}
+            "changed_files": len(files) if changed is None else changed,
+            "labels": [{"name": l} for l in labels]}
 
 
 def files_(*names, renamed=None):
@@ -124,7 +125,7 @@ def review(commit=HEAD, at="2026-10-01T10:04:00Z", user=CODEX, state="COMMENTED"
 def base(comments=(), reviews=(), files=("app.py",), renamed=None, **prkw):
     listed = files_(*files, renamed=renamed)
     prkw.setdefault("changed", len(listed))
-    return {f"/pulls/{PR}": pr(**prkw),
+    return {f"/pulls/{PR}": pr(files=files, **prkw),
             f"/pulls/{PR}/files": listed,
             f"/commits/{HEAD}": {"commit": {"committer": {"date": COMMITTED}}},
             f"/issues/{PR}/comments": list(comments),
@@ -192,6 +193,18 @@ case("file list shorter than changed_files (truncated): nudges", "nudge", base(f
 case("changed_files missing: treated as code, nudges", "nudge",
      with_(base(files=("README.md",)), **{f"/pulls/{PR}": {"number": PR, "state": "open", "head": {"sha": HEAD}, "draft": False}}))
 case("file list unreadable: red", "error", with_(base(files=("README.md",)), **{f"/pulls/{PR}/files": "__error"}))
+# A held Markdown-only PR needs Codex: review-verdict switches the documentation
+# exemption off for the no-auto-merge label (Codex on .github#72).
+case("Markdown-only PR held by no-auto-merge: nudged like code", "nudge",
+     base(files=("README.md",), labels=("no-auto-merge",)))
+case("Markdown-only PR held, Codex already has a row for the head: skips", "skip",
+     base(files=("README.md",), labels=("no-auto-merge",), comments=[summary(row("Completed", HEAD))]))
+case("Markdown-only PR held, someone already asked: skips", "skip",
+     base(files=("README.md",), labels=("no-auto-merge",), comments=[comment("web3sea", "@codex review")]))
+case("Markdown-only PR whose labels are unreadable: nudged (the exemption cannot be shown to apply)", "nudge",
+     with_(base(files=("README.md",)), **{f"/pulls/{PR}": {**pr(files=("README.md",)), "labels": None}}))
+case("Markdown-only PR with an unrelated label: skips", "skip", base(files=("README.md",), labels=("documentation",)))
+case("code PR held by no-auto-merge: nudges as before", "nudge", base(labels=("no-auto-merge",)))
 
 # --- (b) Codex already touched the head, ANY status -------------------------------
 for st in ("Completed", "Running", "Queued", "Failed"):
@@ -290,14 +303,16 @@ def check_shape(wf):
     on = wf.get("on", wf.get(True))
     assert set(on) == {"pull_request_target"}, \
         "only pull_request_target: pull_request runs the PR's copy, workflow_dispatch --ref a branch's copy"
-    assert set(on["pull_request_target"]["types"]) == {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
+    assert set(on["pull_request_target"]["types"]) == {"opened", "synchronize", "reopened", "ready_for_review", "edited",
+                                                       "labeled"}
     assert wf["permissions"] == {"contents": "read", "pull-requests": "read", "issues": "read"}, \
         "GITHUB_TOKEN stays read-only; the one write uses the PAT"
     job = wf["jobs"]["codex-auto-request"]
     assert "permissions" not in job, "no job-level permission widening"
     for needle in ("github.event_name == 'pull_request_target'", "github.event.pull_request.draft == false",
                    "github.event.pull_request.head.repo.full_name == github.repository",
-                   "github.event.changes.base != null"):
+                   "github.event.changes.base != null",
+                   "github.event.action != 'labeled' || github.event.label.name == 'no-auto-merge'"):
         assert needle in job["if"], f"job condition must include {needle}"
     text = WORKFLOW.read_text()
     assert "actions/checkout" not in text and "uses:" not in text, "no checkout and no action"
@@ -331,6 +346,11 @@ def check_shape(wf):
     dam_env = yaml.safe_load(DOC_AUTO_MERGE.read_text())["jobs"]["doc-auto-merge"]["steps"][0]["env"]
     assert env["DOC_ONLY_PATTERN"] == dam_env["DOC_ONLY_PATTERN"], "doc-only pattern drifted from doc-auto-merge.yml"
     assert env["MAX_DOC_FILES"] == dam_env["MAX_FILES"], "doc-only file bound drifted from doc-auto-merge.yml"
+    # The hold label is review-verdict.yml's, and the job condition names the same one.
+    rv_env = yaml.safe_load((ROOT / ".github/workflows/review-verdict.yml").read_text())["jobs"]["publish"]["steps"][0]["env"]
+    assert env["HOLD_LABEL"] == rv_env["HOLD_LABEL"] == dam_env["HOLD_LABEL"], "hold label drifted from review-verdict.yml"
+    assert f"github.event.label.name == '{env['HOLD_LABEL']}'" in job["if"], "job condition must name the hold label"
+    assert "labeled" not in group.replace("github.event.action", ""), "a labeled run gets its own group"
 
 
 def main():
