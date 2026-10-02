@@ -336,9 +336,11 @@ def check_shape(wf):
         "skipped edits, retargets and ready events get their own group (GitHub replaces a pending run)"
     assert 150 <= int(steps[0]["env"]["DELAY_SECONDS"]) <= 240, "about 3 minutes for Codex's own review"
     env = steps[0]["env"]
-    for action in ("synchronize", "edited", "ready_for_review"):
+    for action in ("synchronize", "edited", "ready_for_review", "labeled"):
         assert f"github.event.action == '{action}'" in env["EVENT_AT"], f"EVENT_AT must be set for {action}"
-    for action in ("edited", "ready_for_review"):
+    # labeled: the hold label can follow a retarget the doc-only skip ignored
+    # (Codex P2 on qa-template#8, aa-project-pipeline#18).
+    for action in ("edited", "ready_for_review", "labeled"):
         assert f"github.event.action == '{action}'" in env["AFTER_EVENT"], f"AFTER_EVENT must be set for {action}"
     for action in ("opened", "reopened", "synchronize"):
         assert action not in env["AFTER_EVENT"], f"{action} must count evidence for the head whenever made"
