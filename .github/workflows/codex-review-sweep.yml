@@ -53,8 +53,8 @@ name: Codex review sweep
 #   token for `find` would narrow this; none is installed here yet.
 #
 # Observability: one line per PR examined, then
-# `codex-review-sweep: scanned N, nudged K, unreadable E`. A failed search, a
-# missing token, any unreadable PR or a failed post makes the run red.
+# `codex-review-sweep: scanned N, nudged K, unreadable E`. A failed or
+# incomplete search, a missing token, any unreadable PR or a failed post makes the run red.
 
 on:
   schedule:
@@ -171,11 +171,17 @@ jobs:
           }
 
           # Open, non-draft PRs org-wide, oldest first. The search index lags a
-          # little; check_pr re-reads each PR.
+          # little; check_pr re-reads each PR. A page flagged
+          # incomplete_results, or more matches than the search can return
+          # (1000), makes the run red rather than silently partial.
           list=$(gh api -X GET --paginate search/issues \
                    -f q="org:$ORG is:pr is:open draft:false archived:false" -f sort=created -f order=asc -f per_page=100 \
-                   --jq '.items[] | (.repository_url // "") + " " + (.number | tostring)') \
+                   --jq 'if (.incomplete_results != false) or ((.total_count | type) != "number") or (.total_count > 1000)
+                         then "INCOMPLETE \(.total_count)" else (.items[] | (.repository_url // "") + " " + (.number | tostring)) end') \
             || { echo "::error::the PR search failed"; exit 1; }
+          if grep -q '^INCOMPLETE' <<<"$list"; then
+            echo "::error::the PR search returned incomplete results ($(grep -m1 '^INCOMPLETE' <<<"$list")); not sweeping a partial list."; exit 1
+          fi
 
           scanned=0; nudged=0; unreadable=0
           while read -r url n; do

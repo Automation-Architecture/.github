@@ -199,13 +199,22 @@ case("gate check unreadable: unreadable, not nudged", one(gate="__error"), [], e
 case("commit date unreadable: unreadable, not nudged",
      (lambda fx: (fx.update({f"repos/{ORG}/widget/commits/{A}": "__error"}), fx)[1])(one()), [], expect_unreadable="1")
 case("search item from another org is ignored",
-     world(search={"items": [{"repository_url": "https://api.github.com/repos/evil/widget", "number": 7}]}), [])
+     world(search={"total_count": 1, "incomplete_results": False,
+                   "items": [{"repository_url": "https://api.github.com/repos/evil/widget", "number": 7}]}), [])
 case("search item with a hostile number is ignored",
-     world(search={"items": [{"repository_url": f"https://api.github.com/repos/{ORG}/widget", "number": "7;id"}]}), [])
+     world(search={"total_count": 1, "incomplete_results": False,
+                   "items": [{"repository_url": f"https://api.github.com/repos/{ORG}/widget", "number": "7;id"}]}), [])
 case("no open PRs: nothing to do", world(), [])
 
 # --- errors (red, no targets) -----------------------------------------------------------
 case("search fails: red", {"search/issues": "__error"}, [], expect_rc=1, expect_unreadable=None)
+case("search page flagged incomplete_results: red, nothing swept",
+     (lambda fx: (fx["search/issues"].update(incomplete_results=True), fx)[1])(one()), [], expect_rc=1,
+     expect_unreadable=None)
+case("search page without incomplete_results: red", (lambda fx: (fx["search/issues"].pop("incomplete_results"), fx)[1])(one()),
+     [], expect_rc=1, expect_unreadable=None)
+case("more than 1000 matches (beyond what search returns): red",
+     (lambda fx: (fx["search/issues"].update(total_count=1001), fx)[1])(one()), [], expect_rc=1, expect_unreadable=None)
 case("token missing: red", one(), [], env={"GH_TOKEN": ""}, expect_rc=1, expect_unreadable=None)
 
 
