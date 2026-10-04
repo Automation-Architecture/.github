@@ -1,11 +1,13 @@
 name: Codex auto-request tests
 
-# Runs the offline suite for codex-auto-request.yml. It runs the PR's own copy
-# of the decide script against a stub `gh`: no token, no secrets, read-only.
+# Runs the offline suites for codex-auto-request.yml and codex-review-sweep.yml. It runs the PR's own copy
+# of the scripts against a stub `gh`: no token, no secrets, read-only.
 on:
   pull_request:
     paths:
       - .github/workflows/codex-auto-request.yml
+      - .github/workflows/codex-review-sweep.yml
+      - .github/workflows/review-verdict.yml
       - .github/workflows/codex-auto-request-tests.yml
       - .github/workflows/doc-auto-merge.yml
       - tests/codex-auto-request/**
@@ -13,6 +15,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/codex-auto-request.yml
+      - .github/workflows/codex-review-sweep.yml
+      - .github/workflows/review-verdict.yml
       - .github/workflows/codex-auto-request-tests.yml
       - .github/workflows/doc-auto-merge.yml
       - tests/codex-auto-request/**
@@ -30,3 +34,4 @@ jobs:
       - uses: astral-sh/setup-uv@v6
       - run: sudo apt-get update && sudo apt-get install -y jq
       - run: uv run --python 3.12 --with 'PyYAML>=6,<7' python tests/codex-auto-request/test_codex_auto_request.py
+      - run: uv run --python 3.12 --with 'PyYAML>=6,<7' python tests/codex-auto-request/test_codex_review_sweep.py

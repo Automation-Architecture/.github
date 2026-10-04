@@ -1,0 +1,280 @@
+name: Codex review sweep
+
+# LIVES ONLY IN Automation-Architecture/.github. Not a canonical copy: never
+# sync it into a repo (one run here covers the whole org).
+#
+# The scheduled half of codex-auto-request.yml (Brad, 2026-10-02: "scheduled
+# nudge plus grouped updates"). The event path cannot nudge every PR:
+#   - Dependabot PRs. A pull_request_target run that Dependabot triggers on a
+#     PR Dependabot opened gets NO secrets at all, neither Actions nor
+#     Dependabot secrets (GitHub docs, "Dependabot on GitHub Actions"), so
+#     AAA_ORG_TOKEN is out of reach there and a github-actions[bot] request is
+#     refused by Codex. Examples stuck on 2026-10-02: au-group#153-158,
+#     opportunity-builder#96 and #173.
+#   - Repos that do not carry codex-auto-request.yml yet (au-group), and PRs
+#     whose event run failed or predates the rollout.
+# A scheduled run is triggered by the schedule, not by Dependabot, so it gets
+# the org Actions secret.
+#
+# ── Rule ──────────────────────────────────────────────────────────────────
+# Every 30 minutes, for each open, non-draft PR in the org (oldest first),
+# post ONE `@codex review` when ALL hold (same nudge rules as
+# codex-auto-request.yml, kept as dumb as that one):
+#   - same-repository PR (forks never spend the Codex quota);
+#   - its head commit is at least MIN_AGE_SECONDS old, so the event path and
+#     Codex's own auto-review go first;
+#   - the head carries an `agency-delivery/gate` check run from the delivery
+#     App (id 5021608, producer-pinned), i.e. the org gate evaluates this PR
+#     under the merge policy (Codex required on every code PR). Deliberately
+#     NOT narrowed to repos whose rulesets enforce the gate or review/verdict:
+#     the policy applies org-wide (AGENTS.md), and the PRs this exists for
+#     (au-group's Dependabot PRs) are in a repo with no required checks;
+#   - it is not Markdown-only (doc-auto-merge.yml's definition), unless held
+#     by the `no-auto-merge` label (or its labels are unreadable);
+#   - (b) Codex's summary comment has no row of ANY status for the head and
+#     Codex has no review object on the head;
+#   - (c) no PERSON commented `@codex review` since the head was committed
+#     (bots never count: Codex refuses them). Our own nudge is such a
+#     comment, so a head is nudged at most once, by either path;
+#   - Codex's latest comment since the head was committed is not a
+#     usage-limit notice (no spam while the quota is exhausted; a person's
+#     `@codex review` after the quota resets is the way out).
+# After a base retarget (the latest BaseRefChangedEvent), (b), (c) and the
+# notice check count only what came after it, as review-verdict and the event
+# path do, so a missed or failed retarget run is caught here too.
+# At most MAX_POSTS nudges per run. "Since the head was committed" uses the
+# head commit's committer date: GitHub records no push time.
+#
+# ── Threat model ──────────────────────────────────────────────────────────
+# - Triggers: schedule, and workflow_dispatch from main only (job condition):
+#   `--ref <branch>` would run a branch's copy with the PAT.
+# - Nothing checks out, builds or runs any PR content. No PR text (title,
+#   body, branch name, comments) is interpolated into a script; it is only
+#   ever data inside jq. Repo names, PR numbers and SHAs are validated.
+# - GITHUB_TOKEN has no permissions. Reading other repos needs an org-wide
+#   credential and the only one this repo has is AAA_ORG_TOKEN (web3sea's
+#   classic PAT; 1Password vault aaa-APIs, item aaa-org-token), so the
+#   `find` step reads with it, GET only. The `nudge` step makes one call per
+#   target: POST the fixed comment `@codex review`. A read-only GitHub App
+#   token for `find` would narrow this; none is installed here yet.
+#
+# Observability: one line per PR examined, then
+# `codex-review-sweep: scanned N, nudged K, unreadable E`. A failed or
+# incomplete search, a missing token, any unreadable PR or a failed post makes the run red.
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # One sweep at a time. A queued run replaced by a newer one loses nothing.
+  group: codex-review-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    if: github.repository == 'Automation-Architecture/.github' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Find PR heads Codex has not touched (read-only)
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          TARGETS_FILE: ${{ runner.temp }}/codex-review-sweep-targets
+          CODEX_BOT: "chatgpt-codex-connector[bot]"
+          GATE_CHECK: "agency-delivery/gate"
+          # The delivery App that produces the gate check (producer pin).
+          GATE_APP_ID: "5021608"
+          MAX_POSTS: "10"
+          MIN_AGE_SECONDS: "900"
+          # doc-auto-merge.yml's definition of a Markdown-only PR.
+          DOC_ONLY_PATTERN: '\.(md|markdown)\z'
+          MAX_DOC_FILES: "300"
+          # review-verdict.yml's hold label: a held Markdown-only PR needs Codex.
+          HOLD_LABEL: "no-auto-merge"
+          USAGE_LIMIT_PATTERN: "usage limits?"
+        run: |
+          set -euo pipefail
+          OUT="${GITHUB_OUTPUT:-/dev/null}"
+          say() { echo "codex-review-sweep: $*"; }
+          ts='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::AAA_ORG_TOKEN is not available; cannot read the org's PRs."; exit 1; }
+          [[ "$ORG" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::bad org"; exit 1; }
+          [[ "${MAX_POSTS:-10}" =~ ^[0-9]+$ ]] || { echo "::error::bad MAX_POSTS"; exit 1; }
+          [[ "${GATE_APP_ID:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::bad GATE_APP_ID"; exit 1; }
+          now="${NOW_EPOCH:-$(date -u +%s)}"
+          : > "$TARGETS_FILE"
+
+          # One PR. Prints "nudge" or "skip <reason>"; returns 2 when the PR
+          # cannot be read (every call is checked: errexit does not apply in
+          # a function called from a condition).
+          check_pr() {
+            local repo=$1 n=$2 pr st draft head hrepo changed files kind held since sepoch comments reviews x retarget rows_since
+            pr=$(gh api "repos/$repo/pulls/$n") || return 2
+            IFS='|' read -r st draft head hrepo < <(jq -r '[.state, (.draft | tostring), (.head.sha // ""), (.head.repo.full_name // "")] | join("|")' <<<"$pr") || return 2
+            [ "$st" = open ] || { echo "skip: not open"; return 0; }
+            [ "$draft" = false ] || { echo "skip: draft"; return 0; }
+            [[ "$head" =~ ^[0-9a-f]{40}$ ]] || return 2
+            [ "$hrepo" = "$repo" ] || { echo "skip: fork PR"; return 0; }
+
+            since=$(gh api "repos/$repo/commits/$head" --jq '.commit.committer.date') || return 2
+            [[ "$since" =~ $ts ]] || return 2
+            sepoch=$(jq -rn --arg t "$since" '$t | fromdateiso8601') || return 2
+            [ $((now - sepoch)) -ge "${MIN_AGE_SECONDS:-900}" ] || { echo "skip: head ${head:0:7} is under ${MIN_AGE_SECONDS:-900}s old"; return 0; }
+
+            x=$(gh api "repos/$repo/commits/$head/check-runs?check_name=${GATE_CHECK//\//%2F}&per_page=100" \
+                  --jq "[.check_runs[]? | select(.app.id == ${GATE_APP_ID})] | length") || return 2
+            [[ "$x" =~ ^[0-9]+$ ]] || return 2
+            [ "$x" -gt 0 ] || { echo "skip: no $GATE_CHECK check from App $GATE_APP_ID on ${head:0:7}"; return 0; }
+
+            # A base retarget makes earlier Codex evidence stale (review-verdict
+            # drops it after the latest BaseRefChangedEvent): after one, rows,
+            # reviews and requests count only from the retarget on, exactly as
+            # the event path does for an `edited` (base changed) event.
+            retarget=$(gh api graphql -F owner="${repo%%/*}" -F name="${repo#*/}" -F number="$n" -f query='
+                  query($owner: String!, $name: String!, $number: Int!) {
+                    repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+                      timelineItems(itemTypes: [BASE_REF_CHANGED_EVENT], last: 1) {
+                        nodes { ... on BaseRefChangedEvent { createdAt } } } } } }' \
+                  --jq '.data.repository.pullRequest.timelineItems.nodes[0].createdAt // ""') || return 2
+            [ -z "$retarget" ] || [[ "$retarget" =~ $ts ]] || return 2
+            rows_since=""
+            if [ -n "$retarget" ]; then
+              rows_since="$retarget"
+              [[ "$retarget" < "$since" ]] || since="$retarget"
+            fi
+
+            # Markdown-only (doc-auto-merge.yml's definition), unless held.
+            changed=$(jq -r '.changed_files // empty' <<<"$pr") || return 2
+            if [[ "$changed" =~ ^[0-9]+$ ]] && [ "$changed" -ge 1 ] && [ "$changed" -lt "${MAX_DOC_FILES:-300}" ]; then
+              files=$(gh api --paginate "repos/$repo/pulls/$n/files?per_page=100" | jq -s 'add // []') || return 2
+              kind=$(jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" '
+                    if type == "array" and length == $n
+                       and all(.[]; (.filename | type) == "string" and .filename != "")
+                       and ([.[] | .filename, (.previous_filename // empty)] | all(type == "string" and test($pat)))
+                    then "doc" else "code" end' <<<"$files") || return 2
+              held=$(jq -r --arg l "${HOLD_LABEL:-no-auto-merge}" '
+                    if (.labels | type) != "array" then "yes"
+                    elif any(.labels[]; .name == $l) then "yes" else "no" end' <<<"$pr") || return 2
+              if [ "$kind" = doc ] && [ "$held" = no ]; then echo "skip: Markdown-only"; return 0; fi
+            fi
+
+            comments=$(gh api --paginate "repos/$repo/issues/$n/comments?per_page=100" \
+              --jq '.[] | {user: (.user.login // ""), type: (.user.type // ""), at: .created_at, body: (.body // "")}' | jq -s .) || return 2
+            reviews=$(gh api --paginate "repos/$repo/pulls/$n/reviews?per_page=100" \
+              --jq '.[] | {user: (.user.login // ""), commit: .commit_id, at: (.submitted_at // "")}' | jq -s .) || return 2
+
+            # (b) a Codex review object on the head (an undated, pending one counts).
+            x=$(jq --arg bot "$CODEX_BOT" --arg head "$head" --arg since "$rows_since" \
+                  '[.[] | select(.user == $bot and .commit == $head and (.at == "" or .at > $since))] | length' <<<"$reviews") || return 2
+            [ "$x" -eq 0 ] || { echo "skip: Codex has a review on ${head:0:7}"; return 0; }
+
+            # (b) a row of any status for the head in Codex's summary comment;
+            # after a retarget only rows timed after it (same jq as the event path).
+            x=$(jq --arg bot "$CODEX_BOT" --arg head "$head" --arg since "$rows_since" '
+                  def epoch: [ try (capture("\\A(?<d>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?<f>\\.[0-9]+)?(?<z>Z|[+-][0-9]{2}:?[0-9]{2})?\\z")
+                               | (.d + "Z" | fromdateiso8601) + ("0" + (.f // "") | tonumber)
+                                 - (if (.z // "Z") == "Z" then 0
+                                    else (.z | gsub(":"; "")) as $z
+                                         | ($z[1:3] | tonumber) * 3600 + ($z[3:5] | tonumber) * 60
+                                         | if $z[0:1] == "-" then 0 - . else . end end)) catch empty ] | .[0];
+                  (if $since == "" then null else ($since | epoch) end) as $s
+                  | [ .[] | select(.user == $bot and (.body | startswith("<!-- codex-pull-request-review-summary -->")))
+                    | .body | split("\n")[]
+                    | capture("\\A\\|[^|]+\\|(?<status>[^|]*)\\|\\s*`(?<sha>[0-9a-f]{7,40})`\\s*\\|") // empty
+                    | select(.sha as $x | $head | startswith($x))
+                    | ([.status | scan("datetime=\"([^\"]*)\"") | .[0]] | .[0]) as $raw
+                    | (if $raw == null then null else ($raw | epoch) end) as $t
+                    | select($s == null or $t == null or $t > $s) ] | length' <<<"$comments") || return 2
+            [ "$x" -eq 0 ] || { echo "skip: Codex's summary has a row for ${head:0:7}"; return 0; }
+
+            # (c) a person's `@codex review` (or `@codex security review`) since the head.
+            x=$(jq --arg since "$since" '
+                  [.[] | select(.type != "Bot" and (.user | endswith("[bot]") | not) and .at >= $since
+                                and (.body | test("(\\A|\\s)@codex (security )?review\\b"; "i")))] | length' <<<"$comments") || return 2
+            [ "$x" -eq 0 ] || { echo "skip: someone already asked for a review of ${head:0:7}"; return 0; }
+
+            # Codex's latest comment since the head is a usage-limit notice.
+            x=$(jq -r --arg bot "$CODEX_BOT" --arg since "$since" --arg pat "$USAGE_LIMIT_PATTERN" '
+                  [.[] | select(.user == $bot and .at >= $since
+                                and (.body | startswith("<!-- codex-pull-request-review-summary -->") | not))]
+                  | sort_by(.at) | last | if . == null then "no" elif (.body | test($pat; "i")) then "yes" else "no" end' <<<"$comments") || return 2
+            [ "$x" = no ] || { echo "skip: Codex's latest reply is a usage-limit notice"; return 0; }
+
+            echo "nudge $head"
+          }
+
+          # Open, non-draft PRs org-wide, oldest first. The search index lags a
+          # little; check_pr re-reads each PR. A page flagged
+          # incomplete_results, or more matches than the search can return
+          # (1000), makes the run red rather than silently partial.
+          list=$(gh api -X GET --paginate search/issues \
+                   -f q="org:$ORG is:pr is:open draft:false archived:false" -f sort=created -f order=asc -f per_page=100 \
+                   --jq 'if (.incomplete_results != false) or ((.total_count | type) != "number") or (.total_count > 1000)
+                         then "INCOMPLETE \(.total_count)" else (.items[] | (.repository_url // "") + " " + (.number | tostring)) end') \
+            || { echo "::error::the PR search failed"; exit 1; }
+          if grep -q '^INCOMPLETE' <<<"$list"; then
+            echo "::error::the PR search returned incomplete results ($(grep -m1 '^INCOMPLETE' <<<"$list")); not sweeping a partial list."; exit 1
+          fi
+
+          scanned=0; nudged=0; unreadable=0
+          while read -r url n; do
+            [ -n "${url:-}" ] || continue
+            repo="${url#https://api.github.com/repos/}"
+            if ! [[ "$repo" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || [ "${repo%%/*}" != "$ORG" ] || ! [[ "$n" =~ ^[1-9][0-9]{0,9}$ ]]; then
+              say "unexpected search item; ignored."; continue
+            fi
+            if [ "$nudged" -ge "$MAX_POSTS" ]; then say "cap of $MAX_POSTS nudges reached; the rest wait for the next run."; break; fi
+            scanned=$((scanned + 1))
+            rc=0; verdict=$(check_pr "$repo" "$n" </dev/null) || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              unreadable=$((unreadable + 1)); echo "::warning::$repo#$n could not be read; skipped."; continue
+            fi
+            if [[ "$verdict" =~ ^nudge\ ([0-9a-f]{40})$ ]]; then
+              echo "$repo $n ${BASH_REMATCH[1]}" >> "$TARGETS_FILE"
+              nudged=$((nudged + 1))
+              say "$repo#$n: Codex has not touched ${BASH_REMATCH[1]:0:7}; nudging."
+            else
+              say "$repo#$n: ${verdict:-no decision}"
+            fi
+          done <<<"$list"
+
+          say "scanned $scanned, nudging $nudged, unreadable $unreadable"
+          echo "targets=$nudged" >> "$OUT"
+          echo "unreadable=$unreadable" >> "$OUT"
+
+      - name: Nudge (POST the fixed comment, nothing else)
+        id: nudge
+        if: steps.find.outputs.targets != '0'
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          TARGETS_FILE: ${{ runner.temp }}/codex-review-sweep-targets
+        run: |
+          set -euo pipefail
+          failed=0
+          while read -r repo n head; do
+            if ! [[ "$repo" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || [ "${repo%%/*}" != "$ORG" ] \
+               || ! [[ "$n" =~ ^[1-9][0-9]{0,9}$ ]] || ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::bad target line"; failed=1; continue
+            fi
+            if url=$(gh api -X POST "repos/$repo/issues/$n/comments" -f body='@codex review' --jq '.html_url'); then
+              echo "codex-review-sweep: $repo#$n: posted @codex review for ${head:0:7} ($url)."
+            else
+              echo "::error::$repo#$n: posting @codex review failed."; failed=1
+            fi
+          done < "$TARGETS_FILE"
+          exit "$failed"
+
+      - name: Red on unreadable PRs
+        if: steps.find.outputs.unreadable != '0'
+        env:
+          UNREADABLE: ${{ steps.find.outputs.unreadable }}
+        run: |
+          echo "::error::$UNREADABLE PR(s) could not be read this run; see the find step."
+          exit 1

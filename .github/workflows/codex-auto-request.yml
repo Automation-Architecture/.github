@@ -33,8 +33,13 @@ name: Codex auto-request
 # - GITHUB_TOKEN is read-only (permissions below). The PAT exists only in the
 #   env of the `nudge` step, whose single API call posts the fixed comment
 #   `@codex review` to this PR. Keep it that way.
-# - Fork PRs are skipped (no outsider can spend the Codex quota). Dependabot
-#   PRs get no Actions secrets on pull_request_target; the run says so.
+# - Fork PRs are skipped (no outsider can spend the Codex quota).
+# - Dependabot: a run Dependabot triggers on its own PR gets NO secrets on
+#   pull_request_target (neither Actions nor Dependabot secrets; GitHub docs,
+#   "Dependabot on GitHub Actions"), so such a run stops at once instead of
+#   waiting. codex-review-sweep.yml (in .github only, scheduled) nudges those
+#   PRs. A person's event on a Dependabot PR (a retarget, a hold label) runs
+#   normally.
 # - Residual, not this file's: AAA_ORG_TOKEN is an org secret every repo's
 #   workflows can read, so a writer's own workflow on a branch push already
 #   reaches it. Narrowing that is a secrets change.
@@ -80,6 +85,8 @@ name: Codex auto-request
 #
 # Observability: each run ends with one line `codex-auto-request #<n>: ...`.
 # Missing AAA_ORG_TOKEN on a non-Dependabot PR is ::error (a red run).
+# Backstop: codex-review-sweep.yml (in .github only) sweeps the org every 30
+# minutes with the same rules, for Dependabot PRs and missed events.
 
 on:
   pull_request_target:
@@ -137,11 +144,15 @@ jobs:
           # exemption off, so a held Markdown-only PR is nudged. Same name as
           # in the job condition above.
           HOLD_LABEL: "no-auto-merge"
+          ACTOR: ${{ github.actor }}
         run: |
           set -euo pipefail
           OUT="${GITHUB_OUTPUT:-/dev/null}"
           say() { echo "codex-auto-request #${PR_NUMBER}: $*"; }
           decide() { say "$2"; echo "nudge=$1" >> "$OUT"; exit 0; }
+          # Dependabot-triggered: no secrets here, so no wait. The scheduled
+          # codex-review-sweep.yml in .github nudges the PR instead.
+          [ "${ACTOR:-}" != "dependabot[bot]" ] || decide false "Dependabot-triggered run gets no secrets; the scheduled Codex review sweep (.github) nudges this PR."
           ts='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || { echo "::error::bad PR number"; exit 1; }
           [[ "$EVENT_HEAD" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::bad head SHA"; exit 1; }
@@ -247,7 +258,7 @@ jobs:
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
             if [ "$DEPENDABOT_PR" = true ]; then
-              echo "codex-auto-request #$PR_NUMBER: Dependabot PR; GitHub withholds AAA_ORG_TOKEN here. Comment \`@codex review\` by hand."
+              echo "codex-auto-request #$PR_NUMBER: Dependabot PR; GitHub withholds AAA_ORG_TOKEN here. The scheduled Codex review sweep (.github) nudges it."
               exit 0
             fi
             echo "::error::AAA_ORG_TOKEN is not available; a github-actions[bot] request would be refused by Codex. Not nudging."
