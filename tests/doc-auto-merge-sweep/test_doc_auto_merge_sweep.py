@@ -12,6 +12,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -41,9 +42,19 @@ VERDICT = ROOT / ".github/workflows/review-verdict.yml"
 
 
 def ago(minutes, micro=False):
-    """An ISO time `minutes` before now (the script reads the real clock)."""
-    t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)
-    return t.strftime("%Y-%m-%dT%H:%M:%S.123456Z" if micro else "%Y-%m-%dT%H:%M:%SZ")
+    """An ISO time `minutes` before the case runs (the script reads the real
+    clock). A placeholder, resolved by resolve_times when the case starts, so
+    a slow suite cannot age a fixture past the Codex wait."""
+    return f"__AGO{'M' if micro else ''}_{minutes}__"
+
+
+def resolve_times(text):
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    def sub(m):
+        t = now - datetime.timedelta(minutes=int(m.group(2)))
+        return t.strftime("%Y-%m-%dT%H:%M:%S.123456Z" if m.group(1) else "%Y-%m-%dT%H:%M:%SZ")
+    return re.sub(r"__AGO(M?)_([0-9]+)__", sub, text)
 
 # Stub gh. Keys are the API path without "repos/" and without the query, e.g.
 # "acme/widget/pulls/7", "search/issues", "user". A value
@@ -190,7 +201,7 @@ def summary(sha, status="completed", at=None):
             f"| 📝 **Code Review** | {cell} | `{sha[:7]}` | PR opened |\n\n\n<details>about</details>")
     return {"id": 900, "user": {"login": CODEX, "type": "Bot"},
             "performed_via_github_app": {"slug": "chatgpt-codex-connector"}, "body": body,
-            "created_at": ago(110), "updated_at": at[:19] + "Z"}
+            "created_at": ago(110), "updated_at": at}
 
 
 def notice(text="You have reached your Codex usage limits for code reviews. See the dashboard.", at=None, cid=901):
@@ -684,7 +695,7 @@ def main():
             state = tmp / "state"
             subprocess.run(["rm", "-rf", str(state)], check=True)
             state.mkdir()
-            (tmp / "fx.json").write_text(json.dumps(fx))
+            (tmp / "fx.json").write_text(resolve_times(json.dumps(fx)))
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
                    **env_static, "ORG": ORG, "GH_TOKEN": "org-token", "ENABLED": "true", "DRY_RUN_INPUT": "false",
                    "SETTLE_SECONDS": "0", "BACKOFF_SECONDS": "0", "DOC_CODEX_WAIT_MINUTES": "15",
