@@ -540,7 +540,8 @@ GATE = ("agency-delivery/gate", 5021608)
 
 def gate_run(conclusion, rid, pr_number, repo=REPO):
     r = run_(GATE[0], conclusion, slug="agency-delivery-gate", rid=rid, app_id=GATE[1])
-    r["external_id"] = f"{repo}#{pr_number}:{'b' * 40}:{HEAD}:v2.8"
+    # The gate keys its candidate on the live base tip (policy v2.10).
+    r["external_id"] = f"{repo}#{pr_number}:{BASE_SHAS[0]}:{HEAD}:v2.8"
     return r
 
 
@@ -600,77 +601,113 @@ case("two PRs at one head, each with its own gate verdict: only the passing one 
 
 # --- A check bound to THIS PR counts only for the candidate merged ------------
 # (Codex P1 on the wave-4 re-syncs: aaa-pr-bot#50, aaa-aios#217, qa-template#8 ...)
-# Its key's head must be HEAD and its base this PR's `.base.sha` (read in the same
-# snapshot), and `.base.sha` must still be on the base branch: the pinned tip or an
-# ancestor of it (Codex P1 on the wave-5 re-syncs, e.g. LKID#317, aios-cdp#379).
+# Its key's head must be HEAD and its base the one its producer keys on: the gate keys
+# on the live tip (policy v2.10), review-verdict on `.base.sha`, which must still be on
+# the base branch (Codex P1s on the wave-5 re-syncs: LKID#317, aios-cdp#379,
+# aaa-pr-bot#50). A check seen only for an older candidate holds, required or not
+# (Codex P1 on 4s2w-aios-partnership#20, aios-second-brain#45).
 OLD_BASE = "9" * 40
 
 
-def bound(name, conclusion, rid, base_sha=PR_BASE, head=HEAD, tag="v2.8", pr_number=PR, slug="agency-delivery-gate",
+def bound(name, conclusion, rid, base_sha=None, head=HEAD, tag="v2.8", pr_number=PR, slug="agency-delivery-gate",
           app_id=None, run=None, key=None):
+    # Each producer's real key base (see the workflow header): the gate keys on
+    # the live base tip (policy v2.10), review-verdict on the pulls API `.base.sha`.
+    if base_sha is None:
+        base_sha = PR_BASE if tag == "review-verdict" else BASE_SHAS[0]
     r = run_(name, conclusion, slug=slug, rid=rid, app_id=app_id or GATE[1], run=run)
     r["external_id"] = key if key is not None else f"{REPO}#{pr_number}:{base_sha}:{head}:{tag}"
     return r
 
 
-case("bound: keyed on `.base.sha`, which lags the tip but is an ancestor of it (as GitHub leaves it): merges", "merged",
+def vbound(conclusion, rid, **kw):
+    """review/verdict as review-verdict.yml binds it: keyed on the pulls API `.base.sha`."""
+    return bound(VERDICT[0], conclusion, rid, tag="review-verdict", slug="github-actions", app_id=VERDICT[1], **kw)
+
+
+# The gate keys on the live tip (policy v2.10) and re-evaluates on every base push.
+case("bound gate: keyed on the pinned tip while `.base.sha` lags: merges", "merged",
      base(runs=[bound(GATE[0], "success", 1)], required=[GATE]))
-case("bound: keyed on the tip, `.base.sha` is the tip: merges without a compare", "merged",
-     with_(base(runs=[bound(GATE[0], "success", 1, base_sha=BASE_SHAS[0])], required=[GATE],
-                base_sha=BASE_SHAS[0]), **{f"/compare/{BASE_SHAS[0]}...{BASE_SHAS[0]}": "__error"}))
-case("bound: success for an older base of this PR: pending, not merged, not red", "held",
+case("bound gate: keyed on the tip, `.base.sha` is the tip: merges without a compare", "merged",
+     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE], base_sha=BASE_SHAS[0]),
+           **{f"/compare/{BASE_SHAS[0]}...{BASE_SHAS[0]}": "__error"}))
+case("bound gate: keyed on the lagging `.base.sha`, not the tip (an older gate candidate): not merged", "held",
+     base(runs=[bound(GATE[0], "success", 1, base_sha=PR_BASE)], required=[GATE]),
+     says="waiting for a run for the base tip aaaaaaa")
+case("bound gate: success for an older base of this PR: pending, not merged, not red", "held",
      base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE]),
      says="bound to an older candidate of this PR")
-case("bound: failure for an older base of this PR is not red; an unrequired one does not hold", "merged",
-     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE)]))
-case("bound: failure for an older base, required and newest (GitHub enforces it): pending, not red", "held",
+case("bound gate: failure for an older base, required and newest (GitHub enforces it): pending, not red", "held",
      base(runs=[bound(GATE[0], "success", 1), bound(GATE[0], "failure", 2, base_sha=OLD_BASE)], required=[GATE]),
      says="older candidate of this PR (base 9999999")
-# The wave-5 deadlock: the branch was forked before the commit `.base.sha` records, and
-# the base advanced again. `.base.sha` is neither the tip nor the merge base of HEAD and
-# the tip, but it is still an ancestor of the tip, and both producers key on it.
-case("bound: `.base.sha` is neither the tip nor the merge base but is an ancestor of the tip: merges", "merged",
-     with_(base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE], base_sha=OLD_BASE),
-           **{f"/compare/{OLD_BASE}...{BASE_SHAS[0]}": {"status": "ahead", "behind_by": 0, "ahead_by": 5}}))
-case("bound: `.base.sha` is no longer on the base branch (history rewritten): stale, not merged", "held",
-     with_(base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE], base_sha=OLD_BASE),
-           **{f"/compare/{OLD_BASE}...{BASE_SHAS[0]}": {"status": "diverged", "behind_by": 2, "ahead_by": 4}}),
-     says="not on the base branch")
-case("bound: keyed on the merge base, but `.base.sha` now names another commit: not merged", "held",
-     base(runs=[bound(GATE[0], "success", 1)], required=[GATE], base_sha=OLD_BASE), says="older candidate")
-case("bound: another head in the key: not merged", "held",
+# Codex P1 on aaa-pr-bot#50: a gate pass for the previous tip must not authorize a merge
+# onto a newer tip the gate has not evaluated; the gate re-runs on the base push.
+case("bound gate: the base advances, gate still keyed on the previous tip: not merged", "held",
+     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
+           **{"/git/ref/heads/main": tip(BASE_SHAS[1]),
+              "/commits": [{"sha": BASE_SHAS[1]}],
+              f"/compare/{PR_BASE}...{BASE_SHAS[1]}": {"status": "ahead", "behind_by": 0, "ahead_by": 4}}),
+     says="waiting for a run for the base tip ccccccc")
+case("bound gate: the base advanced and the gate re-ran for the new tip: merges", "merged",
+     with_(base(runs=[bound(GATE[0], "success", 1), bound(GATE[0], "success", 2, base_sha=BASE_SHAS[1])],
+                required=[GATE]),
+           **{"/git/ref/heads/main": tip(BASE_SHAS[1]),
+              "/commits": [{"sha": BASE_SHAS[1]}],
+              f"/compare/{PR_BASE}...{BASE_SHAS[1]}": {"status": "ahead", "behind_by": 0, "ahead_by": 4},
+              f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[1]}]}}))
+# Codex P1 on 4s2w-aios-partnership#20 / aios-second-brain#45: a check whose only run for
+# this PR is an older candidate holds the PR even when it is not a required check.
+case("bound gate, not required: only a failure for an older candidate: pending, not merged, not red", "held",
+     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE)]),
+     says="only seen for an older candidate of this PR")
+case("bound gate, not required: an older candidate's failure, then a pass for this candidate: merges", "merged",
+     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE), bound(GATE[0], "success", 2)]))
+case("bound gate: another head in the key: not merged", "held",
      base(runs=[bound(GATE[0], "success", 1, head=NEW_HEAD)], required=[GATE]), says="older candidate")
-case("bound: a key naming this PR that does not parse: not merged", "held",
+case("bound gate: a key naming this PR that does not parse: not merged", "held",
      base(runs=[bound(GATE[0], "success", 1, key=f"{REPO}#{PR}:main:v2.8")], required=[GATE]),
      says="older candidate")
-case("bound: ancestry of a lagging `.base.sha` unreadable: the bound check is not trusted", "held",
-     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
-           **{f"/compare/{PR_BASE}...{BASE_SHAS[0]}": "__error"}), says="older candidate")
-case("unbound checks are unaffected by an unreadable ancestry check: merges", "merged",
-     with_(base(runs=GREEN_CI), **{f"/compare/{PR_BASE}...{BASE_SHAS[0]}": "__error"}))
-# The Codex scenario: the base advances and GitHub refreshes `.base.sha` before
-# the final snapshot; the gate has not yet published for the new candidate.
-case("bound: `.base.sha` moves to the new tip before the final snapshot, gate still on the old key: not merged",
-     "held",
+case("bound gate: the tip moves before the final snapshot, gate still on the old tip: not merged", "held",
      with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
            **{f"/pulls/{PR}": {"__seq": [pr(), pr(base_sha=BASE_SHAS[1])]},
               "/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[1])]},
               "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]}}),
      says="CI changed in the final snapshot")
-case("bound: the tip advances, `.base.sha` stays and is still an ancestor: the gate candidate is unchanged, merges",
+
+# review/verdict keys on `.base.sha`, which must still be on the base branch.
+case("bound verdict: keyed on `.base.sha`, which lags the tip but is an ancestor of it: merges", "merged",
+     base(runs=[vbound("success", 1)], required=[VERDICT]))
+# The wave-5 deadlock: the branch was forked before the commit `.base.sha` records, and the
+# base advanced again. `.base.sha` is neither the tip nor the merge base, but is an ancestor.
+case("bound verdict: `.base.sha` is neither the tip nor the merge base but is an ancestor of the tip: merges",
      "merged",
-     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
+     with_(base(runs=[vbound("success", 1, base_sha=OLD_BASE)], required=[VERDICT], base_sha=OLD_BASE),
+           **{f"/compare/{OLD_BASE}...{BASE_SHAS[0]}": {"status": "ahead", "behind_by": 0, "ahead_by": 5}}))
+case("bound verdict: `.base.sha` is no longer on the base branch (history rewritten): stale, not merged", "held",
+     with_(base(runs=[vbound("success", 1, base_sha=OLD_BASE)], required=[VERDICT], base_sha=OLD_BASE),
+           **{f"/compare/{OLD_BASE}...{BASE_SHAS[0]}": {"status": "diverged", "behind_by": 2, "ahead_by": 4}}),
+     says="not on the base branch")
+case("bound verdict: keyed on an earlier `.base.sha`, the PR now names another: not merged", "held",
+     with_(base(runs=[vbound("success", 1)], required=[VERDICT], base_sha=OLD_BASE),
+           **{f"/compare/{OLD_BASE}...{BASE_SHAS[0]}": {"status": "ahead", "behind_by": 0, "ahead_by": 5}}),
+     says="older candidate")
+case("bound verdict: ancestry of a lagging `.base.sha` unreadable: not trusted", "held",
+     with_(base(runs=[vbound("success", 1)], required=[VERDICT]),
+           **{f"/compare/{PR_BASE}...{BASE_SHAS[0]}": "__error"}), says="older candidate")
+case("unbound checks are unaffected by an unreadable ancestry check: merges", "merged",
+     with_(base(runs=GREEN_CI), **{f"/compare/{PR_BASE}...{BASE_SHAS[0]}": "__error"}))
+case("bound verdict: the tip advances, `.base.sha` stays and is still an ancestor: merges", "merged",
+     with_(base(runs=[vbound("success", 1)], required=[VERDICT]),
            **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[1])]},
               "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
               f"/compare/{PR_BASE}...{BASE_SHAS[1]}": {"status": "ahead", "behind_by": 0, "ahead_by": 4},
               f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[1]}]}}))
-case("bound: the tip is rewritten so the key base is no longer an ancestor of it: not merged", "held",
-     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
+case("bound verdict: the tip is rewritten so `.base.sha` is no longer an ancestor of it: not merged", "held",
+     with_(base(runs=[vbound("success", 1)], required=[VERDICT]),
            **{f"/compare/{PR_BASE}...{BASE_SHAS[0]}": {"status": "diverged", "behind_by": 1, "ahead_by": 3}}),
      says="not on the base branch")
-case("review/verdict bound to an older base: same rule as the gate", "held",
-     base(runs=[bound(VERDICT[0], "success", 1, base_sha=OLD_BASE, tag="review-verdict", slug="github-actions",
-                      app_id=VERDICT[1])], required=[VERDICT]), says="older candidate")
+case("bound verdict: keyed on an older base: not merged", "held",
+     base(runs=[vbound("success", 1, base_sha=OLD_BASE)], required=[VERDICT]), says="older candidate")
 
 # --- Cancelled exceptions are taken AFTER the PR scoping ----------------------
 # (Codex P1 on aios-marketing-landing-page#36, iprefer-hygraph#16; P2 on aios-docs#9)
@@ -688,9 +725,10 @@ case("cancelled CI run of this PR under another PR's newer success: still red", 
                       bound("build", "success", 2, pr_number=OTHER, tag="x", slug="github-actions",
                             app_id=VERDICT[1])]),
            **actions_run(901, ".github/workflows/ci.yml")), says="CI is not green")
-case("a cancelled run of an older candidate of this PR is neither red nor an exception lookup", "merged",
+case("a cancelled run of an older candidate of this PR is not red and needs no exception lookup, but holds", "held",
      base(runs=[bound("review/verdict", "cancelled", 1, base_sha=OLD_BASE, tag="review-verdict",
-                      slug="github-actions", app_id=VERDICT[1], run=902)]))
+                      slug="github-actions", app_id=VERDICT[1], run=902)]),
+     says="only seen for an older candidate of this PR")
 
 # Every PR-check workflow name in the org (survey of all repos, 2026-10-01), plus
 # this repo's own test workflows and the canonical Codex auto-request (wave-2 P2s:
