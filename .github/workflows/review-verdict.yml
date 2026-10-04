@@ -138,11 +138,16 @@ name: Review verdict
 #   (no workflow_run: GitHub rejects the whole file with "Workflow 'Review
 #   verdict' cannot listen to itself", which stopped every verdict on
 #   2026-09-29. See the fork-review RESIDUAL above.)
-#   push                — this file changed on the default branch. The
-#                         `sweep` job dispatches a re-evaluation for every open
-#                         PR's head, so a verdict published under an older
-#                         policy (e.g. a Greptile-only `success`) does not
-#                         outlive the policy (Codex P1 on .github#55).
+#   push                — any push to the default branch (a merge, or a change
+#                         to this file). The `sweep` job dispatches a
+#                         re-evaluation for every open PR's head, so a verdict
+#                         published under an older policy (e.g. a
+#                         Greptile-only `success`) does not outlive the policy
+#                         (Codex P1 on .github#55), and every verdict is
+#                         re-keyed on the new base tip (Codex P1 on .github#81:
+#                         a tip-matching consumer reads an older-tip key as
+#                         stale). Pushes to other branches start a run whose
+#                         jobs are all skipped.
 #   workflow_dispatch   — re-evaluate one PR: pr_number AND its head_sha.
 # A new head always gets a new check. Re-runs POST a fresh completed run of
 # the same name; the latest one is what GitHub uses. Each run carries an
@@ -161,8 +166,10 @@ on:
     types: [submitted, dismissed]
   issue_comment:
     types: [created, edited, deleted]
+  # Every branch (tags excluded); the `sweep` job's `if` keeps only the
+  # default branch. No `paths` filter: a base push must re-key verdicts.
   push:
-    paths: [.github/workflows/review-verdict.yml]
+    branches: ['**']
   workflow_dispatch:
     inputs:
       pr_number:
@@ -256,9 +263,11 @@ jobs:
           gh workflow run "$wf" --repo "$REPO" --ref "$DEFAULT_BRANCH" \
             -f pr_number="$PR_NUMBER" -f head_sha="$head"
 
-  # push only: this file changed on the default branch. Re-evaluate every
-  # open PR's current head under the new rules. Pushes to other branches
-  # (including PR branches) are ignored.
+  # push only: any push to the default branch. Re-evaluate every open PR's
+  # current head, under the current rules and keyed on the new base tip.
+  # Pushes to other branches (including PR branches) are ignored. Cost: one
+  # dispatched run per open PR per default-branch push. A PR whose base is
+  # not the default branch is re-keyed on its next PR/review/comment event.
   sweep:
     if: >
       github.event_name == 'push' &&

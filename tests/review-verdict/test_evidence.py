@@ -822,6 +822,25 @@ def main():
             print(f"FAIL  concurrency group must key on {needle}")
             return 1
     print("PASS  concurrency group keys on the PR number and the head SHA")
+    # A base push must re-key every verdict on the new tip (Codex P1 on .github#81):
+    # push fires on every branch with no paths filter, and only the default-branch
+    # sweep runs; publish and relay never run on push.
+    push = on.get("push") or {}
+    sweep_if = " ".join(wf["jobs"]["sweep"]["if"].split())
+    checks = [
+        ("push has no paths filter", "paths" not in push and "paths-ignore" not in push),
+        ("push covers every branch", push.get("branches") == ["**"]),
+        ("sweep runs only on a default-branch push",
+         "github.event_name == 'push'" in sweep_if
+         and "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)" in sweep_if),
+        ("publish never runs on push", "github.event_name != 'push'" in wf["jobs"]["publish"]["if"]),
+        ("relay never runs on push", "github.event_name == 'issue_comment'" in wf["jobs"]["relay"]["if"]),
+    ]
+    for label, ok in checks:
+        if not ok:
+            print(f"FAIL  {label}")
+            return 1
+    print("PASS  every default-branch push sweeps and re-keys every open PR's verdict")
     step = wf["jobs"]["publish"]["steps"][0]
     static_env = {k: str(v) for k, v in step["env"].items() if "${{" not in str(v)}
     failures = 0
