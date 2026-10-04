@@ -5,7 +5,9 @@ name: Doc auto-merge sweep
 #
 # Central replacement for the per-repo doc-auto-merge.yml (Brad, 2026-10-04:
 # centralize). Merges documentation-only pull requests across the org once CI
-# is green, with NO review (Brad, 2026-09-28). Code PRs are never touched.
+# is green and Codex has had a brief chance to look (Brad, 2026-10-05; see
+# "Codex" below). No approving review is required (Brad, 2026-09-28). Code
+# PRs are never touched.
 #
 # ── Why central ────────────────────────────────────────────────────────────
 # The per-repo copy (~89 private repos) fires on the completion of 24
@@ -67,6 +69,58 @@ name: Doc auto-merge sweep
 # `doc-auto-merge` job (a merger, not CI, while the copies still exist) and the
 # reviewer checks in IGNORED_CHECKS (no review is required).
 # Pending, missing, unreadable and non-success never merge.
+#
+# ── Codex: wait briefly, never merge over an open P0/P1 ───────────────────
+# Why: aaa-runbooks#198 (Markdown-only) auto-merged at 17:55:51Z on
+# 2026-10-01, 55 s before Codex posted two P1 findings (fixed in #199). The
+# gate exempts Markdown-only PRs from Codex, and the 60 s settle is no wait.
+# So a CI-green documentation-only PR merges only when ONE of these holds,
+# judged in pass 1 AND again in the final snapshot after the settle:
+#   (a) Codex finished on the current head: a row of Codex's live summary
+#       comment (by CODEX_BOT via the CODEX_APP App, opening with
+#       `<!-- codex-pull-request-review-summary -->`) that is
+#       `✅ **Completed**` and names a 7-40 hex prefix of the head, with no
+#       other row for the head still Running; or a Codex review object with
+#       commit_id = head that carries findings (review-verdict.yml's
+#       carries_no_findings rule, copied: pending, skip-notice and
+#       notice-only reviews are not reviews); or Codex's older clean comment
+#       naming the head as its Reviewed commit. Codex posts its review
+#       before it marks the row Completed (#198: 17:56:46Z, 17:56:49Z);
+#   (b) DOC_CODEX_WAIT_MINUTES (repository variable, default 15, whole
+#       minutes >= 1, anything else is a red run) have passed since the head
+#       was pushed, and Codex has posted nothing for the head, or its latest
+#       reply since the head commit is a usage-limit / set-up / skipped
+#       notice (REVIEW_SKIP_PATTERN, review-verdict's; "Codex unavailable",
+#       logged as a ::notice:: annotation like every merge under (b)).
+#       GitHub exposes NO push time for an ordinary push (no pushedDate, and
+#       the timeline records only force-pushes), so "pushed" is the LATER of
+#       the PR's updated_at and the head commit's committer date. A push
+#       updates the PR, so updated_at is never earlier than the push, and
+#       neither is the later of the two (the commit date is a second floor:
+#       a commit cannot be pushed before it is made). Later PR activity (a
+#       comment, a label, Codex's own notice) only moves it later: it fails
+#       toward waiting. Either value unreadable: waits.
+# Codex Running on the head (or any status but Completed, or a summary row
+# that does not parse) waits without a timeout, unless a notice came after
+# the Running row: a stuck review shows up as a PR that keeps waiting.
+# Whatever (a) or (b) says, an open P0/P1 Codex finding on the current head
+# NEVER merges: the PR is logged (`codex-blocked`, a ::warning:: annotation)
+# and left for a person (the #198 case). Open means, as in review-verdict.yml:
+# an unresolved review thread GitHub does not mark outdated (it still applies
+# to the current head's diff, whichever commit it was left on) whose first
+# comment is Codex's with a P0/P1 badge or no readable P2/P3 badge (unbadged
+# counts as P1); or a Codex review on the head whose inline findings were
+# deleted, or that is not dismissed and flags P0/P1 in its body. Outdated or
+# resolved threads, P2/P3 findings and other authors never block. Any read
+# that fails is a wait, never a merge. The sweep never asks Codex for a
+# review (`@codex review`): codex-review-sweep.yml owns nudges, and it and
+# codex-auto-request.yml skip Markdown-only PRs, so Codex looks at a
+# documentation PR only when it is opened or marked ready; a later push
+# reaches (b). Residual, accepted: a summary row is matched by its 7-hex
+# prefix only (a second commit of the PR with the same prefix would be
+# confused with the head); a review of the head made before a retarget
+# still counts; a finding Codex posts inside the final re-read-then-merge
+# round trip (about a second) is not seen.
 #
 # ── Freshness: PR-bound checks count only for the current candidate ───────
 # A check-run whose external_id starts `<this repo>#<n>:<base>:<head>:` is
@@ -133,8 +187,9 @@ name: Doc auto-merge sweep
 #
 # ── Rate limits ───────────────────────────────────────────────────────────
 # One search page per 100 open PRs, then about 2 REST calls per code PR and
-# about 12 per documentation PR (58 open PRs on 2026-10-04: 117 calls in a
-# dry run, against the PAT's 5000/hour). A run starts only if the core
+# about 12 per documentation PR, plus 4 REST and 1+ GraphQL per pass for a
+# CI-green one (Codex; 58 open PRs on 2026-10-04: 117 calls in a dry run,
+# against the PAT's 5000/hour). A run starts only if the core
 # limit has MIN_RATE_REMAINING left (read from response headers); a 403/429 that names a rate limit is
 # retried after a growing back-off (MAX_RETRIES), anything else fails that
 # call. The summary line reports requests made and the core quota used.
@@ -154,7 +209,9 @@ name: Doc auto-merge sweep
 #
 # Observability: one line per PR (`doc-auto-merge-sweep: <repo>#<n>: ...`),
 # a job summary table, and a final line
-# `doc-auto-merge-sweep: scanned N, ... merged M, errors E, api requests R, core quota used U`.
+# `doc-auto-merge-sweep: scanned N, ... codex-blocked B, merged M, errors E, api requests R, core quota used U`.
+# A Codex-blocked PR is a ::warning:: annotation, a merge without a Codex
+# review (rule b) a ::notice:: one; neither makes the run red.
 # An error, a failed or incomplete search, or a missing token is a red run; a
 # pending PR is not.
 
@@ -210,6 +267,13 @@ jobs:
           # The delivery gate: the only PR-bound check held to the live base tip.
           GATE_CHECK: "agency-delivery/gate"
           GATE_APP_ID: "5021608"
+          # Codex (see "Codex" in the header). Same values as review-verdict.yml.
+          CODEX_BOT: "chatgpt-codex-connector[bot]"
+          CODEX_APP: "chatgpt-codex-connector"
+          REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit|reached your codex usage limits?|to use codex here"
+          # Minutes after the (latest possible) push before a PR that Codex
+          # has not reviewed, or cannot, may merge. Optional repo variable.
+          DOC_CODEX_WAIT_MINUTES: ${{ vars.DOC_CODEX_WAIT_MINUTES || '15' }}
           MAX_MERGES: "10"
           SETTLE_SECONDS: "60"
           RUN_BUDGET_SECONDS: "420"
@@ -229,6 +293,12 @@ jobs:
           IGNORED_CHECKS="${IGNORED_CHECKS:-}"
           GATE_CHECK="${GATE_CHECK:-agency-delivery/gate}"
           [[ "${GATE_APP_ID:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::bad GATE_APP_ID '${GATE_APP_ID:-}'"; exit 1; }
+          # The Codex wait: a whole number of minutes, at least 1. Anything else
+          # is a red run (never a silent zero wait).
+          [[ "${DOC_CODEX_WAIT_MINUTES:-}" =~ ^[1-9][0-9]{0,4}$ ]] || { echo "::error::bad DOC_CODEX_WAIT_MINUTES '${DOC_CODEX_WAIT_MINUTES:-}' (whole minutes, at least 1)"; exit 1; }
+          for v in CODEX_BOT CODEX_APP REVIEW_SKIP_PATTERN; do
+            [ -n "${!v// /}" ] || { echo "::error::$v is empty"; exit 1; }
+          done
           # The kill switch, failing closed: anything but exactly "true" plus
           # an explicit dry_run=false (or a schedule) is a dry run.
           DRY=yes
@@ -270,11 +340,12 @@ jobs:
           # ── One PR ─────────────────────────────────────────────────────
           # eval_pr <repo> <n> <check|merge> <expected head or ""> <result file>
           # Always run in a subshell. Writes ONE line to the result file:
-          #   skip|wait|notgreen|ready <head>|would-merge|merged|refused|error <why>
+          #   skip|wait|notgreen|blocked|ready <head>|would-merge|merged|refused|error <why>
           # and exits 0, or 1 for an error (the run ends red).
           eval_pr() {
             REPO=$1; PR_NUMBER=$2; MODE=$3; EXPECT_HEAD=$4; RESULT=$5
             HEAD=""; BASE_REF=""; BASE_TIP=""; VERCEL_REQUIRED=""; VERCEL_FOR=""; FILE_COUNT=""
+            PR_UPDATED=""; PR_NODE=""; CODEX_NOTE=""
             finish() { local k=$1; shift; echo "$k $*" > "$RESULT"; say "$REPO#$PR_NUMBER: $*"; exit 0; }
             fail() { echo "error $*" > "$RESULT"; echo "::error::$REPO#$PR_NUMBER: $*"; exit 1; }
 
@@ -323,6 +394,144 @@ jobs:
               # decides at merge time); false is a conflict, which no sweep fixes.
               [ "$(echo "$pr" | jq -r '.mergeable | tostring')" != "false" ] || finish wait "documentation-only, but GitHub reports a merge conflict."
               FILE_COUNT="$changed"
+              PR_UPDATED=$(echo "$pr" | jq -r '.updated_at // empty')
+              PR_NODE=$(echo "$pr" | jq -r '.node_id // empty')
+            }
+
+            # Codex on the current head (see "Codex" in the header). Prints ONE
+            # line: clean:<why> | timeout:<why> | blocked:<why> | wait:<why>.
+            # clean and timeout may merge; blocked never does (a person must);
+            # wait is the next sweep. Anything unreadable is wait, never a merge.
+            codex_state() {
+              local comments reviews inline hdate now after="" page=0 page_json found blocking="[]"
+              local -a after_arg
+              comments=$(api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --jq '.[]' | jq -s '.') \
+                || { echo "wait:could not read the PR comments, so Codex activity cannot be ruled out"; return 0; }
+              reviews=$(api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100" --jq '.[]' | jq -s '.') \
+                || { echo "wait:could not read the PR reviews, so Codex findings cannot be ruled out"; return 0; }
+              inline=$(api --paginate "repos/$REPO/pulls/$PR_NUMBER/comments?per_page=100" --jq '.[]' | jq -s '.') \
+                || { echo "wait:could not read the inline comments, so Codex findings cannot be ruled out"; return 0; }
+              # Unresolved, not-outdated Codex threads of severity P0/P1, or with
+              # no readable P2/P3 badge (fail closed, as review-verdict does). A
+              # thread GitHub does not mark outdated still applies to the
+              # current head's diff, whichever commit it was first left on.
+              [ -n "$PR_NODE" ] || { echo "wait:the PR has no node_id, so its review threads cannot be read"; return 0; }
+              while :; do
+                page=$((page + 1))
+                [ "$page" -le 50 ] || { echo "wait:over 5000 review threads"; return 0; }
+                if [ -n "$after" ]; then after_arg=(-f after="$after"); else after_arg=(-F after=null); fi
+                # shellcheck disable=SC2016 # $id/$after are GraphQL variables, not shell
+                page_json=$(api graphql -f id="$PR_NODE" "${after_arg[@]}" -f query='
+                    query($id: ID!, $after: String) { node(id: $id) { ... on PullRequest {
+                      reviewThreads(first: 100, after: $after) {
+                        pageInfo { hasNextPage endCursor }
+                        nodes { isResolved isOutdated
+                          comments(first: 1) { nodes { author { __typename login } path body } } } } } } }') \
+                  || { echo "wait:could not read the review threads, so Codex findings cannot be ruled out"; return 0; }
+                found=$(echo "$page_json" | jq -c --arg u "$CODEX_BOT" '
+                    if (.data.node.reviewThreads.nodes | type) != "array"
+                       or (.data.node.reviewThreads.pageInfo.hasNextPage | type) != "boolean" then error("shape") else . end
+                    | [.data.node.reviewThreads.nodes[] | (.comments.nodes[0] // {}) as $c
+                       | (($c.body // "") | [scan("!\\[P([0-3]) Badge\\]") | .[0]] | first) as $sev
+                       | select(.isResolved == false and .isOutdated == false
+                                and ($c.author.__typename // "") == "Bot"
+                                and (($c.author.login // "") == $u or (($c.author.login // "") + "[bot]") == $u)
+                                and (($sev // "?") | IN("2", "3") | not))
+                       | "\(if $sev == null then "unbadged (counts as P1)" else "P" + $sev end) on \($c.path // "?"): "
+                         + ((($c.body // "") | capture("</sub></sub>\\s*(?<t>[^*\\n]{1,120})") | .t) // "(no title)")]') \
+                  || { echo "wait:could not evaluate the review threads, so Codex findings cannot be ruled out"; return 0; }
+                blocking=$(jq -cn --argjson a "$blocking" --argjson b "$found" '$a + $b')
+                [ "$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.hasNextPage')" = "true" ] || break
+                after=$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.endCursor // empty')
+                [ -n "$after" ] || { echo "wait:the review threads report another page but no cursor"; return 0; }
+              done
+              # The head commit date: the earliest the head can have been pushed.
+              # Unreadable leaves it empty, which only matters for the timeout.
+              hdate=$(api "repos/$REPO/git/commits/$HEAD" --jq '.committer.date // empty' || true)
+              now=$(date -u +%s)
+              jq -rn --argjson comments "$comments" --argjson reviews "$reviews" --argjson inline "$inline" \
+                  --argjson threads "$blocking" --arg head "$HEAD" --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
+                  --arg skip "$REVIEW_SKIP_PATTERN" --arg updated "${PR_UPDATED:-}" --arg hdate "${hdate:-}" \
+                  --argjson now "$now" --argjson wait "$DOC_CODEX_WAIT_MINUTES" '
+                def ts: if type == "string" and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}")
+                        then (sub("\\.[0-9]+"; "") | sub("\\+00:00\\z"; "Z") | try fromdateiso8601 catch null)
+                        else null end;
+                # review-verdict.yml CODEX_REVIEW_JQ, the same rule: a review
+                # object that is pending, a skip notice, or notice-only (empty
+                # body, every inline comment a reply or a notice) is no review.
+                def notice_only: ((.body // "") | test("\\A\\s*\\z"))
+                  and ((._comments | type) == "array") and ((._comments | length) > 0)
+                  and all(._comments[]; .in_reply_to_id != null or ((.body // "") | test($skip; "i")));
+                def carries_no_findings: .state == "PENDING" or ((.body // "") | test($skip; "i")) or notice_only;
+                def isbot: (.user.login // "") == $bot;
+                ($hdate | ts) as $hd
+                | ($inline | map(select(isbot))) as $ci
+                # Codex review objects on this head, each with its inline comments.
+                | ($reviews | map(select(isbot and .commit_id == $head and .state != "PENDING")
+                    | .id as $rid | ._comments = [$ci[] | select(.pull_request_review_id == $rid) | {in_reply_to_id, body}])) as $hr
+                | ($hr | map(select(carries_no_findings | not))) as $real
+                # A review on the head whose findings are gone (deleted inline
+                # comments) or whose body flags P0/P1 blocks, as in review-verdict.
+                | ([$real[] | select((._comments | length) == 0) | "Codex review \(.id) on this head has no inline findings left (deleted), so their severity cannot be read"]
+                   + [$real[] | select(.state != "DISMISSED" and ((.body // "") | test("!\\[P[01] Badge\\]")))
+                      | "Codex review \(.id) on this head flags P0/P1 in its body"]
+                   + $threads) as $block
+                # The summary comment: Codex App, opens with its marker; rows
+                # naming this head (a 7-40 hex prefix of it).
+                | ([$comments[] | select(isbot and (.user.type // "") == "Bot"
+                      and (.performed_via_github_app.slug // "") == $app
+                      and ((.body // "") | startswith("<!-- codex-pull-request-review-summary -->")))
+                    | (.body | [split("\n")[] | select(startswith("|"))] | .[2:])[]
+                    | (capture("\\A\\| [^|]+ \\| (?<status>[^|]*) \\| `(?<sha>[0-9a-f]{7,40})` \\| [^|]+ \\|\\z") // {status: null, sha: null})
+                  ]) as $rows
+                | ($rows | map(select(.sha == null)) | length) as $unreadable
+                | ($rows | map(select(.sha != null and (.sha as $s | $head | startswith($s))))
+                    | map(. + {done: (.status | test("\\A✅ \\*\\*Completed\\*\\* <relative-time datetime=\"[^\"]+\">")),
+                               at: ((.status | capture("datetime=\"(?<t>[^\"]+)\"") | .t) // null | ts)})) as $hrows
+                | ($hrows | map(select(.done | not))) as $running
+                # The older clean comment: names its reviewed commit.
+                | ([$comments[] | select(isbot and ((.body // "") | test("Didn.t find any major issues")))
+                    | ((.body // "") | capture("\\*\\*Reviewed commit:\\*\\* `(?<sha>[0-9a-f]{7,40})`") | .sha) // empty
+                    | select(. as $s | $head | startswith($s))] | length > 0) as $legacy
+                # Notices since the head commit: usage limit, set-up, skipped.
+                | ([($comments[] | select(isbot and ((.body // "") | test($skip; "i"))
+                       and ((.body // "") | startswith("<!-- codex-pull-request-review-summary -->") | not)) | .created_at),
+                    ($ci[] | select((.body // "") | test($skip; "i")) | .created_at),
+                    ($hr[] | select(carries_no_findings and (((.body // "") | test($skip; "i")) or any(._comments[]; (.body // "") | test($skip; "i")))) | .submitted_at)]
+                   | map(ts) | map(select(. != null and ($hd == null or . >= $hd)))) as $notices
+                | ($notices | max) as $lastnotice
+                | ([$hd, ($updated | ts)] | if any(.[]; . == null) then null else max end) as $anchor
+                | (if $anchor == null then null else (($now - $anchor) / 60 | floor) end) as $mins
+                | def timeout($why):
+                    if $anchor == null then "wait:\($why); the push time cannot be estimated (updated_at \($updated), head commit date \($hdate)), so not merging"
+                    elif $mins >= $wait then "timeout:\($why); \($mins) min since the head was pushed (at the latest) >= \($wait) min"
+                    else "wait:\($why); \($mins) of \($wait) min since the head was pushed (at the latest), so waiting for Codex" end;
+                  if ($block | length) > 0 then "blocked:\($block | length) open: " + ($block | unique | join("; "))
+                  elif $unreadable > 0 then "wait:a row of the Codex review summary cannot be read, so whether Codex finished cannot be told"
+                  elif ($running | length) > 0
+                       and ($lastnotice == null or any($running[]; .at == null or .at >= $lastnotice)) then
+                    "wait:Codex review still running (or not Completed) on \($head[0:7]) (\($running | map(.status | sub("<[^>]*>"; ""; "g") | sub("\\s+\\z"; "")) | unique | join(", ")))"
+                  elif ($running | length) == 0 and ((($hrows | length) > 0) or ($real | length) > 0 or $legacy) then
+                    "clean:Codex finished on \($head[0:7]) (\(if ($hrows | length) > 0 then "summary row Completed" elif ($real | length) > 0 then "review object on the head" else "clean comment naming the head" end)) with no open P0/P1 finding"
+                  elif $lastnotice != null then timeout("Codex unavailable (its latest reply since the head is a usage-limit or set-up notice)")
+                  else timeout("Codex posted nothing for \($head[0:7])") end' \
+                || echo "wait:could not evaluate Codex activity"
+            }
+
+            # Applies codex_state to a CI-green PR. Returns only for clean or
+            # timeout (CODEX_NOTE says which); otherwise records the decision.
+            codex_gate() {
+              local cs
+              cs=$(codex_state)
+              CODEX_NOTE="${cs#*:}"
+              case "$cs" in
+                clean:*) ;;
+                timeout:*) echo "::notice::$REPO#$PR_NUMBER: merging without a Codex review: ${CODEX_NOTE}." ;;
+                blocked:*)
+                  echo "::warning::$REPO#$PR_NUMBER: open Codex P0/P1 finding(s) on the current head; never auto-merged, left for a person: ${CODEX_NOTE}"
+                  finish blocked "documentation-only and CI green, but Codex has open P0/P1 finding(s) on ${HEAD:0:7}; left for a person: ${CODEX_NOTE}." ;;
+                *) finish wait "documentation-only (${FILE_COUNT} files), CI green at ${HEAD:0:7}; ${CODEX_NOTE}." ;;
+              esac
             }
 
             # BASE_TIP = the base branch's live tip; non-zero (and empty) if unreadable.
@@ -487,7 +696,9 @@ jobs:
               vercel_required || true
               state=$(checks_state)
               case "$state" in
-                green) finish ready "$HEAD documentation-only (${FILE_COUNT} files), CI green against base ${BASE_TIP:0:7}; final snapshot after the settle." ;;
+                green)
+                  codex_gate
+                  finish ready "$HEAD documentation-only (${FILE_COUNT} files), CI green against base ${BASE_TIP:0:7}, ${CODEX_NOTE}; final snapshot after the settle." ;;
                 red:*) finish notgreen "documentation-only, CI not green on ${HEAD:0:7}: ${state#red:}." ;;
                 *) finish wait "documentation-only (${FILE_COUNT} files) at ${HEAD:0:7}; ${state#pending:}." ;;
               esac
@@ -505,8 +716,11 @@ jobs:
               red:*) finish notgreen "CI changed in the final snapshot: ${state#red:}; not merging." ;;
               *) finish wait "CI changed in the final snapshot: ${state#pending:}; not merging." ;;
             esac
+            # Codex again, read fresh after the settle: findings that landed
+            # since pass 1 stop the merge (aaa-runbooks#198).
+            codex_gate
             if [ "$DRY" = "yes" ]; then
-              finish would-merge "dry run: would squash-merge ${HEAD:0:7} onto ${PINNED:0:7} (documentation-only, ${FILE_COUNT} files, CI green)."
+              finish would-merge "dry run: would squash-merge ${HEAD:0:7} onto ${PINNED:0:7} (documentation-only, ${FILE_COUNT} files, CI green, ${CODEX_NOTE})."
             fi
             # Immediately before the merge call, re-read the PR (the merge API
             # pins only the head: a hold label, a retarget or a draft added
@@ -552,7 +766,7 @@ jobs:
             elif [ "$parent" != "$PINNED" ]; then
               fail "merged as ${merged#* } onto ${parent:0:7}, not the evaluated base ${PINNED:0:7}: the base moved inside the merge round trip. The merge stands; check it"
             fi
-            finish merged "${how} as ${merged#* } onto ${PINNED:0:7} (documentation-only, CI green, no review required by policy)."
+            finish merged "${how} as ${merged#* } onto ${PINNED:0:7} (documentation-only, CI green, ${CODEX_NOTE})."
           }
 
           # ── The sweep ────────────────────────────────────────────────────
@@ -586,7 +800,7 @@ jobs:
           } >> "$SUMMARY"
           record() { printf '| %s | %s | %s |\n' "$1" "$2" "$(printf '%s' "$3" | tr '|\n' '/ ' | cut -c1-300)" >> "$SUMMARY"; }
 
-          scanned=0; docs=0; ready=0; waiting=0; notgreen=0; merged=0; would=0; refused=0; errors=0; deferred=0
+          scanned=0; docs=0; ready=0; waiting=0; notgreen=0; blocked=0; merged=0; would=0; refused=0; errors=0; deferred=0
           declare -a READY=()
           i=0
           while read -r url n; do
@@ -612,6 +826,7 @@ jobs:
               ready) ready=$((ready + 1)); docs=$((docs + 1)); READY+=("$repo $n ${line#ready }") ;;
               wait) waiting=$((waiting + 1)); [[ "$line" == *documentation-only* ]] && docs=$((docs + 1)) ;;
               notgreen) notgreen=$((notgreen + 1)); docs=$((docs + 1)) ;;
+              blocked) blocked=$((blocked + 1)); docs=$((docs + 1)) ;;
               error) errors=$((errors + 1)) ;;
             esac
             record "$repo#$n" 1 "${line:-error}"
@@ -640,6 +855,7 @@ jobs:
                 merged) merged=$((merged + 1)) ;;
                 would-merge) would=$((would + 1)) ;;
                 refused) refused=$((refused + 1)) ;;
+                blocked) blocked=$((blocked + 1)) ;;
                 error) errors=$((errors + 1)) ;;
               esac
               record "$repo#$n" 2 "${line:-error}"
@@ -652,7 +868,7 @@ jobs:
             used=$((rate_start - rate_end))
           fi
           requests=$(wc -l < "$CALLS" | tr -d ' ')
-          final="scanned $scanned, documentation-only $docs, green $ready, waiting $waiting, not green $notgreen, $([ "$DRY" = yes ] && echo "would merge $would" || echo "merged $merged"), refused $refused, deferred $deferred, errors $errors, api requests $requests, core quota used $used (left ${rate_end:-?})"
+          final="scanned $scanned, documentation-only $docs, green $ready, waiting $waiting, not green $notgreen, codex-blocked $blocked, $([ "$DRY" = yes ] && echo "would merge $would" || echo "merged $merged"), refused $refused, deferred $deferred, errors $errors, api requests $requests, core quota used $used (left ${rate_end:-?})"
           say "$final"
           { echo; echo "$final"; } >> "$SUMMARY"
           [ "$errors" -eq 0 ] || exit 1

@@ -8,6 +8,7 @@ script with no waits. Needs python3 + PyYAML, bash 4+ and jq.
     uv run --with pyyaml python tests/doc-auto-merge-sweep/test_doc_auto_merge_sweep.py
 """
 import copy
+import datetime
 import json
 import os
 import pathlib
@@ -34,6 +35,15 @@ MOVED = "f" * 40
 MERGE_SHA = "e" * 40
 GATE = "agency-delivery/gate"
 GATE_APP = 5021608
+CODEX = "chatgpt-codex-connector[bot]"
+OLD_HEAD = "9" * 40
+VERDICT = ROOT / ".github/workflows/review-verdict.yml"
+
+
+def ago(minutes, micro=False):
+    """An ISO time `minutes` before now (the script reads the real clock)."""
+    t = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=minutes)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.123456Z" if micro else "%Y-%m-%dT%H:%M:%SZ")
 
 # Stub gh. Keys are the API path without "repos/" and without the query, e.g.
 # "acme/widget/pulls/7", "search/issues", "user". A value
@@ -65,6 +75,8 @@ while i < len(args):
 key = path.lstrip("/").split("?", 1)[0]
 if key.startswith("repos/"):
     key = key[len("repos/"):]
+if key == "graphql":
+    key = "graphql/" + fields.get("id", "") + "/" + fields.get("after", "null")
 with open(os.path.join(state_dir, "calls"), "a") as f:
     f.write(json.dumps({"method": method, "key": key, "fields": fields}) + "\n")
 parts = key.split("/")
@@ -77,7 +89,7 @@ if method == "PUT" and key.endswith("/merge"):
         sys.stderr.write("HTTP 405: merge refused\n"); sys.exit(1)
     open(merged_flag, "w").close()
     sys.stdout.write(json.dumps({"merged": True})); sys.exit(0)
-if method != "GET":
+if method != "GET" or "@codex" in json.dumps(fields):
     sys.exit("stub gh: unexpected %s %s" % (method, key))
 if prkey and os.path.exists(merged_flag) and key + "@merged" in fx:
     key = key + "@merged"
@@ -116,9 +128,10 @@ sys.stdout.write(data)
 
 
 def pr(n, repo=REPO, head=HEAD, files=1, draft=False, labels=(), head_repo=None, merged=False, state="open",
-       mergeable=True, base_sha=LAGGING):
+       mergeable=True, base_sha=LAGGING, updated=None):
     return {"number": n, "state": state, "merged": merged, "draft": draft, "changed_files": files,
             "mergeable": mergeable, "merge_commit_sha": MERGE_SHA if merged else None,
+            "updated_at": updated or ago(120), "node_id": f"PR_{repo}_{n}",
             "labels": [{"name": l} for l in labels],
             "head": {"sha": head, "ref": "docs/x", "repo": {"full_name": head_repo or repo}},
             "base": {"ref": "main", "sha": base_sha}}
@@ -166,11 +179,68 @@ def repo_fx(repo=REPO, required=(), base_statuses=None, tip_value=None):
     }
 
 
-def pr_fx(n, repo=REPO, head=HEAD, files=("README.md",), runs=(), statuses=(), **prkw):
+def summary(sha, status="completed", at=None):
+    """Codex's live review-summary comment with one row for `sha`."""
+    at = at or ago(100, micro=True)
+    cell = (f'✅ **Completed** <relative-time datetime="{at}">{at}</relative-time>' if status == "completed"
+            else f'🔄 **Running** since <relative-time datetime="{at}">{at}</relative-time>' if status == "running"
+            else status)
+    body = ("<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\n"
+            "| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n"
+            f"| 📝 **Code Review** | {cell} | `{sha[:7]}` | PR opened |\n\n\n<details>about</details>")
+    return {"id": 900, "user": {"login": CODEX, "type": "Bot"},
+            "performed_via_github_app": {"slug": "chatgpt-codex-connector"}, "body": body,
+            "created_at": ago(110), "updated_at": at[:19] + "Z"}
+
+
+def notice(text="You have reached your Codex usage limits for code reviews. See the dashboard.", at=None, cid=901):
+    return {"id": cid, "user": {"login": CODEX, "type": "Bot"},
+            "performed_via_github_app": {"slug": "chatgpt-codex-connector"}, "body": text,
+            "created_at": at or ago(30), "updated_at": at or ago(30)}
+
+
+def review(rid, commit=HEAD, body="### Codex Review\n\n**Reviewed commit:** `034be02bb3`", state="COMMENTED", at=None):
+    return {"id": rid, "user": {"login": CODEX, "type": "Bot"}, "commit_id": commit, "state": state,
+            "body": body, "submitted_at": at or ago(90)}
+
+
+def finding(cid, rid, sev="P1", commit=HEAD, reply_to=None, body=None, at=None):
+    badge = f"**<sub><sub>![{sev} Badge](https://img.shields.io/badge/{sev}-orange?style=flat)</sub></sub>  A finding**" \
+        if sev else "**A finding with no badge**"
+    return {"id": cid, "user": {"login": CODEX, "type": "Bot"}, "pull_request_review_id": rid,
+            "commit_id": commit, "original_commit_id": commit, "in_reply_to_id": reply_to,
+            "body": body if body is not None else badge + "\n\nDetails.", "created_at": at or ago(90)}
+
+
+def thread(sev="P1", resolved=False, outdated=False, author=CODEX, typename="Bot"):
+    badge = f"**<sub><sub>![{sev} Badge](x)</sub></sub>  Remove prohibited pricing figures**" if sev else "**No badge**"
+    login = author[:-5] if author.endswith("[bot]") else author
+    return {"isResolved": resolved, "isOutdated": outdated, "comments": {"nodes": [
+        {"author": {"__typename": typename, "login": login}, "path": "docs/a.md", "body": badge}]}}
+
+
+def threads_fx(repo, n, nodes=()):
+    return {f"graphql/PR_{repo}_{n}/null": {"data": {"node": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": list(nodes)}}}}}
+
+
+def codex_fx(n, repo=REPO, head=HEAD, comments=None, reviews=(), inline=(), threads=(), head_date=None):
+    """Codex activity on PR #n. Default: the summary shows `head` Completed, nothing open."""
+    return {
+        f"{repo}/issues/{n}/comments": list(comments) if comments is not None else [summary(head)],
+        f"{repo}/pulls/{n}/reviews": list(reviews),
+        f"{repo}/pulls/{n}/comments": list(inline),
+        f"{repo}/git/commits/{head}": {"sha": head, "committer": {"date": head_date or ago(120)}},
+        **threads_fx(repo, n, threads),
+    }
+
+
+def pr_fx(n, repo=REPO, head=HEAD, files=("README.md",), runs=(), statuses=(), codex=None, **prkw):
     entries = [{"filename": f[0], "previous_filename": f[1]} if isinstance(f, tuple) else {"filename": f}
                for f in files]
     prkw.setdefault("files", len(entries))
     return {
+        **codex_fx(n, repo=repo, head=head, **(codex or {})),
         f"{repo}/pulls/{n}": pr(n, repo=repo, head=head, **prkw),
         f"{repo}/pulls/{n}@merged": pr(n, repo=repo, head=head, merged=True, state="closed"),
         f"{repo}/pulls/{n}/files": entries,
@@ -334,6 +404,122 @@ case("tip unreadable in pass 1: pending, no merge",
      one(runs=[gate("success", 5, 7)], required=REQ_GATE, repo_kw={"tip_value": "__error"}),
      says="could not read the tip")
 
+# ── Codex (Brad, 2026-10-05: doc merges wait briefly for Codex) ──────────────
+def cx(**codex):
+    return one(codex=codex)
+
+
+P1_198 = dict(comments=[summary(HEAD)], reviews=[review(50)], inline=[finding(1, 50), finding(2, 50)],
+              threads=[thread("P1"), thread("P1")])
+case("Codex completed on the head, clean: merges", cx(), merged={W7}, says="summary row Completed")
+case("Codex still running on the head: waits (even long past the timeout)",
+     cx(comments=[summary(HEAD, "running")]), says="still running", merge_calls=0)
+case("nothing from Codex, timeout reached: merges", cx(comments=[]), merged={W7}, says="Codex posted nothing")
+case("nothing from Codex, timeout reached: logged as a merge without review", cx(comments=[]), merged={W7},
+     says="::notice::")
+case("nothing from Codex, timeout not reached: waits",
+     world(cx(comments=[], head_date=ago(5)), {f"{REPO}/pulls/7": pr(7, updated=ago(5))}),
+     says="5 of 15 min", merge_calls=0)
+case("timeout uses the LATER of updated_at and the head commit date (updated_at recent): waits",
+     world(cx(comments=[], head_date=ago(300)), {f"{REPO}/pulls/7": pr(7, updated=ago(3))}), says="of 15 min")
+case("timeout uses the LATER of updated_at and the head commit date (commit date recent): waits",
+     world(cx(comments=[], head_date=ago(3))), says="of 15 min")
+case("head commit date unreadable and nothing from Codex: waits, never merges",
+     world(cx(comments=[]), {f"{REPO}/git/commits/{HEAD}": "__error"}), says="cannot be estimated")
+case("DOC_CODEX_WAIT_MINUTES=60 with 120 min elapsed: merges", cx(comments=[]), merged={W7},
+     env={"DOC_CODEX_WAIT_MINUTES": "60"})
+case("DOC_CODEX_WAIT_MINUTES=180 with 120 min elapsed: waits", cx(comments=[]), says="of 180 min",
+     env={"DOC_CODEX_WAIT_MINUTES": "180"})
+case("DOC_CODEX_WAIT_MINUTES=0: red, nothing merged", cx(comments=[]), env={"DOC_CODEX_WAIT_MINUTES": "0"},
+     exit_ok=False)
+case("DOC_CODEX_WAIT_MINUTES junk: red, nothing merged", cx(), env={"DOC_CODEX_WAIT_MINUTES": "15m"},
+     exit_ok=False)
+case("aaa-runbooks#198: Completed with two open P1 findings on the head: never merged, not red",
+     cx(**P1_198), says="left for a person", not_says="would squash")
+case("open P1 on the head is never merged, even long after the timeout",
+     cx(comments=[], reviews=[review(50)], inline=[finding(1, 50)], threads=[thread("P1")]),
+     says="open P0/P1 finding(s)", merge_calls=0)
+case("open P0 thread blocks", cx(threads=[thread("P0")]), says="P0 on docs/a.md")
+case("blocked PR is a warning annotation and counted", cx(**P1_198), says="codex-blocked 1")
+case("unbadged Codex thread counts as P1: blocks", cx(threads=[thread(None)]), says="unbadged")
+case("P2-only findings: merges",
+     cx(reviews=[review(50)], inline=[finding(1, 50, "P2"), finding(2, 50, "P3")],
+        threads=[thread("P2"), thread("P3")]), merged={W7})
+case("resolved P1 thread: merges", cx(threads=[thread("P1", resolved=True)]), merged={W7})
+case("P1-looking thread by someone else: merges", cx(threads=[thread("P1", author="mallory", typename="User")]),
+     merged={W7})
+case("findings on an older head (outdated thread) do not block: merges",
+     cx(reviews=[review(40, commit=OLD_HEAD)], inline=[finding(1, 40, commit=OLD_HEAD)],
+        threads=[thread("P1", outdated=True)]), merged={W7})
+case("findings on an older head, nothing from Codex for this head: timeout merges",
+     cx(comments=[summary(OLD_HEAD)], reviews=[review(40, commit=OLD_HEAD)], inline=[finding(1, 40, commit=OLD_HEAD)],
+        threads=[thread("P1", outdated=True)]), merged={W7}, says="Codex posted nothing")
+case("a P1 from an older head that still applies (not outdated) blocks",
+     cx(reviews=[review(40, commit=OLD_HEAD)], inline=[finding(1, 40, commit=OLD_HEAD)], threads=[thread("P1")]),
+     says="left for a person")
+case("older head Completed, this head nothing yet, timeout not reached: waits",
+     world(cx(comments=[summary(OLD_HEAD)], head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, updated=ago(4))}),
+     says="of 15 min")
+case("usage-limit notice + timeout reached: merges, logged as unavailable",
+     world(cx(comments=[notice(at=ago(30))], head_date=ago(40)), {f"{REPO}/pulls/7": pr(7, updated=ago(30))}),
+     merged={W7}, says="Codex unavailable")
+case("usage-limit notice, timeout not reached: waits",
+     world(cx(comments=[notice(at=ago(5))], head_date=ago(6)), {f"{REPO}/pulls/7": pr(7, updated=ago(5))}),
+     says="Codex unavailable", merge_calls=0)
+case("create-an-environment notice (issue comment) + timeout: merges",
+     cx(comments=[notice("To use Codex here, [create an environment for this repo](https://x).")]),
+     merged={W7}, says="Codex unavailable")
+case("create-an-environment reply as an empty review on the head + timeout: merges",
+     cx(comments=[], reviews=[review(60, body="")],
+        inline=[finding(5, 60, sev=None, reply_to=4, body="To use Codex here, create an environment for this repo.")]),
+     merged={W7}, says="Codex unavailable")
+case("Running row, then a later usage-limit notice: unavailable, timeout merges",
+     cx(comments=[summary(HEAD, "running", at=ago(60, micro=True)), notice(at=ago(50))]), merged={W7},
+     says="Codex unavailable")
+case("usage-limit notice, then a later Running row (retry): waits",
+     cx(comments=[notice(at=ago(60)), summary(HEAD, "running", at=ago(50, micro=True))]), says="still running")
+case("notice from before the head commit does not count as unavailable",
+     cx(comments=[notice(at=ago(200))]), merged={W7}, says="Codex posted nothing")
+case("pass 1 clean, P1 lands during the settle: not merged",
+     world(cx(), {f"graphql/PR_{REPO}_7/null": {"__seq": [threads_fx(REPO, 7)[f"graphql/PR_{REPO}_7/null"],
+                                                            threads_fx(REPO, 7, [thread("P1")])[f"graphql/PR_{REPO}_7/null"]]}}),
+     says="left for a person", merge_calls=0)
+case("Codex review on the head with its findings deleted: blocks",
+     cx(reviews=[review(50)], inline=[]), says="deleted")
+case("Codex review body flagging P1: blocks",
+     cx(reviews=[review(50, body="Codex Review ![P1 Badge](x) bad")], inline=[finding(1, 50, "P2")]),
+     says="flags P0/P1")
+case("Codex review object on the head, no summary: clean, merges",
+     cx(comments=[], reviews=[review(50)], inline=[finding(1, 50, "P3")], threads=[thread("P3")]),
+     merged={W7}, says="review object on the head")
+case("older clean comment naming the head: merges",
+     world(cx(comments=[{**notice(), "body": "Codex Review: Didn't find any major issues. Nice.\n\n**Reviewed commit:** `034be02bb3`"}]),
+           {f"{REPO}/pulls/7": pr(7, updated=ago(2))}),
+     merged={W7}, says="clean comment naming the head")
+case("unknown status in the head row: waits", cx(comments=[summary(HEAD, "❌ **Failed**")]), says="still running")
+case("unreadable summary row: waits", cx(comments=[{**summary(HEAD), "body": summary(HEAD)["body"].replace("`034be02`", "034be02")}]),
+     says="cannot be read")
+case("summary comment not from the Codex App does not count: timeout path",
+     world(cx(comments=[{**summary(HEAD), "performed_via_github_app": None}], head_date=ago(4)),
+           {f"{REPO}/pulls/7": pr(7, updated=ago(4))}), says="Codex posted nothing", merge_calls=0)
+case("comments unreadable: waits", world(cx(), {f"{REPO}/issues/7/comments": "__error"}), says="could not read the PR comments")
+case("reviews unreadable: waits", world(cx(), {f"{REPO}/pulls/7/reviews": "__error"}), says="could not read the PR reviews")
+case("inline comments unreadable: waits", world(cx(), {f"{REPO}/pulls/7/comments": "__error"}),
+     says="could not read the inline comments")
+case("review threads unreadable: waits", world(cx(), {f"graphql/PR_{REPO}_7/null": "__error"}),
+     says="could not read the review threads")
+case("review threads malformed: waits", world(cx(), {f"graphql/PR_{REPO}_7/null": {"data": None}}),
+     says="could not evaluate the review threads")
+case("review threads paged: a P1 on page 2 blocks",
+     world(cx(), {f"graphql/PR_{REPO}_7/null": {"data": {"node": {"reviewThreads": {
+         "pageInfo": {"hasNextPage": True, "endCursor": "C1"}, "nodes": [thread("P2")]}}}},
+                  f"graphql/PR_{REPO}_7/C1": threads_fx(REPO, 7, [thread("P1")])[f"graphql/PR_{REPO}_7/null"]}),
+     says="left for a person")
+case("Codex never gates a code PR (not evaluated)", one(files=("app.py",), codex={"threads": [thread("P1")]}),
+     says="not documentation-only")
+case("dry run: Codex-blocked PR is not a would-merge", cx(**P1_198), env={"ENABLED": ""}, not_says="would squash")
+case("dry run: Codex clean is a would-merge", cx(), env={"ENABLED": ""}, says="would squash-merge")
+
 # ── The merge ──────────────────────────────────────────────────────────────
 case("merge call pins head, squash, org token, no title/message", one(), merged={W7})
 case("base tip moved before the merge call: refused, no merge, run not red",
@@ -472,6 +658,15 @@ def static_checks():
         assert str(env[k]) == str(canon[k]), f"{k} must match doc-auto-merge.yml"
     assert str(env["MAX_MERGES"]) == "10"
     assert env["GATE_CHECK"] == GATE and str(env["GATE_APP_ID"]) == str(GATE_APP), "the gate is the base authority"
+    venv = {}
+    for j in yaml.safe_load(VERDICT.read_text())["jobs"].values():
+        for st in j.get("steps", []):
+            if "REVIEW_SKIP_PATTERN" in (st.get("env") or {}):
+                venv = st["env"]
+    for k in ("CODEX_BOT", "CODEX_APP", "REVIEW_SKIP_PATTERN"):
+        assert str(env[k]) == str(venv[k]), f"{k} must match review-verdict.yml"
+    assert env["DOC_CODEX_WAIT_MINUTES"] == "${{ vars.DOC_CODEX_WAIT_MINUTES || '15' }}", "default wait 15 min"
+    assert "@codex" not in step["run"], "the sweep never asks Codex for a review (codex-review-sweep does)"
     return env
 
 
@@ -492,7 +687,7 @@ def main():
             (tmp / "fx.json").write_text(json.dumps(fx))
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
                    **env_static, "ORG": ORG, "GH_TOKEN": "org-token", "ENABLED": "true", "DRY_RUN_INPUT": "false",
-                   "SETTLE_SECONDS": "0", "BACKOFF_SECONDS": "0",
+                   "SETTLE_SECONDS": "0", "BACKOFF_SECONDS": "0", "DOC_CODEX_WAIT_MINUTES": "15",
                    "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state), **env_over}
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True,
                                  timeout=120)
