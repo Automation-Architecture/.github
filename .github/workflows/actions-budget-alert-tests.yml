@@ -1,0 +1,32 @@
+name: Actions budget alert tests
+
+# Runs the offline suite for actions-budget-alert.yml. It runs the PR's own
+# copy of the workflow's step scripts against a stub `gh` with fixture JSON
+# for the billing usage API: no token, no network calls to GitHub's API,
+# read-only permissions.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/actions-budget-alert.yml
+      - .github/workflows/actions-budget-alert-tests.yml
+      - tests/actions-budget-alert/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/actions-budget-alert.yml
+      - .github/workflows/actions-budget-alert-tests.yml
+      - tests/actions-budget-alert/**
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: uv run --python 3.12 --with 'PyYAML>=6,<7' python tests/actions-budget-alert/test_actions_budget_alert.py
