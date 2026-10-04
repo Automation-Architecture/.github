@@ -129,7 +129,17 @@ def base():
         f"/issues/{PR}/comments": [],
         f"/commits/{HEAD}/check-runs": {"check_runs": []},
         f"/commits/{HEAD}/pulls": [{"number": PR, "state": "open", "head": {"sha": HEAD}}],
+        # The live tip of the base branch. Deliberately not `.base.sha` ('b' * 40):
+        # the pulls API value lags the tip (aaa-pr-bot#51).
+        "/git/ref/heads/main": base_ref_tip(),
     }
+
+
+TIP = "c" * 40
+
+
+def base_ref_tip(sha=TIP, ref="refs/heads/main", type_="commit"):
+    return {"ref": ref, "object": {"type": type_, "sha": sha}}
 
 
 def with_(fx, **kw):
@@ -762,11 +772,29 @@ case("comments of a real Codex review unreadable: fails closed", "fail",
 
 # --- review/verdict is bound to its PR by external_id (aios-coffee#135) --------
 # (name, fixtures, env, expected external_id or None for none)
+# The key's base is the live tip of the base branch (gate v2.10 form), never `.base.sha`.
+SLASH_BRANCH = "release/2026-10#1"
 PUBLISH_CASES = [
-    ("published verdict names its PR, base and head in external_id", summary(), {},
-     f"{REPO}#{PR}:{'b' * 40}:{HEAD}:review-verdict"),
-    ("a failing verdict is bound to its PR too", base(), {},
-     f"{REPO}#{PR}:{'b' * 40}:{HEAD}:review-verdict"),
+    ("published verdict names its PR, the live base tip and head in external_id", summary(), {},
+     f"{REPO}#{PR}:{TIP}:{HEAD}:review-verdict"),
+    ("a failing verdict is bound to its PR and the live tip too", base(), {},
+     f"{REPO}#{PR}:{TIP}:{HEAD}:review-verdict"),
+    ("base tip unreadable: keyed `unresolved`, never `.base.sha`",
+     with_(summary(), **{"/git/ref/heads/main": "__missing"}), {},
+     f"{REPO}#{PR}:unresolved:{HEAD}:review-verdict"),
+    ("base ref resolves to a tag object: `unresolved`",
+     with_(summary(), **{"/git/ref/heads/main": base_ref_tip(type_="tag")}), {},
+     f"{REPO}#{PR}:unresolved:{HEAD}:review-verdict"),
+    ("base ref answers for another ref: `unresolved`",
+     with_(summary(), **{"/git/ref/heads/main": base_ref_tip(ref="refs/heads/main-old")}), {},
+     f"{REPO}#{PR}:unresolved:{HEAD}:review-verdict"),
+    ("base tip not a full SHA: `unresolved`",
+     with_(summary(), **{"/git/ref/heads/main": base_ref_tip(sha=TIP[:7])}), {},
+     f"{REPO}#{PR}:unresolved:{HEAD}:review-verdict"),
+    ("a branch name with a slash and a reserved character is read by its encoded ref",
+     with_(summary(), **{f"/pulls/{PR}": {**summary()[f"/pulls/{PR}"], "base": {"ref": SLASH_BRANCH, "sha": "b" * 40}},
+                         "/git/ref/heads/release/2026-10%231": base_ref_tip(ref=f"refs/heads/{SLASH_BRANCH}")}), {},
+     f"{REPO}#{PR}:{TIP}:{HEAD}:review-verdict"),
     ("no PR number and an ambiguous head: published unbound, never a success",
      with_(base(), **{f"/commits/{HEAD}/pulls": [{"number": PR, "state": "open", "head": {"sha": HEAD}},
                                                    {"number": 8, "state": "open", "head": {"sha": HEAD}}]}),
@@ -827,6 +855,7 @@ def main():
                 print(out.stdout[-1500:], out.stderr[-1500:], sep="\n")
         for name, fx, env_over, want in PUBLISH_CASES:
             fx = derive_findings(dict(fx))
+            fx = {k: v for k, v in fx.items() if v != "__missing"}
             (tmp / "fx.json").write_text(json.dumps(fx))
             for suffix in (".calls", ".posted"):
                 (tmp / ("fx.json" + suffix)).unlink(missing_ok=True)

@@ -148,6 +148,11 @@ name: Review verdict
 # the same name; the latest one is what GitHub uses. Each run carries an
 # external_id naming its PR (`<owner/repo>#<pr>:<base>:<head>:review-verdict`),
 # so a consumer can keep two PRs at one head apart (doc-auto-merge.yml does).
+# <base> is the live tip of the PR's base branch, read just before publishing,
+# as in the delivery gate's candidate key from gate policy v2.10; `unresolved`
+# when it cannot be read. Until then it was the pulls API `.base.sha`, which
+# lags the tip (aaa-pr-bot#51), so a consumer could not tell which base a
+# verdict was published against.
 
 on:
   pull_request_target:
@@ -1238,7 +1243,7 @@ jobs:
             fi
 
             # Bound to its PR by external_id, in the delivery gate's candidate-key
-            # form `<owner/repo>#<pr>:<base sha>:<head sha>:<tag>`: two open PRs at
+            # form `<owner/repo>#<pr>:<base tip>:<head sha>:<tag>`: two open PRs at
             # one head commit each get their own review/verdict, and
             # doc-auto-merge.yml ignores a run that names another PR (Codex on
             # aios-coffee#135, discussion_r4159188087). With no PR number (a
@@ -1246,9 +1251,25 @@ jobs:
             # external_id is opaque to rulesets: GitHub enforces the newest run
             # of this name on the commit, so doc-auto-merge.yml also waits while
             # that newest run is another PR's and has not passed (.github#76).
-            local payload external_id=""
+            # The base is the live tip of BASE_REF, read here, immediately
+            # before publishing, exactly as gate v2.10 keys its candidates; never
+            # the pulls API `.base.sha`, which lags the tip (aaa-pr-bot#51). An
+            # unreadable tip is written `unresolved`, which matches no tip a
+            # consumer pins, so a tip-matching consumer waits; the verdict
+            # itself (Codex evidence on the head) does not depend on the base.
+            local payload external_id="" key_base="unresolved" ref_enc tip
             if [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]; then
-              external_id="${REPO}#${PR_NUMBER}:${BASE_SHA:-unknown}:${sha}:review-verdict"
+              if [ -n "${BASE_REF:-}" ]; then
+                # Each path segment of the branch name URL-encoded; "/" kept.
+                ref_enc=$(jq -rn --arg b "$BASE_REF" '$b | @uri | gsub("%2F"; "/")')
+                if tip=$(gh api "/repos/$REPO/git/ref/heads/$ref_enc" \
+                      | jq -r --arg ref "refs/heads/$BASE_REF" \
+                          'if .ref == $ref and .object.type == "commit" then .object.sha else empty end') \
+                   && [[ "$tip" =~ ^[0-9a-f]{40}$ ]]; then
+                  key_base="$tip"
+                fi
+              fi
+              external_id="${REPO}#${PR_NUMBER}:${key_base}:${sha}:review-verdict"
             fi
             payload=$(jq -n \
               --arg name "$CHECK_NAME" \
