@@ -85,9 +85,10 @@ name: Doc auto-merge sweep
 #       other row for the head still Running; or a Codex review object with
 #       commit_id = head that carries findings (review-verdict.yml's
 #       carries_no_findings rule, copied: pending, skip-notice and
-#       notice-only reviews are not reviews); or Codex's older clean comment
-#       naming the head as its Reviewed commit. Codex posts its review
-#       before it marks the row Completed (#198: 17:56:46Z, 17:56:49Z);
+#       notice-only reviews are not reviews). Codex posts its review before
+#       it marks the row Completed (#198: 17:56:46Z, 17:56:49Z). Codex's
+#       older "Didn't find any major issues" comment is NOT evidence: a
+#       writer can edit it (Codex P2 on #84); such a PR reaches (b);
 #   (b) DOC_CODEX_WAIT_MINUTES (repository variable, default 15, whole
 #       minutes >= 1, anything else is a red run) have passed since the head
 #       was pushed, and Codex has posted nothing for the head, or its latest
@@ -523,10 +524,6 @@ jobs:
                     | map(. + {done: (.status | test("\\A✅ \\*\\*Completed\\*\\* <relative-time datetime=\"[^\"]+\">")),
                                at: ((.status | capture("datetime=\"(?<t>[^\"]+)\"") | .t) // null | ts)})) as $hrows
                 | ($hrows | map(select(.done | not))) as $running
-                # The older clean comment: names its reviewed commit.
-                | ([$comments[] | select(isbot and ((.body // "") | test("Didn.t find any major issues")))
-                    | ((.body // "") | capture("\\*\\*Reviewed commit:\\*\\* `(?<sha>[0-9a-f]{7,40})`") | .sha) // empty
-                    | select(. as $s | $head | startswith($s))] | length > 0) as $legacy
                 # Notices since the head commit: usage limit, set-up, skipped.
                 | ([($comments[] | select(isbot and ((.body // "") | test($skip; "i"))
                        and ((.body // "") | startswith("<!-- codex-pull-request-review-summary -->") | not)) | .created_at),
@@ -545,8 +542,8 @@ jobs:
                   elif ($running | length) > 0
                        and ($lastnotice == null or any($running[]; .at == null or .at >= $lastnotice)) then
                     "wait:Codex review still running (or not Completed) on \($head[0:7]) (\($running | map(.status | sub("<[^>]*>"; ""; "g") | sub("\\s+\\z"; "")) | unique | join(", ")))"
-                  elif ($running | length) == 0 and ((($hrows | length) > 0) or ($real | length) > 0 or $legacy) then
-                    "clean:Codex finished on \($head[0:7]) (\(if ($hrows | length) > 0 then "summary row Completed" elif ($real | length) > 0 then "review object on the head" else "clean comment naming the head" end)) with no open P0/P1 finding"
+                  elif ($running | length) == 0 and ((($hrows | length) > 0) or ($real | length) > 0) then
+                    "clean:Codex finished on \($head[0:7]) (\(if ($hrows | length) > 0 then "summary row Completed" else "review object on the head" end)) with no open P0/P1 finding"
                   elif $lastnotice != null then timeout("Codex unavailable (its latest reply since the head is a usage-limit or set-up notice)")
                   else timeout("Codex posted nothing for \($head[0:7])") end' \
                 || echo "wait:could not evaluate Codex activity"

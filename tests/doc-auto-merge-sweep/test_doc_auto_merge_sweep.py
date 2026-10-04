@@ -512,10 +512,10 @@ case("Codex review body flagging P1: blocks",
 case("Codex review object on the head, no summary: clean, merges",
      cx(comments=[], reviews=[review(50)], inline=[finding(1, 50, "P3")], threads=[thread("P3")]),
      merged={W7}, says="review object on the head")
-case("older clean comment naming the head: merges",
+case("older clean comment naming the head is not evidence (editable): waits for the timeout",
      world(cx(comments=[{**notice(), "body": "Codex Review: Didn't find any major issues. Nice.\n\n**Reviewed commit:** `034be02bb3`"}]),
            {f"{REPO}/pulls/7": pr(7, updated=ago(2))}),
-     merged={W7}, says="clean comment naming the head")
+     says="Codex posted nothing", merge_calls=0)
 case("unknown status in the head row: waits", cx(comments=[summary(HEAD, "❌ **Failed**")]), says="still running")
 case("unreadable summary row: waits", cx(comments=[{**summary(HEAD), "body": summary(HEAD)["body"].replace("`034be02`", "034be02")}]),
      says="cannot be read")
