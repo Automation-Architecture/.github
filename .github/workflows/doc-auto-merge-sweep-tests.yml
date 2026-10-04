@@ -1,0 +1,33 @@
+name: Doc auto-merge sweep tests
+
+# Runs the offline suite for doc-auto-merge-sweep.yml. It runs the PR's own
+# copy of the sweep script against a stub `gh`: no token, no network calls to
+# GitHub's API, read-only permissions.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/doc-auto-merge-sweep.yml
+      - .github/workflows/doc-auto-merge-sweep-tests.yml
+      - .github/workflows/doc-auto-merge.yml
+      - tests/doc-auto-merge-sweep/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/doc-auto-merge-sweep.yml
+      - .github/workflows/doc-auto-merge-sweep-tests.yml
+      - .github/workflows/doc-auto-merge.yml
+      - tests/doc-auto-merge-sweep/**
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: uv run --python 3.12 --with 'PyYAML>=6,<7' python tests/doc-auto-merge-sweep/test_doc_auto_merge_sweep.py
