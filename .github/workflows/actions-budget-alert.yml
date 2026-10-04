@@ -1,0 +1,372 @@
+name: Actions budget alert
+
+# LIVES ONLY IN Automation-Architecture/.github. Not a canonical copy: never
+# sync it into a repo (one run here covers the whole org). This repository is
+# public, so the run's own minutes are free.
+#
+# Why (Brad approved 2026-10-05): GitHub Team includes 3,000 Actions minutes a
+# month. October's ran out on Oct 1-2 and nothing alerted, not even on a
+# 6,109-minute day. September was 32,739 minutes, about $157 net.
+#
+# ── What it does ──────────────────────────────────────────────────────────
+# Once a day it reads the org's billing usage for the month of the REPORT
+# DATE (yesterday, UTC) and computes, from the `Actions Linux` SKU only:
+#   - the report date's minutes and net $, and its top repos by minutes;
+#   - month-to-date (the 1st through the report date, inclusive): minutes,
+#     gross, discount and net $, top repos, and billable vs public minutes;
+#   - a naive month-end projection: month-to-date per elapsed day times the
+#     days in the month. Projected net $ is the projected BILLABLE minutes
+#     beyond INCLUDED_MINUTES at PRICE_PER_MINUTE, never less than the net
+#     already billed.
+# "Billable" means every repository that is not public right now: private
+# repos, and repos that were deleted or transferred (they were billed).
+# Public repos are free and do not use the included minutes. Visibility comes
+# from the org's PUBLIC repository list read with GITHUB_TOKEN (public data).
+# Other SKUs (Actions storage, other runner OSes) are not counted.
+#
+# ── When it alerts (thresholds in `env` below) ────────────────────────────
+#   daily     report-date minutes > DAILY_MINUTES_MAX
+#   included  month-to-date billable minutes >= INCLUDED_MINUTES (once a month)
+#   projected projected month-end net $ > PROJECTED_NET_MAX
+#   repo      any single repo's report-date minutes > REPO_DAILY_MINUTES_MAX
+# An alert opens, or comments on, ONE issue per month, titled
+# "Actions budget alert YYYY-MM" (the report date's month) and labelled
+# ALERT_LABEL (created if missing). At most one post per report date; the
+# `included` alert is posted at most once a month. A closed month issue is
+# reopened rather than duplicated. Only issues, bodies and comments written by
+# github-actions[bot] count for de-duplication: this repository is public, so
+# anyone can open an issue or comment with the same title or markers.
+# A day with no alert writes the summary to the job summary only.
+#
+# ── Fails closed ──────────────────────────────────────────────────────────
+# A failed billing read, a missing token, a malformed payload (no
+# `usageItems` array, a non-numeric amount, a date outside the month, an
+# `Actions Linux` row that is not Minutes), no usage rows at all on the report
+# date (this org runs scheduled jobs every day, so an empty day means the data
+# is missing, not that the org was idle), or an unreadable public-repo list
+# makes the run RED. A red run is the alert that the monitoring is broken.
+#
+# ── Credentials ───────────────────────────────────────────────────────────
+# The billing usage endpoints accept only a classic personal access token
+# from an organization owner or billing manager; fine-grained tokens and
+# GITHUB_TOKEN are not supported (GitHub docs, "Automating usage reporting
+# with the REST API"). The only such credential here is AAA_ORG_TOKEN
+# (web3sea, an org owner; classic PAT; 1Password vault aaa-APIs, item
+# aaa-org-token). It is used for exactly one call, the billing GET, in the
+# first step. Every other call uses GITHUB_TOKEN, whose only permission is
+# issues: write (the alert issue, its comments and the label).
+#
+# ── Triggers ──────────────────────────────────────────────────────────────
+# Daily at 07:17 UTC, and workflow_dispatch from main only (the job
+# condition: `--ref <branch>` would run a branch's copy with the PAT).
+# Scheduled workflows in this repository are under investigation
+# (codex-review-sweep and doc-auto-merge-sweep had not fired on schedule as of
+# 2026-10-05). The dispatch is the manual fallback and behaves exactly like
+# the schedule unless `dry_run` is set; `report_date` replays a past day and
+# is allowed only with `dry_run` (it never writes to an issue).
+#
+# Observability: one line per run, `actions-budget-alert: <date> ...`, the
+# numbers in the job summary, and the issue. Watch for: no run on a day
+# (schedule dropped), a red run (broken monitoring), a new month issue or
+# comment (budget alert).
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute and summarize only; never write to an issue"
+        type: boolean
+        default: false
+      report_date:
+        description: "Replay a past day (YYYY-MM-DD, UTC). Requires dry_run. Default: yesterday"
+        type: string
+        default: ""
+
+permissions: {}
+
+concurrency:
+  group: actions-budget-alert
+  cancel-in-progress: false
+
+env:
+  # ── Thresholds: change them here ──
+  INCLUDED_MINUTES: "3000"
+  DAILY_MINUTES_MAX: "1500"
+  REPO_DAILY_MINUTES_MAX: "800"
+  PROJECTED_NET_MAX: "100"
+  # Linux 2-core list price per minute, used only for the projection.
+  PRICE_PER_MINUTE: "0.006"
+  ALERT_LABEL: "actions-budget"
+  TOP_N: "5"
+
+jobs:
+  check:
+    if: github.repository == 'Automation-Architecture/.github' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Read billing usage (org PAT, one GET)
+        id: fetch
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          USAGE_FILE: ${{ runner.temp }}/actions-budget-usage.json
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          REPORT_DATE_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.report_date || '' }}
+        run: |
+          set -euo pipefail
+          OUT="${GITHUB_OUTPUT:-/dev/null}"
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::AAA_ORG_TOKEN is not available; cannot read org billing usage."; exit 1; }
+          [[ "$ORG" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::bad org"; exit 1; }
+          case "${DRY_RUN:-false}" in true|false) ;; *) echo "::error::bad dry_run"; exit 1 ;; esac
+
+          # Dates by jq: GNU and BSD date differ; jq does not.
+          today="${TODAY:-$(date -u +%F)}"
+          valid_date() { [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+            && [ "$(jq -rn --arg d "$1" '($d + "T00:00:00Z") | fromdateiso8601 | todate | .[0:10]' 2>/dev/null)" = "$1" ]; }
+          valid_date "$today" || { echo "::error::bad today '$today'"; exit 1; }
+          if [ -n "${REPORT_DATE_INPUT:-}" ]; then
+            valid_date "$REPORT_DATE_INPUT" || { echo "::error::report_date must be YYYY-MM-DD"; exit 1; }
+            [ "$DRY_RUN" = true ] || { echo "::error::report_date replays a past day and needs dry_run: true"; exit 1; }
+            [[ "$REPORT_DATE_INPUT" < "$today" ]] || { echo "::error::report_date must be before today ($today UTC)"; exit 1; }
+            day="$REPORT_DATE_INPUT"
+          else
+            day=$(jq -rn --arg t "$today" '($t + "T00:00:00Z") | fromdateiso8601 - 86400 | todate | .[0:10]')
+          fi
+          year=${day:0:4}; month=$((10#${day:5:2}))
+
+          # The endpoint returns the whole month in one response (no Link
+          # header; 267 rows for 2026-10-01..04). The old
+          # /settings/billing/actions endpoint returns 410.
+          if ! gh api -H "X-GitHub-Api-Version: 2022-11-28" \
+                "/organizations/$ORG/settings/billing/usage?year=$year&month=$month" > "$USAGE_FILE"; then
+            echo "::error::reading org billing usage for $year-$month failed (AAA_ORG_TOKEN must be a classic PAT of an org owner or billing manager)."
+            exit 1
+          fi
+          {
+            echo "report_date=$day"
+            echo "dry_run=$DRY_RUN"
+          } >> "$OUT"
+
+      - name: Compute the numbers (GITHUB_TOKEN, public data only)
+        id: compute
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORG: ${{ github.repository_owner }}
+          USAGE_FILE: ${{ runner.temp }}/actions-budget-usage.json
+          REPORT_FILE: ${{ runner.temp }}/actions-budget-report.json
+          REPORT_DATE: ${{ steps.fetch.outputs.report_date }}
+        run: |
+          set -euo pipefail
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          [[ "${REPORT_DATE:-}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || { echo "::error::bad report date"; exit 1; }
+          for v in INCLUDED_MINUTES DAILY_MINUTES_MAX REPO_DAILY_MINUTES_MAX TOP_N; do
+            [[ "${!v:-}" =~ ^[0-9]+$ ]] || { echo "::error::$v must be a whole number"; exit 1; }
+          done
+          for v in PROJECTED_NET_MAX PRICE_PER_MINUTE; do
+            [[ "${!v:-}" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "::error::$v must be a number"; exit 1; }
+          done
+
+          # Public repositories (free minutes). This repository is public, so
+          # a list without it is wrong: fail closed.
+          public=$(gh api --paginate "orgs/$ORG/repos?type=public&per_page=100" --jq '.[].name') \
+            || { echo "::error::listing the org's public repositories failed"; exit 1; }
+          public_json=$(jq -Rn '[inputs | select(length > 0)]' <<<"$public")
+          jq -e 'any(.[]; . == ".github")' <<<"$public_json" >/dev/null \
+            || { echo "::error::the public repository list does not include .github; not trusting it"; exit 1; }
+
+          if ! jq -e --arg day "$REPORT_DATE" --argjson pub "$public_json" \
+                --argjson included "$INCLUDED_MINUTES" --argjson daily_max "$DAILY_MINUTES_MAX" \
+                --argjson repo_max "$REPO_DAILY_MINUTES_MAX" --argjson net_max "$PROJECTED_NET_MAX" \
+                --argjson price "$PRICE_PER_MINUTE" --argjson top_n "$TOP_N" '
+              def bad(m): error("malformed billing usage: " + m);
+              def num: type == "number";
+              def r2: (. * 100 | round) / 100;
+              def commas: (round | tostring) as $s
+                | if ($s | length) <= 3 then $s else ($s[:-3] | tonumber | commas) + "," + $s[-3:] end;
+              def usd: (. * 100 | round) as $c
+                | "$" + (($c / 100 | floor) | commas) + "." + ((($c % 100) | tostring) | if length < 2 then "0" + . else . end);
+              def mins: commas + " min";
+              def by_repo: group_by(.repo) | map({repo: .[0].repo, public: .[0].public,
+                  minutes: (map(.minutes) | add), net: (map(.net) | add)})
+                | sort_by(-.minutes, .repo);
+              def vis: if .public then "public" else "billable" end;
+              def table($rows): "| Repo | Visibility | Minutes | Net |\n|---|---|---:|---:|\n"
+                + ($rows | map("| \(.repo) | \(vis) | \(.minutes | commas) | \(.net | usd) |") | join("\n"));
+
+              ($day[0:7]) as $month
+              | if type != "object" or (.usageItems | type) != "array" then bad("no usageItems array") else . end
+              | [.usageItems[] | if type != "object" then bad("a row is not an object") else . end
+                  | select(.sku == "Actions Linux")] as $raw
+              | ($raw | map(
+                  if (.quantity | num | not) or .quantity < 0 then bad("quantity")
+                  elif ([.grossAmount, .discountAmount, .netAmount] | all(num) | not) then bad("amounts")
+                  elif .unitType != "Minutes" then bad("unitType \(.unitType | tojson)")
+                  elif (.date | type) != "string" or (.date | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T") | not) then bad("date")
+                  elif .date[0:7] != $month then bad("a row dated \(.date) in the \($month) report")
+                  elif (.repositoryName != null and (.repositoryName | type) != "string") then bad("repositoryName")
+                  else {date: .date[0:10], repo: ((.repositoryName // "") | if . == "" then "(no repository)" else . end),
+                        minutes: .quantity, gross: .grossAmount, discount: .discountAmount, net: .netAmount}
+                  end
+                  | .public = (.repo as $r | any($pub[]; . == $r)))) as $rows
+              | ($rows | map(select(.date == $day))) as $d
+              | if ($d | length) == 0 then bad("no Actions Linux rows dated \($day); the data is missing or late") else . end
+              | ($rows | map(select(.date <= $day))) as $m
+              | ($day | .[8:10] | tonumber) as $elapsed
+              # Days in the month: the last day before the 1st of next month.
+              | (($month + "-01T00:00:00Z" | fromdateiso8601) + 32 * 86400 | todate | .[0:7] + "-01T00:00:00Z"
+                  | fromdateiso8601 - 86400 | todate | .[8:10] | tonumber) as $dim
+              | ($d | by_repo) as $drepos
+              | ($m | by_repo) as $mrepos
+              | {
+                  date: $day, month: $month, day_of_month: $elapsed, days_in_month: $dim,
+                  day_totals: {minutes: ($d | map(.minutes) | add | round), net: ($d | map(.net) | add | r2)},
+                  day_top: $drepos[:$top_n],
+                  mtd: {
+                    minutes: ($m | map(.minutes) | add | round),
+                    billable_minutes: ($m | map(select(.public | not) | .minutes) | add // 0 | round),
+                    public_minutes: ($m | map(select(.public) | .minutes) | add // 0 | round),
+                    gross: ($m | map(.gross) | add | r2),
+                    discount: ($m | map(.discount) | add | r2),
+                    net: ($m | map(.net) | add | r2)
+                  },
+                  mtd_top: $mrepos[:$top_n],
+                  repos_over: ($drepos | map(select(.minutes > $repo_max)))
+                }
+              | .projection = {
+                  minutes: (.mtd.minutes / $elapsed * $dim | round),
+                  billable_minutes: (.mtd.billable_minutes / $elapsed * $dim | round)
+                }
+              | .projection.net = ([.mtd.net, (.projection.billable_minutes - $included) * $price, 0] | max | r2)
+              | .alerts = [
+                  (select(.day_totals.minutes > $daily_max)
+                    | {key: "daily", text: "\(.date) used \(.day_totals.minutes | mins), over the daily limit of \($daily_max | mins)."}),
+                  (select(.mtd.billable_minutes >= $included)
+                    | {key: "included", text: "Month to date \(.month) has used \(.mtd.billable_minutes | commas) billable minutes: the \($included | mins) included are used up. Every further private-repo minute this month is billed."}),
+                  (select(.projection.net > $net_max)
+                    | {key: "projected", text: "Projected month-end net is \(.projection.net | usd), over the limit of \($net_max | usd)."}),
+                  (select(.repos_over | length > 0)
+                    | {key: "repo", text: ("Over \($repo_max | mins) in one day on \(.date): " + (.repos_over | map("\(.repo) (\(.minutes | mins))") | join(", ")) + ".")})
+                ]
+              | .markdown = (
+                  "### Actions usage, report date \(.date) (UTC)\n\n"
+                  + "| | Minutes | Net |\n|---|---:|---:|\n"
+                  + "| \(.date) | \(.day_totals.minutes | commas) | \(.day_totals.net | usd) |\n"
+                  + "| Month to date (\(.month)-01 to \(.date)) | \(.mtd.minutes | commas) | \(.mtd.net | usd) |\n"
+                  + "| Naive month-end projection (\(.day_of_month) of \(.days_in_month) days) | \(.projection.minutes | commas) | \(.projection.net | usd) |\n\n"
+                  + "Month to date: billable (private) \(.mtd.billable_minutes | mins) of \($included | mins) included; public (free) \(.mtd.public_minutes | mins). "
+                  + "Gross \(.mtd.gross | usd), discount \(.mtd.discount | usd), net \(.mtd.net | usd).\n\n"
+                  + "**Top \($top_n) repos on \(.date)**\n\n" + table(.day_top) + "\n\n"
+                  + "**Top \($top_n) repos month to date**\n\n" + table(.mtd_top) + "\n\n"
+                  + "Thresholds: day > \($daily_max | mins), one repo in a day > \($repo_max | mins), "
+                  + "billable month to date >= \($included | mins) (once a month), projected net > \($net_max | usd). "
+                  + "Counts the `Actions Linux` SKU only; billable means not public today.\n")
+            ' "$USAGE_FILE" > "$REPORT_FILE"; then
+            echo "::error::computing the report failed (the billing payload is malformed or the report date has no data); see the jq error above."
+            exit 1
+          fi
+
+          jq -r '"actions-budget-alert: \(.date) \(.day_totals.minutes) min $\(.day_totals.net); month to date \(.mtd.minutes) min (billable \(.mtd.billable_minutes), public \(.mtd.public_minutes)) net $\(.mtd.net); projected \(.projection.minutes) min net $\(.projection.net); alerts: \(if (.alerts | length) == 0 then "none" else (.alerts | map(.key) | join(",")) end)"' "$REPORT_FILE"
+          jq -r '.markdown' "$REPORT_FILE" >> "$SUMMARY"
+
+      - name: Open or update the month's alert issue (GITHUB_TOKEN)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPORT_FILE: ${{ runner.temp }}/actions-budget-report.json
+          BODY_FILE: ${{ runner.temp }}/actions-budget-body.md
+          DRY_RUN: ${{ steps.fetch.outputs.dry_run }}
+          BOT_LOGIN: "github-actions[bot]"
+        run: |
+          set -euo pipefail
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          say() { echo "actions-budget-alert: $*"; echo "$*" >> "$SUMMARY"; }
+          [[ "$REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error::bad repo"; exit 1; }
+          [[ "$ALERT_LABEL" =~ ^[a-z0-9-]+$ ]] || { echo "::error::bad label"; exit 1; }
+          day=$(jq -r '.date' "$REPORT_FILE"); month=$(jq -r '.month' "$REPORT_FILE")
+          [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ && "$month" == "${day:0:7}" ]] || { echo "::error::bad report"; exit 1; }
+          title="Actions budget alert $month"
+          DAY_MARK="<!-- actions-budget-alert:day=$day -->"
+          INCLUDED_MARK="<!-- actions-budget-alert:included=$month -->"
+
+          keys=$(jq -r '.alerts | map(.key) | join(",")' "$REPORT_FILE")
+          if [ -z "$keys" ]; then say "No alert for $day: summary only."; exit 0; fi
+          if [ "${DRY_RUN:-false}" = true ]; then say "Dry run: would alert ($keys) on \"$title\"; nothing written."; exit 0; fi
+
+          # The label, created if missing (a 404 only; any other error is red).
+          if ! gh api "repos/$REPO/labels/$ALERT_LABEL" > /dev/null 2> "$RUNNER_TEMP/label.err"; then
+            grep -q 'HTTP 404' "$RUNNER_TEMP/label.err" || { cat "$RUNNER_TEMP/label.err" >&2; echo "::error::reading label $ALERT_LABEL failed"; exit 1; }
+            gh api -X POST "repos/$REPO/labels" -f name="$ALERT_LABEL" -f color=d93f0b \
+              -f description="Daily GitHub Actions budget alert (actions-budget-alert.yml)" > /dev/null \
+              || { echo "::error::creating label $ALERT_LABEL failed"; exit 1; }
+          fi
+
+          # This month's issue: ours (bot-authored, labelled, exact title),
+          # open first, else the newest closed one.
+          issues=$(gh api --paginate "repos/$REPO/issues?labels=$ALERT_LABEL&state=all&per_page=100") \
+            || { echo "::error::listing the alert issues failed"; exit 1; }
+          issue=$(jq -cs --arg t "$title" --arg bot "$BOT_LOGIN" '
+              [add // [] | .[] | select((.pull_request | not) and .title == $t and .user.login == $bot)]
+              | (map(select(.state == "open")) | sort_by(.number) | first) // (sort_by(.number) | last) // empty
+              | {number, state, body: (.body // "")}' <<<"$issues") \
+            || { echo "::error::the alert issue list is malformed"; exit 1; }
+
+          texts="[]"
+          if [ -n "$issue" ]; then
+            n=$(jq -r '.number' <<<"$issue")
+            [[ "$n" =~ ^[0-9]+$ ]] || { echo "::error::bad issue number"; exit 1; }
+            comments=$(gh api --paginate "repos/$REPO/issues/$n/comments?per_page=100") \
+              || { echo "::error::reading the comments of #$n failed"; exit 1; }
+            texts=$(jq -cs --arg bot "$BOT_LOGIN" --argjson issue "$issue" '
+                [$issue.body] + [add // [] | .[] | select(.user.login == $bot) | (.body // "")]' <<<"$comments") \
+              || { echo "::error::the comments of #$n are malformed"; exit 1; }
+          fi
+          has() { jq -e --arg m "$1" 'any(.[]; contains($m))' <<<"$texts" > /dev/null; }
+
+          if has "$DAY_MARK"; then
+            say "Already alerted for $day on #$n; at most one post per day."
+            exit 0
+          fi
+          alerts=$(jq -c '.alerts' "$REPORT_FILE")
+          if has "$INCLUDED_MARK"; then
+            alerts=$(jq -c 'map(select(.key != "included"))' <<<"$alerts")
+          fi
+          if [ "$(jq 'length' <<<"$alerts")" -eq 0 ]; then
+            say "The only alert for $day (included minutes used up) was already posted this month on #$n."
+            exit 0
+          fi
+
+          {
+            echo "$DAY_MARK"
+            if jq -e 'any(.[]; .key == "included")' <<<"$alerts" > /dev/null; then echo "$INCLUDED_MARK"; fi
+            echo "**Actions budget alert for $day**"
+            echo
+            jq -r '.[] | "- " + .text' <<<"$alerts"
+            echo
+            jq -r '.markdown' "$REPORT_FILE"
+            echo
+            echo "Run: ${GITHUB_SERVER_URL:-https://github.com}/$REPO/actions/runs/${GITHUB_RUN_ID:-0}"
+          } > "$BODY_FILE"
+          posted_keys=$(jq -r 'map(.key) | join(",")' <<<"$alerts")
+
+          if [ -z "$issue" ]; then
+            out=$(gh api -X POST "repos/$REPO/issues" -f title="$title" -F body=@"$BODY_FILE" -f "labels[]=$ALERT_LABEL") \
+              || { echo "::error::opening the alert issue failed"; exit 1; }
+            created=$(jq -r '.number // empty' <<<"$out")
+            [[ "$created" =~ ^[0-9]+$ ]] || { echo "::error::opening the alert issue returned no issue number"; exit 1; }
+            say "Alert ($posted_keys): opened #$created \"$title\"."
+          else
+            if [ "$(jq -r '.state' <<<"$issue")" != open ]; then
+              gh api -X PATCH "repos/$REPO/issues/$n" -f state=open > /dev/null \
+                || { echo "::error::reopening #$n failed"; exit 1; }
+            fi
+            out=$(gh api -X POST "repos/$REPO/issues/$n/comments" -F body=@"$BODY_FILE") \
+              || { echo "::error::commenting on #$n failed"; exit 1; }
+            cid=$(jq -r '.id // empty' <<<"$out")
+            [[ "$cid" =~ ^[0-9]+$ ]] || { echo "::error::commenting on #$n returned no comment id"; exit 1; }
+            say "Alert ($posted_keys): commented on #$n \"$title\"."
+          fi
