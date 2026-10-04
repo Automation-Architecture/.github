@@ -288,6 +288,11 @@ case("ready, a person's request after the ready event: skips", "skip",
      base(comments=[comment("web3sea", "@codex review", at="2026-10-01T10:31:00Z")]), env=READY_ENV)
 case("ready, nothing at all: nudges", "nudge", base(), env=READY_ENV)
 
+# --- Dependabot-triggered runs get no secrets: stop at once, no API call ---------------
+case("Dependabot-triggered run: skips before any read or wait", "skip",
+     {k: "__error" for k in base()}, env={"ACTOR": "dependabot[bot]", "DELAY_SECONDS": "600"})
+case("a person's event on a Dependabot PR runs normally: nudges", "nudge", base(), env={"ACTOR": "web3sea"})
+
 # --- errors (red run, never a nudge) -------------------------------------------------
 case("PR unreadable: red", "error", with_(base(), **{f"/pulls/{PR}": "__error"}))
 case("comments unreadable: red", "error", with_(base(), **{f"/issues/{PR}/comments": "__error"}))
@@ -334,6 +339,7 @@ def check_shape(wf):
         assert needle in group, f"concurrency group must include {needle}"
     assert "edited" not in group and "ready_for_review" not in group, \
         "skipped edits, retargets and ready events get their own group (GitHub replaces a pending run)"
+    assert steps[0]["env"]["ACTOR"] == "${{ github.actor }}", "the Dependabot early exit keys on the run's actor"
     assert 150 <= int(steps[0]["env"]["DELAY_SECONDS"]) <= 240, "about 3 minutes for Codex's own review"
     env = steps[0]["env"]
     for action in ("synchronize", "edited", "ready_for_review", "labeled"):
@@ -376,7 +382,7 @@ def main():
             outf.write_text("")
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
                    **static_env, "REPO": REPO, "PR_NUMBER": str(PR), "EVENT_HEAD": HEAD, "EVENT_AT": "",
-                   "AFTER_EVENT": "false", "GH_TOKEN": "read-token", "DELAY_SECONDS": "0",
+                   "AFTER_EVENT": "false", "ACTOR": "web3sea", "GH_TOKEN": "read-token", "DELAY_SECONDS": "0",
                    "GITHUB_OUTPUT": str(outf), "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state),
                    **env_over}
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True,
