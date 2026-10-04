@@ -662,6 +662,19 @@ case("bound gate, not required: only a failure for an older candidate: pending, 
      says="only seen for an older candidate of this PR")
 case("bound gate, not required: an older candidate's failure, then a pass for this candidate: merges", "merged",
      base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE), bound(GATE[0], "success", 2)]))
+# Codex P1 on .github#86: identity is (app, name). A same-named check from another app
+# (here an Actions job called agency-delivery/gate) must not stand in for the stale gate.
+case("bound gate, not required: stale gate next to a same-named Actions check that passed: not merged", "held",
+     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE), run_(GATE[0], slug="github-actions", rid=2)]),
+     says="only seen for an older candidate of this PR")
+case("bound gate, required for any app: stale gate next to a same-named Actions pass: not merged", "held",
+     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE), run_(GATE[0], slug="github-actions", rid=2)],
+          required=[(GATE[0], None)]),
+     says="only seen for an older candidate of this PR")
+case("bound gate, required from the gate app: a same-named Actions pass does not satisfy it: not merged", "held",
+     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE), run_(GATE[0], slug="github-actions", rid=2)],
+          required=[GATE]),
+     says="older candidate")
 case("bound gate: another head in the key: not merged", "held",
      base(runs=[bound(GATE[0], "success", 1, head=NEW_HEAD)], required=[GATE]), says="older candidate")
 case("bound gate: a key naming this PR that does not parse: not merged", "held",

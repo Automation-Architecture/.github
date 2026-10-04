@@ -641,10 +641,16 @@ jobs:
               # A check whose only runs for this PR are older candidates holds
               # the PR, required or not (see the header): its producer has not
               # yet published for this candidate.
-              | ([$runs[] | select(._b.bound == "stale") | .name] | unique
-                 | map(. as $n | select(([$all[] | select(.name == $n)] | length) == 0
-                                        and ([$req[] | select(.context == $n)] | length) == 0))
-                 | map("\(.) (bound to an older candidate of this PR; waiting for a run for this candidate)")) as $stalepend
+              # Identity is (app, name), as everywhere else in this file: a
+              # same-named check from another app neither stands in for the
+              # stale one nor makes it "required" (Codex P1 on .github#86).
+              | ([$runs[] | select(._b.bound == "stale") | {slug: (.app.slug // ""), id: .app.id, name}] | unique
+                 | map(. as $s
+                       | select(([$all[] | select(.name == $s.name and (.app.slug // "") == $s.slug)] | length) == 0
+                                and ([$req[] | select(.context == $s.name
+                                                      and ($s.id != null and .app != null and .app != -1 and .app == $s.id))]
+                                     | length) == 0))
+                 | map("\(.name) (bound to an older candidate of this PR; waiting for a run for this candidate)")) as $stalepend
               | if ($red | length) > 0 then "red:" + ($red | join(", "))
                 elif ($running | length) > 0 then "pending:still running or waiting: " + ($running | unique | join(", "))
                 elif ($missing | length) > 0 then "pending:required check(s) not passed yet: " + ($missing | unique | join(", "))
