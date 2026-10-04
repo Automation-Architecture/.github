@@ -29,7 +29,7 @@ BASE_SHAS = ["a" * 40, "c" * 40, "d" * 40]
 # A base tip that landed after the evaluation (base pin), and the squash commit.
 MOVED = "f" * 40
 MERGE_SHA = "e" * 40
-# The PR's `.base.sha` as the pulls API reports it (not the tip; see base()).
+# The PR's `.base.sha` as the pulls API reports it (not the tip; doc-auto-merge ignores it).
 PR_BASE = "b" * 40
 
 # Stub gh. A fixture value {"__seq": [a, b, ...]} is served one entry per call
@@ -145,9 +145,6 @@ def base(files=("README.md",), runs=(), statuses=(), required=(), classic=None, 
         "/git/ref/heads/main": tip(BASE_SHAS[0]),
         # The squash commit lands on the pinned tip.
         f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[0]}]},
-        # The PR's `.base.sha` ("b" * 40) lags the tip, as GitHub leaves it: it is
-        # the merge base of the head and the tip (aaa-client-dashboard#247).
-        f"/compare/{BASE_SHAS[0]}...{HEAD}": {"merge_base_commit": {"sha": PR_BASE}},
     }
 
 
@@ -597,10 +594,10 @@ case("two PRs at one head, each with its own gate verdict: only the passing one 
      with_(base(runs=[gate_run("failure", 1, OTHER), gate_run("success", 2, PR)], required=[GATE]), **second()),
      env=multi(PR, OTHER), merged={PR})
 
-# --- A check bound to THIS PR counts only for the candidate merged ------------
-# (Codex P1 on the wave-4 re-syncs: aaa-pr-bot#50, aaa-aios#217, qa-template#8 ...)
-# Its key's head must be HEAD and its base this PR's `.base.sha` (read in the same
-# snapshot) and either the pinned tip or the merge base of HEAD and the tip.
+# --- A check bound to THIS PR counts only for the current head ----------------
+# (Brad "Simplify", 2026-10-04, after Codex P1s on the wave-5 re-syncs: LKID#317,
+# aios-cdp#379, aaa-bin#65.) Its key's head must be HEAD; the key's base field is
+# ignored. A run of this PR for any other head is pending, required or not.
 OLD_BASE = "9" * 40
 
 
@@ -611,58 +608,52 @@ def bound(name, conclusion, rid, base_sha=PR_BASE, head=HEAD, tag="v2.8", pr_num
     return r
 
 
-case("bound: keyed on the merge base (`.base.sha` lags the tip, as GitHub leaves it): merges", "merged",
+case("bound: current head, base field is `.base.sha`: merges", "merged",
      base(runs=[bound(GATE[0], "success", 1)], required=[GATE]))
-case("bound: keyed on the tip, `.base.sha` is the tip: merges without a compare", "merged",
-     with_(base(runs=[bound(GATE[0], "success", 1, base_sha=BASE_SHAS[0])], required=[GATE],
-                base_sha=BASE_SHAS[0]), **{f"/compare/{BASE_SHAS[0]}...{HEAD}": "__error"}))
-case("bound: success for an older base of this PR: pending, not merged, not red", "held",
-     base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE]),
-     says="bound to an older candidate of this PR")
-case("bound: failure for an older base of this PR is not red; an unrequired one does not hold", "merged",
-     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE)]))
-case("bound: failure for an older base, required and newest (GitHub enforces it): pending, not red", "held",
-     base(runs=[bound(GATE[0], "success", 1), bound(GATE[0], "failure", 2, base_sha=OLD_BASE)], required=[GATE]),
-     says="older candidate of this PR (base 9999999")
-case("bound: `.base.sha` is neither the tip nor the merge base: the key it names is stale, not merged", "held",
-     base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE], base_sha=OLD_BASE),
-     says="older candidate")
-case("bound: keyed on the merge base, but `.base.sha` now names another commit: not merged", "held",
-     base(runs=[bound(GATE[0], "success", 1)], required=[GATE], base_sha=OLD_BASE), says="older candidate")
-case("bound: another head in the key: not merged", "held",
-     base(runs=[bound(GATE[0], "success", 1, head=NEW_HEAD)], required=[GATE]), says="older candidate")
-case("bound: a key naming this PR that does not parse: not merged", "held",
-     base(runs=[bound(GATE[0], "success", 1, key=f"{REPO}#{PR}:main:v2.8")], required=[GATE]),
-     says="older candidate")
-case("bound: merge base unreadable while `.base.sha` lags: the bound check is not trusted", "held",
-     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
-           **{f"/compare/{BASE_SHAS[0]}...{HEAD}": "__error"}), says="older candidate")
-case("unbound checks are unaffected by an unreadable merge base: merges", "merged",
-     with_(base(runs=GREEN_CI), **{f"/compare/{BASE_SHAS[0]}...{HEAD}": "__error"}))
-# The Codex scenario: the base advances and GitHub refreshes `.base.sha` before
-# the final snapshot; the gate has not yet published for the new candidate.
-case("bound: `.base.sha` moves to the new tip before the final snapshot, gate still on the old key: not merged",
-     "held",
-     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
-           **{f"/pulls/{PR}": {"__seq": [pr(), pr(base_sha=BASE_SHAS[1])]},
-              "/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[1])]},
-              "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
-              f"/compare/{BASE_SHAS[1]}...{HEAD}": {"merge_base_commit": {"sha": BASE_SHAS[1]}}}),
-     says="CI changed in the final snapshot")
-case("bound: the tip advances, `.base.sha` and the merge base stay: the gate candidate is unchanged, merges",
-     "merged",
-     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
-           **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[1])]},
-              "/commits": {"__seq": [[{"sha": BASE_SHAS[0]}], [{"sha": BASE_SHAS[1]}]]},
-              f"/compare/{BASE_SHAS[1]}...{HEAD}": {"merge_base_commit": {"sha": PR_BASE}},
-              f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": BASE_SHAS[1]}]}}))
-case("bound: the tip is rewritten so the key base is no longer the merge base: not merged", "held",
-     with_(base(runs=[bound(GATE[0], "success", 1)], required=[GATE]),
-           **{f"/compare/{BASE_SHAS[0]}...{HEAD}": {"merge_base_commit": {"sha": OLD_BASE}}}),
-     says="older candidate")
-case("review/verdict bound to an older base: same rule as the gate", "held",
-     base(runs=[bound(VERDICT[0], "success", 1, base_sha=OLD_BASE, tag="review-verdict", slug="github-actions",
-                      app_id=VERDICT[1])], required=[VERDICT]), says="older candidate")
+case("bound: current head, base field is neither tip, merge base nor `.base.sha`: still counts, merges", "merged",
+     base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE]))
+case("bound: current head, base field is the tip: merges", "merged",
+     base(runs=[bound(GATE[0], "success", 1, base_sha=BASE_SHAS[0])], required=[GATE]))
+case("bound: current head, base field not a SHA: still counts, merges", "merged",
+     base(runs=[bound(GATE[0], "success", 1, base_sha="main")], required=[GATE]))
+case("bound: current head, failure under any base field: red", "held",
+     base(runs=[bound(GATE[0], "failure", 1, base_sha=OLD_BASE)]), says="CI is not green")
+case("bound: required check for another head of this PR: pending, not merged", "held",
+     base(runs=[bound(GATE[0], "success", 1, head=NEW_HEAD)], required=[GATE]),
+     says="bound to head 1111111 of this PR, not the current head")
+case("bound: optional check for another head of this PR: pending, never dropped", "held",
+     base(runs=GREEN_CI + [bound(GATE[0], "success", 3, head=NEW_HEAD)]),
+     says="bound to head 1111111 of this PR, not the current head")
+case("bound: failure for another head of this PR, optional: pending, not red", "held",
+     base(runs=[bound(GATE[0], "failure", 1, head=NEW_HEAD)]), says="still running or waiting")
+case("bound: failure for another head of this PR, required: pending, not red", "held",
+     base(runs=[bound(GATE[0], "failure", 1, head=NEW_HEAD)], required=[GATE]), says="still running or waiting")
+case("bound: a newer run for another head hides an older pass for this head: pending", "held",
+     base(runs=[bound(GATE[0], "success", 1), bound(GATE[0], "success", 2, head=NEW_HEAD)]),
+     says="not the current head")
+case("bound: a newer run for this head supersedes an older one for another head: merges", "merged",
+     base(runs=[bound(GATE[0], "failure", 1, head=NEW_HEAD), bound(GATE[0], "success", 2)], required=[GATE]))
+case("bound: a key naming this PR that does not parse: pending, not merged", "held",
+     base(runs=[bound(GATE[0], "success", 1, key=f"{REPO}#{PR}:main:v2.8")]), says="not the current head")
+case("bound: stale optional check, then the producer reports on this head: merges", "merged",
+     with_(base(), **{f"/commits/{HEAD}/check-runs": {"__seq": [
+         {"check_runs": [bound(GATE[0], "success", 1, head=NEW_HEAD)]},
+         {"check_runs": [bound(GATE[0], "success", 1, head=NEW_HEAD), bound(GATE[0], "success", 2)]}]}}),
+     env={"WAIT_SECONDS": "5", "POLL_SECONDS": "0"})
+case("bound: another PR's check for another head is ignored: merges", "merged",
+     base(runs=GREEN_CI + [bound(GATE[0], "failure", 3, head=NEW_HEAD, pr_number=OTHER)]))
+case("review/verdict bound to another head: same rule as the gate", "held",
+     base(runs=[bound(VERDICT[0], "success", 1, head=NEW_HEAD, tag="review-verdict", slug="github-actions",
+                      app_id=VERDICT[1])], required=[VERDICT]), says="not the current head")
+# The base pin does not depend on the key's base (see "The base SHA is pinned" above).
+case("bound check on any base: the base moves before the merge call: red run, no merge", "error",
+     with_(base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE]),
+           **{"/git/ref/heads/main": {"__seq": [tip(BASE_SHAS[0]), tip(BASE_SHAS[0]), tip(MOVED)]}}),
+     says="moved from")
+case("bound check on any base: squash parent is not the pinned tip: red run", "error",
+     with_(base(runs=[bound(GATE[0], "success", 1, base_sha=OLD_BASE)], required=[GATE]),
+           **{f"/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": MOVED}]}}),
+     says="not the evaluated base")
 
 # --- Cancelled exceptions are taken AFTER the PR scoping ----------------------
 # (Codex P1 on aios-marketing-landing-page#36, iprefer-hygraph#16; P2 on aios-docs#9)
@@ -680,9 +671,9 @@ case("cancelled CI run of this PR under another PR's newer success: still red", 
                       bound("build", "success", 2, pr_number=OTHER, tag="x", slug="github-actions",
                             app_id=VERDICT[1])]),
            **actions_run(901, ".github/workflows/ci.yml")), says="CI is not green")
-case("a cancelled run of an older candidate of this PR is neither red nor an exception lookup", "merged",
-     base(runs=[bound("review/verdict", "cancelled", 1, base_sha=OLD_BASE, tag="review-verdict",
-                      slug="github-actions", app_id=VERDICT[1], run=902)]))
+case("a cancelled run for another head of this PR is pending, neither red nor an exception lookup", "held",
+     base(runs=[bound("review/verdict", "cancelled", 1, head=NEW_HEAD, tag="review-verdict",
+                      slug="github-actions", app_id=VERDICT[1], run=902)]), says="not the current head")
 
 # Every PR-check workflow name in the org (survey of all repos, 2026-10-01), plus
 # this repo's own test workflows and the canonical Codex auto-request (wave-2 P2s:

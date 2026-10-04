@@ -58,25 +58,21 @@ name: Doc auto-merge
 # while the commit's newest run of it (another PR's) has not, is PENDING, not
 # green: no merge call GitHub would refuse, and the PR waits for a fresh run
 # of its own (Codex on .github#76).
-# A check bound to THIS PR counts only for the candidate being merged: its
-# head must be HEAD, and its base must be this PR's `.base.sha` as read in
-# the same snapshot AND either the pinned base tip or the merge base of HEAD
-# and that tip. Any other run bound to this PR (an older base or head, or an
-# unparseable key) is an older candidate: never green, never red, the check
-# reads as missing (pending) until the producer publishes for the candidate
-# (Codex P1 on the wave-4 re-syncs, e.g. aaa-pr-bot#50). Why not the tip
-# alone: both producers key on the pulls API `.base.sha`, and GitHub does not
-# move that to the base tip when the base advances, nor on a head push. It
-# held the merge base in every stale case surveyed (2026-10-02:
-# aaa-client-dashboard#241, #246, #247, aaa-runbooks#158; #247 got a head
-# push 13 minutes after two base merges and kept the older `.base.sha`). A
-# tip-only rule could never pass such a PR. The merge base is what the
-# squash diff is computed from, and the gate keys the same candidate for it
-# until `.base.sha` changes; a retarget or a refreshed `.base.sha` makes the
-# old key stale here at once. Cancelled-job exceptions (above) are taken
-# from the runs left after this PR scoping, so another PR's newer run can
-# never hide this PR's superseded cancellation (Codex P1 on
-# aios-marketing-landing-page#36).
+# A check bound to THIS PR counts only if its key's head is HEAD. The base
+# field of the key is ignored: the pulls API `.base.sha` that both producers
+# key on can be the tip, the merge base or an older base frozen in between,
+# so no base rule here can tell a fresh key from a stale one (Codex P1s on
+# the wave-4 and wave-5 re-syncs, e.g. LKID#317, aios-cdp#379). Whether a
+# check reflects the current base is the delivery gate's call: it is the
+# required check, re-evaluates on every base push, and GitHub enforces it at
+# merge time. This file only pins the base it merges onto (see "The merge").
+# A run bound to this PR whose head is not HEAD (or whose key does not
+# parse) is PENDING, required or not, never dropped and never red, while it
+# is the newest run of its check here: its producer has not yet reported on
+# this head (Codex P1 on the wave-5 re-syncs, e.g. aaa-bin#65).
+# Cancelled-job exceptions (above) are taken from this PR's runs only, so
+# another PR's newer run can never hide this PR's superseded cancellation
+# (Codex P1 on aios-marketing-landing-page#36).
 # Not counted: this job's own check, and the reviewer checks in
 # IGNORED_CHECKS (Greptile is a reviewer, not CI, and no review is required).
 # In a ruleset repo, `review/verdict` is required, and review-verdict.yml
@@ -142,7 +138,10 @@ name: Doc auto-merge
 # re-evaluates on every base push) or a dispatch evaluates the new base. After
 # the merge, the squash commit's parent must be the pinned tip; if not, or
 # if it cannot be read, the run is red (the merge stands, but never
-# unverified and silent; Codex P2 on the wave-4 re-syncs). Squash only, never an
+# unverified and silent; Codex P2 on the wave-4 re-syncs). This pin needs no
+# `.base.sha`; it says only which base the merge lands on. Whether the checks
+# reflect that base is the delivery gate's call (the required check), not
+# this file's. Squash only, never an
 # admin bypass: GitHub still applies every ruleset and protection rule at
 # merge time. The result is re-read and a merge GitHub did not record is a
 # red run, never a silent one.
@@ -332,9 +331,6 @@ jobs:
           VERCEL_FOR=""
           # The base branch's tip SHA, read by read_base_tip.
           BASE_TIP=""
-          # This PR's `.base.sha` (pulls API) from the latest read: what the
-          # PR-bound producers key their checks on (see checks_state).
-          PR_BASE_SHA=""
           PR_CUR=""
 
           say() { echo "doc-auto-merge #${PR_NUMBER}: $*"; }
@@ -403,7 +399,6 @@ jobs:
             fi
             HEAD=$(echo "$pr" | jq -r '.head.sha // empty')
             BASE_REF=$(echo "$pr" | jq -r '.base.ref // empty')
-            PR_BASE_SHA=$(echo "$pr" | jq -r '.base.sha // empty')
             if ! [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || [ -z "$BASE_REF" ]; then
               echo "::error::#$PR_NUMBER has no readable head SHA or base ref."
               exit 1
@@ -484,51 +479,39 @@ jobs:
           # Prints green, pending:<why> or red:<why> for HEAD. Never exits the
           # script; an unreadable API is pending, never green.
           checks_state() {
-            local runs statuses rules branch base_enc cancelled self_ids id url run_id path mbase=""
+            local runs statuses rules branch base_enc cancelled self_ids id url run_id path
             # A branch name with "/" must be URL-encoded as one path segment
             # (GitHub REST docs, "Get a branch").
             base_enc=$(jq -rn --arg b "$BASE_REF" '$b | @uri')
             if ! runs=$(gh api --paginate "/repos/$REPO/commits/$HEAD/check-runs?per_page=100" --jq '.check_runs[]' | jq -s '.'); then
               echo "pending:could not read check-runs"; return 0
             fi
-            # The merge base of HEAD and the pinned tip: a PR-bound check keyed
-            # on it describes this candidate (see the header). Unreadable
-            # leaves it empty, which only makes such checks stale (pending).
-            if [[ "$BASE_TIP" =~ ^[0-9a-f]{40}$ ]]; then
-              if [ "$PR_BASE_SHA" = "$BASE_TIP" ]; then
-                mbase="$BASE_TIP"
-              else
-                mbase=$(gh api "/repos/$REPO/compare/$BASE_TIP...$HEAD?per_page=1" --jq '.merge_base_commit.sha // empty' 2>/dev/null || true)
-                [[ "$mbase" =~ ^[0-9a-f]{40}$ ]] || mbase=""
-              fi
-            fi
             # Each run gets `_b`, its binding (see the header): none (not bound
             # to a PR of this repository), other (another PR), current (this
-            # PR, this candidate) or stale (this PR, any other candidate).
-            if ! runs=$(echo "$runs" | jq -c --arg repo "$REPO" --arg pr "$PR_NUMBER" --arg head "$HEAD" \
-                --arg pbase "$PR_BASE_SHA" --arg tip "$BASE_TIP" --arg mbase "$mbase" '
+            # PR, keyed on HEAD; the key's base is ignored) or stale (this PR,
+            # another head or an unparseable key).
+            if ! runs=$(echo "$runs" | jq -c --arg repo "$REPO" --arg pr "$PR_NUMBER" --arg head "$HEAD" '
                 def binding:
                   ([(.external_id // "") | strings
                     | capture("^(?<repo>[^#:/\\s]+/[^#:/\\s]+)#(?<n>[0-9]+):(?<rest>.*)$")] | .[0]) as $m
                   | if $m == null or ($m.repo | ascii_downcase) != ($repo | ascii_downcase) then {bound: "none"}
                     elif $m.n != $pr then {bound: "other", n: $m.n}
-                    else ([$m.rest | capture("^(?<base>[0-9a-f]{40}):(?<head>[0-9a-f]{40}):")] | .[0]) as $k
-                      | if $k != null and $k.head == $head and $k.base == $pbase
-                           and ($k.base == $tip or ($mbase != "" and $k.base == $mbase))
-                        then {bound: "current", n: $m.n}
-                        else {bound: "stale", n: $m.n, base: ($k.base // "?"), head: ($k.head // "?")} end
+                    else ([$m.rest | capture("^[^:]*:(?<head>[0-9a-f]{40}):")] | .[0].head // "?") as $h
+                      | if $h == $head then {bound: "current", n: $m.n}
+                        else {bound: "stale", n: $m.n, head: $h} end
                     end;
                 map(. + {_b: binding})'); then
               echo "pending:could not classify the check-runs"; return 0
             fi
-            # Newest cancelled Actions jobs among the runs that count for this
-            # candidate (scoped FIRST, exactly like $all below): which of them
+            # Newest cancelled Actions jobs among this PR's runs (other PRs'
+            # runs removed FIRST, exactly like $mine below): which of them
             # belong to review-verdict.yml or this file (superseded, not a CI
             # result)?
             self_ids="[]"
             cancelled=$(echo "$runs" | jq -r --arg job "$JOB_NAME" '
-              map(select(._b.bound == "none" or ._b.bound == "current"))
+              map(select(._b.bound != "other"))
               | group_by([(.app.slug // ""), .name]) | map(max_by(.id))[]
+              | select(._b.bound != "stale")
               | select((.app.slug // "") == "github-actions" and .conclusion == "cancelled" and .name != $job)
               | "\(.id) \(.details_url // "")"')
             while read -r id url; do
@@ -560,26 +543,31 @@ jobs:
             jq -rn --argjson runs "$runs" --argjson st "$statuses" --argjson rules "$rules" \
                 --argjson branch "$branch" --arg job "$JOB_NAME" --arg ign "$IGNORED_CHECKS" \
                 --argjson selfids "$self_ids" --argjson vercel "$VERCEL_REQUIRED" \
-                --arg pr "$PR_NUMBER" --arg tip "$BASE_TIP" --arg mbase "$mbase" '
+                --arg pr "$PR_NUMBER" '
               def ok: IN("success", "neutral", "skipped");
               def newest: group_by([(.app.slug // ""), .name]) | map(max_by(.id));
               def counts: ._b.bound == "none" or ._b.bound == "current";
               def owner: if ._b.bound == "other" then "PR #\(._b.n)"
-                         else "an older candidate of this PR (base \(._b.base[0:7]), head \(._b.head[0:7]))" end;
+                         else "head \(._b.head[0:7]) of this PR" end;
               ($ign | split(",") | map(sub("^\\s+"; "") | sub("\\s+$"; "")) | map(select(length > 0))) as $ignored
-              # Only runs not bound to another PR or to an older candidate.
-              | ($runs | map(select(counts)) | newest) as $all
+              # The newest run of each check among those not bound to another PR.
+              | ($runs | map(select(._b.bound != "other")) | newest) as $mine
+              | ($mine | map(select(counts))) as $all
               # What GitHub itself enforces: the newest run per (app, name) on
-              # the commit, whichever PR or candidate it belongs to (external_id
-              # is opaque to rulesets; Codex on .github#76).
+              # the commit, whichever PR it belongs to (external_id is opaque
+              # to rulesets; Codex on .github#76).
               | ($runs | newest) as $enforced
               # Newest status per context, like check-runs: a retried context
               # must not stay red or pending on its older entry.
               | ($st | group_by(.context) | map(max_by([(.updated_at // ""), (.id // 0)]))) as $st
-              | ($all | map(select(
+              | ($mine | map(select(
                     ((.app.slug // "") == "github-actions" and .name == $job | not)
                     and (.id as $i | $selfids | index($i) | not)
-                    and (((.app.slug // "") + "/" + .name) as $k | $ignored | index($k) | not)))) as $ci
+                    and (((.app.slug // "") + "/" + .name) as $k | $ignored | index($k) | not)))) as $judged
+              | ($judged | map(select(counts))) as $ci
+              # A run of this PR for another head: pending, required or not.
+              | ([$judged[] | select(._b.bound == "stale")
+                  | "\(.name) (bound to \(owner), not the current head)"]) as $stale
               | ([$rules[]? | select(.type == "required_status_checks")
                   | .parameters.required_status_checks[]? | {context, app: .integration_id}]
                  + [($branch.protection.required_status_checks.checks // [])[] | {context, app: .app_id}]
@@ -593,20 +581,15 @@ jobs:
                                         and .status == "completed" and (.conclusion | ok))] | length) == 0
                       and ([$st[] | select(.context == $r.context and .state == "success"
                                            and ($r.app == null or $r.app == -1))] | length) == 0)
-                  | $r.context
-                    + (if any($runs[]; .name == $r.context and ._b.bound == "stale")
-                       then " (bound to an older candidate of this PR; waiting for a run for base \($tip[0:7])"
-                            + (if $mbase != "" and $mbase != $tip then " or merge base \($mbase[0:7])" else "" end)
-                            + ")"
-                       else "" end)]
+                  | $r.context]
                  # Vercel, where the base branch shows the repo deploys with it:
                  # present on the head and successful, never assumed.
                  + [$vercel[] | . as $c
                     | select([$st[] | select(.context == $c and .state == "success")] | length == 0)
                     | "\($c) (Vercel status not reported as success on this commit)"]) as $missing
-              # A required check that passed for THIS candidate but whose newest
-              # run on the commit belongs to another PR or an older candidate
-              # and has not passed: GitHub would refuse the merge, so wait
+              # A required check that passed for THIS PR but whose newest run
+              # on the commit belongs to another PR (or another head of this
+              # PR) and has not passed: GitHub would refuse the merge, so wait
               # (never a red run, never a merge).
               | ([$req[] | . as $r
                   | $enforced[] | select(.name == $r.context
@@ -619,11 +602,11 @@ jobs:
                   | "\(.name) (\(.conclusion))"]
                 + [$st[] | select(.state == "failure" or .state == "error") | "\(.context) (\(.state))"]) as $red
               | ([$ci[] | select(.status != "completed" or .conclusion == "action_required") | .name]
-                + [$st[] | select(.state == "pending") | .context]) as $running
+                + [$st[] | select(.state == "pending") | .context] + $stale) as $running
               | if ($red | length) > 0 then "red:" + ($red | join(", "))
                 elif ($running | length) > 0 then "pending:still running or waiting: " + ($running | unique | join(", "))
                 elif ($missing | length) > 0 then "pending:required check(s) not passed yet: " + ($missing | unique | join(", "))
-                elif ($shadowed | length) > 0 then "pending:GitHub enforces the newest run of a required check on this commit, and it belongs to another PR or an older candidate: " + ($shadowed | unique | join(", ")) + "; a fresh run for this PR (e.g. gh workflow run review-verdict.yml -f pr_number=" + $pr + " -f head_sha=<head>) clears it"
+                elif ($shadowed | length) > 0 then "pending:GitHub enforces the newest run of a required check on this commit, and it belongs to another PR or another head of this PR: " + ($shadowed | unique | join(", ")) + "; a fresh run for this PR (e.g. gh workflow run review-verdict.yml -f pr_number=" + $pr + " -f head_sha=<head>) clears it"
                 else "green" end' || echo "pending:could not evaluate the checks"
           }
 
