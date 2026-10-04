@@ -115,15 +115,12 @@ name: Doc auto-merge sweep
 # counts as P1); or a Codex review on the head whose inline findings were
 # deleted, or that is not dismissed and flags P0/P1 in its body. Outdated or
 # resolved threads and other authors never block. Open P2/P3 Codex threads
-# (same definition, P2/P3 badge) get the merge policy's ONE fix round: while
-# no fix round has happened the PR is held (`codex-blocked`, a ::warning::,
-# "held for the P2/P3 fix round"; Codex P1 on #84). The round has happened
-# once Codex left an inline finding (top-level, not a notice) whose
-# original_commit_id is an EARLIER commit of this PR, i.e. someone pushed
-# after Codex raised findings. After that, P2/P3 still open merge, and are
-# named in the merge log line for a follow-up. A person can also release the
-# hold by resolving the threads. Residual, accepted: any push after findings
-# counts as the round, whether or not it addressed them. Any read
+# (same definition, P2/P3 badge) are never merged over either (Codex P1s on
+# #84): the merge policy gives them one fix round and a follow-up issue for
+# what is left, and an unattended sweep can do neither. The PR is held
+# (`codex-blocked`, a ::warning::, "held for the P2/P3 fix round") until a
+# push makes the threads outdated, or a person resolves them (having fixed
+# them or filed the follow-up). Any read
 # that fails is a wait, never a merge. The sweep never asks Codex for a
 # review (`@codex review`): codex-review-sweep.yml owns nudges, and it and
 # codex-auto-request.yml skip Markdown-only PRs, so Codex looks at a
@@ -520,13 +517,6 @@ jobs:
                    + [$real[] | select(.state != "DISMISSED" and ((.body // "") | test("!\\[P[01] Badge\\]")))
                       | "Codex review \(.id) on this head flags P0/P1 in its body"]
                    + $threads) as $block
-                # One fix round (merge policy: P2/P3 get one round, then merge
-                # with a follow-up). It has happened once Codex left an inline
-                # finding (a top-level comment, not a reply or a notice) on an
-                # EARLIER commit of this PR: the head has moved past a reviewed
-                # commit with findings. Until then open P2/P3 threads hold.
-                | ([$ci[] | select(.in_reply_to_id == null and (.original_commit_id // .commit_id // "") != $head
-                      and (((.body // "") | test($skip; "i")) | not))] | length > 0) as $fixround
                 # The summary comment: Codex App, opens with its marker; rows
                 # naming this head (a 7-40 hex prefix of it).
                 | ([$comments[] | select(isbot and (.user.type // "") == "Bot"
@@ -555,8 +545,8 @@ jobs:
                     elif $mins >= $wait then "timeout:\($why); \($mins) min since the head was pushed (at the latest) >= \($wait) min"
                     else "wait:\($why); \($mins) of \($wait) min since the head was pushed (at the latest), so waiting for Codex" end;
                   if ($block | length) > 0 then "blocked:\($block | length) open: " + ($block | unique | join("; "))
-                  elif ($minor | length) > 0 and ($fixround | not) then
-                    "held:\($minor | length) open P2/P3 Codex finding(s) on \($head[0:7]) and no fix round yet: " + ($minor | unique | join("; "))
+                  elif ($minor | length) > 0 then
+                    "held:\($minor | length) open P2/P3 Codex finding(s) on \($head[0:7]): " + ($minor | unique | join("; "))
                   elif $unreadable > 0 then "wait:a row of the Codex review summary cannot be read, so whether Codex finished cannot be told"
                   elif ($running | length) > 0
                        and ($lastnotice == null or any($running[]; .at == null or .at >= $lastnotice)) then
@@ -564,9 +554,7 @@ jobs:
                   elif ($running | length) == 0 and ((($hrows | length) > 0) or ($real | length) > 0) then
                     "clean:Codex finished on \($head[0:7]) (\(if ($hrows | length) > 0 then "summary row Completed" else "review object on the head" end)) with no open P0/P1 finding"
                   elif $lastnotice != null then timeout("Codex unavailable (its latest reply since the head is a usage-limit or set-up notice)")
-                  else timeout("Codex posted nothing for \($head[0:7])") end
-                  | if ($minor | length) > 0 and (startswith("clean:") or startswith("timeout:"))
-                    then . + "; after the fix round, P2/P3 left for a follow-up: " + ($minor | unique | join("; ")) else . end' \
+                  else timeout("Codex posted nothing for \($head[0:7])") end' \
                 || echo "wait:could not evaluate Codex activity"
             }
 
@@ -583,8 +571,8 @@ jobs:
                   echo "::warning::$REPO#$PR_NUMBER: open Codex P0/P1 finding(s) on the current head; never auto-merged, left for a person: ${CODEX_NOTE}"
                   finish blocked "documentation-only and CI green, but Codex has open P0/P1 finding(s) on ${HEAD:0:7}; left for a person: ${CODEX_NOTE}." ;;
                 held:*)
-                  echo "::warning::$REPO#$PR_NUMBER: open Codex P2/P3 finding(s) awaiting their one fix round (push a fix, or resolve the threads): ${CODEX_NOTE}"
-                  finish blocked "documentation-only and CI green, but held for the P2/P3 fix round (push a fix, or resolve the threads): ${CODEX_NOTE}." ;;
+                  echo "::warning::$REPO#$PR_NUMBER: open Codex P2/P3 finding(s) never auto-merged (fix them, or resolve the threads once a follow-up is filed): ${CODEX_NOTE}"
+                  finish blocked "documentation-only and CI green, but held for the P2/P3 fix round (fix them, or resolve the threads once a follow-up is filed): ${CODEX_NOTE}." ;;
                 *) finish wait "documentation-only (${FILE_COUNT} files), CI green at ${HEAD:0:7}; ${CODEX_NOTE}." ;;
               esac
             }
