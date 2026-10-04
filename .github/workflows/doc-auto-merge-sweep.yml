@@ -114,7 +114,16 @@ name: Doc auto-merge sweep
 # comment is Codex's with a P0/P1 badge or no readable P2/P3 badge (unbadged
 # counts as P1); or a Codex review on the head whose inline findings were
 # deleted, or that is not dismissed and flags P0/P1 in its body. Outdated or
-# resolved threads, P2/P3 findings and other authors never block. Any read
+# resolved threads and other authors never block. Open P2/P3 Codex threads
+# (same definition, P2/P3 badge) get the merge policy's ONE fix round: while
+# no fix round has happened the PR is held (`codex-blocked`, a ::warning::,
+# "held for the P2/P3 fix round"; Codex P1 on #84). The round has happened
+# once Codex left an inline finding (top-level, not a notice) whose
+# original_commit_id is an EARLIER commit of this PR, i.e. someone pushed
+# after Codex raised findings. After that, P2/P3 still open merge, and are
+# named in the merge log line for a follow-up. A person can also release the
+# hold by resolving the threads. Residual, accepted: any push after findings
+# counts as the round, whether or not it addressed them. Any read
 # that fails is a wait, never a merge. The sweep never asks Codex for a
 # review (`@codex review`): codex-review-sweep.yml owns nudges, and it and
 # codex-auto-request.yml skip Markdown-only PRs, so Codex looks at a
@@ -406,7 +415,7 @@ jobs:
             # clean and timeout may merge; blocked never does (a person must);
             # wait is the next sweep. Anything unreadable is wait, never a merge.
             codex_state() {
-              local comments reviews inline hdate now after="" page=0 page_json found blocking="[]" verified="[]" node meta ok
+              local comments reviews inline hdate now after="" page=0 page_json found blocking="[]" minor="[]" verified="[]" node meta ok
               local -a after_arg
               comments=$(api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --jq '.[]' | jq -s '.') \
                 || { echo "wait:could not read the PR comments, so Codex activity cannot be ruled out"; return 0; }
@@ -438,12 +447,13 @@ jobs:
                        | (($c.body // "") | [scan("!\\[P([0-3]) Badge\\]") | .[0]] | first) as $sev
                        | select(.isResolved == false and .isOutdated == false
                                 and ($c.author.__typename // "") == "Bot"
-                                and (($c.author.login // "") == $u or (($c.author.login // "") + "[bot]") == $u)
-                                and (($sev // "?") | IN("2", "3") | not))
-                       | "\(if $sev == null then "unbadged (counts as P1)" else "P" + $sev end) on \($c.path // "?"): "
-                         + ((($c.body // "") | capture("</sub></sub>\\s*(?<t>[^*\\n]{1,120})") | .t) // "(no title)")]') \
+                                and (($c.author.login // "") == $u or (($c.author.login // "") + "[bot]") == $u))
+                       | {minor: (($sev // "?") | IN("2", "3")),
+                          text: ("\(if $sev == null then "unbadged (counts as P1)" else "P" + $sev end) on \($c.path // "?"): "
+                                 + ((($c.body // "") | capture("</sub></sub>\\s*(?<t>[^*\\n]{1,120})") | .t) // "(no title)"))}]') \
                   || { echo "wait:could not evaluate the review threads, so Codex findings cannot be ruled out"; return 0; }
-                blocking=$(jq -cn --argjson a "$blocking" --argjson b "$found" '$a + $b')
+                blocking=$(jq -cn --argjson a "$blocking" --argjson b "$found" '$a + [$b[] | select(.minor | not) | .text]')
+                minor=$(jq -cn --argjson a "$minor" --argjson b "$found" '$a + [$b[] | select(.minor) | .text]')
                 [ "$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.hasNextPage')" = "true" ] || break
                 after=$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.endCursor // empty')
                 [ -n "$after" ] || { echo "wait:the review threads report another page but no cursor"; return 0; }
@@ -484,7 +494,7 @@ jobs:
               hdate=$(api "repos/$REPO/git/commits/$HEAD" --jq '.committer.date // empty' || true)
               now=$(date -u +%s)
               jq -rn --argjson comments "$comments" --argjson reviews "$reviews" --argjson inline "$inline" \
-                  --argjson threads "$blocking" --argjson verified "$verified" --arg head "$HEAD" --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
+                  --argjson threads "$blocking" --argjson minor "$minor" --argjson verified "$verified" --arg head "$HEAD" --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
                   --arg skip "$REVIEW_SKIP_PATTERN" --arg updated "${PR_UPDATED:-}" --arg hdate "${hdate:-}" \
                   --argjson now "$now" --argjson wait "$DOC_CODEX_WAIT_MINUTES" '
                 def ts: if type == "string" and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}")
@@ -510,6 +520,13 @@ jobs:
                    + [$real[] | select(.state != "DISMISSED" and ((.body // "") | test("!\\[P[01] Badge\\]")))
                       | "Codex review \(.id) on this head flags P0/P1 in its body"]
                    + $threads) as $block
+                # One fix round (merge policy: P2/P3 get one round, then merge
+                # with a follow-up). It has happened once Codex left an inline
+                # finding (a top-level comment, not a reply or a notice) on an
+                # EARLIER commit of this PR: the head has moved past a reviewed
+                # commit with findings. Until then open P2/P3 threads hold.
+                | ([$ci[] | select(.in_reply_to_id == null and (.original_commit_id // .commit_id // "") != $head
+                      and (((.body // "") | test($skip; "i")) | not))] | length > 0) as $fixround
                 # The summary comment: Codex App, opens with its marker; rows
                 # naming this head (a 7-40 hex prefix of it).
                 | ([$comments[] | select(isbot and (.user.type // "") == "Bot"
@@ -538,6 +555,8 @@ jobs:
                     elif $mins >= $wait then "timeout:\($why); \($mins) min since the head was pushed (at the latest) >= \($wait) min"
                     else "wait:\($why); \($mins) of \($wait) min since the head was pushed (at the latest), so waiting for Codex" end;
                   if ($block | length) > 0 then "blocked:\($block | length) open: " + ($block | unique | join("; "))
+                  elif ($minor | length) > 0 and ($fixround | not) then
+                    "held:\($minor | length) open P2/P3 Codex finding(s) on \($head[0:7]) and no fix round yet: " + ($minor | unique | join("; "))
                   elif $unreadable > 0 then "wait:a row of the Codex review summary cannot be read, so whether Codex finished cannot be told"
                   elif ($running | length) > 0
                        and ($lastnotice == null or any($running[]; .at == null or .at >= $lastnotice)) then
@@ -545,7 +564,9 @@ jobs:
                   elif ($running | length) == 0 and ((($hrows | length) > 0) or ($real | length) > 0) then
                     "clean:Codex finished on \($head[0:7]) (\(if ($hrows | length) > 0 then "summary row Completed" else "review object on the head" end)) with no open P0/P1 finding"
                   elif $lastnotice != null then timeout("Codex unavailable (its latest reply since the head is a usage-limit or set-up notice)")
-                  else timeout("Codex posted nothing for \($head[0:7])") end' \
+                  else timeout("Codex posted nothing for \($head[0:7])") end
+                  | if ($minor | length) > 0 and (startswith("clean:") or startswith("timeout:"))
+                    then . + "; after the fix round, P2/P3 left for a follow-up: " + ($minor | unique | join("; ")) else . end' \
                 || echo "wait:could not evaluate Codex activity"
             }
 
@@ -561,6 +582,9 @@ jobs:
                 blocked:*)
                   echo "::warning::$REPO#$PR_NUMBER: open Codex P0/P1 finding(s) on the current head; never auto-merged, left for a person: ${CODEX_NOTE}"
                   finish blocked "documentation-only and CI green, but Codex has open P0/P1 finding(s) on ${HEAD:0:7}; left for a person: ${CODEX_NOTE}." ;;
+                held:*)
+                  echo "::warning::$REPO#$PR_NUMBER: open Codex P2/P3 finding(s) awaiting their one fix round (push a fix, or resolve the threads): ${CODEX_NOTE}"
+                  finish blocked "documentation-only and CI green, but held for the P2/P3 fix round (push a fix, or resolve the threads): ${CODEX_NOTE}." ;;
                 *) finish wait "documentation-only (${FILE_COUNT} files), CI green at ${HEAD:0:7}; ${CODEX_NOTE}." ;;
               esac
             }

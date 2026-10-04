@@ -462,9 +462,46 @@ case("open P1 on the head is never merged, even long after the timeout",
 case("open P0 thread blocks", cx(threads=[thread("P0")]), says="P0 on docs/a.md")
 case("blocked PR is a warning annotation and counted", cx(**P1_198), says="codex-blocked 1")
 case("unbadged Codex thread counts as P1: blocks", cx(threads=[thread(None)]), says="unbadged")
-case("P2-only findings: merges",
-     cx(reviews=[review(50)], inline=[finding(1, 50, "P2"), finding(2, 50, "P3")],
-        threads=[thread("P2"), thread("P3")]), merged={W7})
+# P2/P3: the merge policy's one fix round (Codex P1 on #84).
+P2_HEAD = dict(reviews=[review(50)], inline=[finding(1, 50, "P2"), finding(2, 50, "P3")],
+               threads=[thread("P2"), thread("P3")])
+PRIOR_ROUND = dict(reviews=[review(40, commit=OLD_HEAD), review(50)],
+                   inline=[finding(1, 40, "P2", commit=OLD_HEAD), finding(2, 50, "P3")],
+                   threads=[thread("P2"), thread("P3")])
+case("P2/P3 findings on the head, no fix round yet: held, never merged, not red",
+     cx(**P2_HEAD), says="held for the P2/P3 fix round", merge_calls=0)
+case("P2/P3 held is a warning annotation and counted as codex-blocked", cx(**P2_HEAD), says="codex-blocked 1")
+case("P2/P3 held even long after the timeout with nothing else from Codex",
+     cx(comments=[], **P2_HEAD), says="no fix round yet", merge_calls=0)
+case("P2/P3 open after a fix round (finding on an earlier commit): merges, leftovers logged",
+     cx(**PRIOR_ROUND), merged={W7}, says="left for a follow-up")
+case("fix round read from original_commit_id (comment carried to the head still counts)",
+     cx(reviews=[review(40, commit=OLD_HEAD)],
+        inline=[{**finding(1, 40, "P2"), "original_commit_id": OLD_HEAD}], threads=[thread("P2")]),
+     merged={W7}, says="left for a follow-up")
+case("finding left on the head whose commit_id points elsewhere is not a fix round",
+     cx(reviews=[review(50)], inline=[{**finding(1, 50, "P2"), "commit_id": OLD_HEAD}], threads=[thread("P2")]),
+     says="no fix round yet", merge_calls=0)
+case("a reply on an earlier commit is not a fix round",
+     cx(reviews=[review(50)], inline=[finding(1, 50, "P2"), finding(3, 40, "P2", commit=OLD_HEAD, reply_to=1)],
+        threads=[thread("P2")]), says="no fix round yet", merge_calls=0)
+case("a notice on an earlier commit is not a fix round",
+     cx(reviews=[review(50)], inline=[finding(1, 50, "P2"),
+                                      finding(3, 40, None, commit=OLD_HEAD, body="To use Codex here, create an environment.")],
+        threads=[thread("P2")]), says="no fix round yet", merge_calls=0)
+case("someone else's finding on an earlier commit is not a fix round",
+     cx(reviews=[review(50)], inline=[finding(1, 50, "P2"),
+                                      {**finding(3, 40, "P2", commit=OLD_HEAD), "user": {"login": "mallory", "type": "User"}}],
+        threads=[thread("P2")]), says="no fix round yet", merge_calls=0)
+case("P2/P3 threads resolved by a person: merges", cx(reviews=[review(50)], inline=[finding(1, 50, "P2")],
+                                                       threads=[thread("P2", resolved=True)]), merged={W7})
+case("outdated P2 thread: merges", cx(threads=[thread("P2", outdated=True)]), merged={W7})
+case("P2 open with a P1 open after a fix round: still P0/P1-blocked",
+     cx(reviews=PRIOR_ROUND["reviews"], inline=PRIOR_ROUND["inline"], threads=[thread("P2"), thread("P1")]),
+     says="open P0/P1 finding(s)", merge_calls=0)
+case("P2/P3 thread by someone else does not hold: merges", cx(threads=[thread("P2", author="mallory", typename="User")]),
+     merged={W7}, not_says="follow-up")
+case("dry run: P2/P3-held PR is not a would-merge", cx(**P2_HEAD), env={"ENABLED": ""}, not_says="would squash")
 case("resolved P1 thread: merges", cx(threads=[thread("P1", resolved=True)]), merged={W7})
 case("P1-looking thread by someone else: merges", cx(threads=[thread("P1", author="mallory", typename="User")]),
      merged={W7})
@@ -510,7 +547,7 @@ case("Codex review body flagging P1: blocks",
      cx(reviews=[review(50, body="Codex Review ![P1 Badge](x) bad")], inline=[finding(1, 50, "P2")]),
      says="flags P0/P1")
 case("Codex review object on the head, no summary: clean, merges",
-     cx(comments=[], reviews=[review(50)], inline=[finding(1, 50, "P3")], threads=[thread("P3")]),
+     cx(comments=[], reviews=[review(50)], inline=[finding(1, 50, "P3")], threads=[thread("P3", resolved=True)]),
      merged={W7}, says="review object on the head")
 case("older clean comment naming the head is not evidence (editable): waits for the timeout",
      world(cx(comments=[{**notice(), "body": "Codex Review: Didn't find any major issues. Nice.\n\n**Reviewed commit:** `034be02bb3`"}]),
