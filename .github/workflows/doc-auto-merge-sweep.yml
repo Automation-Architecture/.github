@@ -1,0 +1,615 @@
+name: Doc auto-merge sweep
+
+# LIVES ONLY IN Automation-Architecture/.github. Not a canonical copy: never
+# sync it into a repo (one run here covers the whole org).
+#
+# Central replacement for the per-repo doc-auto-merge.yml (Brad, 2026-10-04:
+# centralize). Merges documentation-only pull requests across the org once CI
+# is green, with NO review (Brad, 2026-09-28). Code PRs are never touched.
+#
+# ── Why central ────────────────────────────────────────────────────────────
+# The per-repo copy (~89 private repos) fires on the completion of 24
+# workflows plus every check_run and status event, and every run bills at
+# least a minute: about 3k-7k billed minutes a month (baseline 2026-10-04),
+# and each change to it needed a ~100-PR re-sync wave of 1k+ minutes. This
+# repository is public, so its Actions minutes are free, and one file here
+# changes in one PR.
+#
+# ── SHIPS DARK. Do not enable before gate v2.10 is live ────────────────────
+# Kill switch: the job runs on schedule ONLY when the repository variable
+# DOC_AUTO_MERGE_SWEEP_ENABLED is exactly "true", and the script merges only
+# then (any other value, or unset, is a dry run that merges nothing). To stop
+# it, delete the variable or set it to anything else; nothing else changes.
+# A workflow_dispatch from main always runs, as a dry run unless the switch
+# is on AND `dry_run` is false.
+# Freshness depends on the delivery gate's policy v2.10 (aaa-pr-bot#52),
+# which keys its check run on the LIVE base tip it evaluated:
+# external_id `<repo>#<pr>:<live tip>:<head>:<rev>`. Before v2.10 the gate
+# keys on the pulls API `.base.sha`, which lags the tip, so under the rule
+# below every gate run reads as an older candidate and no PR whose rules
+# require the gate would merge (fail closed, but useless). Turn the switch on
+# only after v2.10 is deployed and verified. review-verdict.yml binds its
+# check the same way (`<repo>#<pr>:<base>:<head>:review-verdict`) but still
+# keys on `.base.sha`; in a repo whose rules require review/verdict, a doc PR
+# whose `.base.sha` lags the tip waits here until review-verdict keys on the
+# live tip too (a follow-up; waiting is the safe side).
+#
+# ── What qualifies ─────────────────────────────────────────────────────────
+# The canonical doc-auto-merge.yml definition, unchanged (keep in step with it
+# and with review-verdict.yml's evidence 0):
+#   - every changed file, and the previous name of every renamed file, ends in
+#     .md or .markdown (case-sensitive; .mdx carries JSX and is code);
+#   - 1-299 changed files, the file list read in full and exactly
+#     `changed_files` long (review-verdict's compare returns at most 300);
+#   - open, not a draft, no `no-auto-merge` label (the hold), the branch in the
+#     PR's own repository (never a fork), and GitHub does not report a merge
+#     conflict.
+# Candidates come from one org-wide search (open, non-draft, not archived,
+# without the hold label), oldest first; every PR is re-read before it is
+# judged, because the search index lags. A search that reports
+# incomplete_results, or more matches than it can return (1000), is a red run
+# and nothing is evaluated.
+#
+# ── What "CI is green" means ───────────────────────────────────────────────
+# Reused from doc-auto-merge.yml. On the head commit, taking the newest run of
+# each (app, check name):
+#   - every check required for the base branch (rules/branches/<base>, plus
+#     classic branch protection) is present and passed (success, neutral or
+#     skipped), from the pinned app if one is pinned;
+#   - every other check-run and commit status on the head has finished and
+#     none failed: in progress, queued, action_required and pending are
+#     waiting; failure, timed_out, startup_failure, stale, error and cancelled
+#     are red (a red PR is simply not merged; a re-run or push re-evaluates);
+#   - Vercel, where the repo deploys with it: every `Vercel` / `Vercel – <p>`
+#     commit-status context on any of the last 3 commits of the base branch
+#     must be present on the head and successful. Absent is pending.
+# A cancelled newest Actions job is red, EXCEPT a job of review-verdict.yml or
+# doc-auto-merge.yml (superseded by their concurrency groups; read from the
+# job's run path, never guessed from its name). Not counted: the per-repo
+# `doc-auto-merge` job (a merger, not CI, while the copies still exist) and the
+# reviewer checks in IGNORED_CHECKS (no review is required).
+# Pending, missing, unreadable and non-success never merge.
+#
+# ── Freshness: PR-bound checks count only for the live candidate ──────────
+# A check-run whose external_id starts `<this repo>#<n>:` is bound to PR #n
+# (the gate, review-verdict). It counts for this PR only if n is this PR, its
+# key's head is the PR's current head AND its key's base is the base branch's
+# LIVE tip, read in the same snapshot (git/ref/heads/<base>). Any other run
+# bound to this PR (older head, older base, unparseable key) is an older
+# candidate: it reads as missing, so the PR waits for the producer to publish
+# for the live candidate (never green, never red). A run bound to ANOTHER PR
+# is ignored for this one, even at the same commit. external_id is opaque to
+# GitHub, though: a ruleset enforces the newest run of a required check on
+# the commit whichever PR it belongs to, so a required check whose newest run
+# belongs to another PR or an older candidate and has not passed is pending.
+#
+# ── Timing: two passes per run, no per-PR waiting ─────────────────────────
+# Every ~10 minutes (GitHub runs schedules on a best-effort basis; they can be
+# late or dropped under load). Pass 1 judges every candidate once. If any are
+# green, the run sleeps SETTLE_SECONDS ONCE (CI that registers late gets the
+# chance to show up), then pass 2 takes a fresh final snapshot of each green
+# PR (head must be the one pass 1 saw) and merges it. Anything pending waits
+# for the next sweep. Bounded: pass 1 stops starting new PRs after
+# RUN_BUDGET_SECONDS, at most MAX_MERGES merges per run, job timeout 15
+# minutes. Each PR is evaluated in its own subshell: one PR's error is
+# reported and the sweep moves on; the run ends red if any PR errored.
+#
+# ── The merge ──────────────────────────────────────────────────────────────
+# The final snapshot reads the base tip FIRST and evaluates the PR-bound
+# checks and Vercel against it. The tip is re-read immediately before
+# PUT /pulls/{n}/merge (merge_method squash, `sha` = head, so a push in
+# between makes GitHub refuse). A tip that moved is refused (a warning, no
+# merge; the next sweep evaluates the new tip); an unreadable tip is a red
+# run. After the merge the PR must read as merged and the squash commit's
+# first parent must be the pinned tip, else a red run (the merge stands but is
+# never unverified and silent). Residual (accepted, as in doc-auto-merge.yml):
+# a base push inside the final re-read-then-merge round trip (about a second)
+# is not prevented; the merge API has no expected-base parameter, and the
+# parent check reports it. No commit title or message is passed: GitHub's
+# squash defaults, exactly as the per-repo workflow merges. Never an admin
+# bypass, never native auto-merge.
+#
+# ── Token and threat model ─────────────────────────────────────────────────
+# AAA_ORG_TOKEN (web3sea's classic PAT; 1Password vault aaa-APIs, item
+# aaa-org-token) for every call: reading other private repos needs an org
+# credential, and the merge must be made by a user so post-merge workflows
+# (dashboard-sync, sentry-release, push deploys) start; GITHUB_TOKEN merges
+# start none. GITHUB_TOKEN has no permissions. Triggers are schedule and
+# workflow_dispatch from main only (job condition: `--ref <branch>` would run
+# a branch's copy with the PAT). There is NO pull_request trigger, no
+# checkout, and no PR content (title, body, branch name, file names) is ever
+# executed or interpolated into a command; it is only data inside jq. Repo
+# names, PR numbers and SHAs are validated before use.
+#
+# ── Rate limits ───────────────────────────────────────────────────────────
+# One search page per 100 open PRs, then about 2 REST calls per code PR and
+# about 12 per documentation PR (58 open PRs on 2026-10-04: 117 calls in a
+# dry run, against the PAT's 5000/hour). A run starts only if the core
+# limit has MIN_RATE_REMAINING left (read from response headers); a 403/429 that names a rate limit is
+# retried after a growing back-off (MAX_RETRIES), anything else fails that
+# call. The summary line reports requests made and the core quota used.
+#
+# ── Removal of the per-repo copies (later, not in this PR) ────────────────
+# 1. Merge this PR (dark). 2. After gate v2.10 is live, dispatch a dry run
+#    and compare it with what the per-repo copies do. 3. Set
+#    DOC_AUTO_MERGE_SWEEP_ENABLED=true; while both run, a PR merged by one is
+#    read as merged by the other (the merge pins `sha`). 4. Once the sweep has
+#    merged cleanly for a few days, one wave deletes
+#    .github/workflows/doc-auto-merge.yml from every repo (one PR per repo,
+#    Markdown-free so it is a normal code PR), and the canonical copy here is
+#    retired with its tests. What the per-repo copy did that this does not:
+#    disarm GitHub native auto-merge on refused PRs. The clean replacement is
+#    the repo setting "Allow auto-merge" off org-wide (a settings decision for
+#    Brad), not a sweep that writes to every PR.
+#
+# Observability: one line per PR (`doc-auto-merge-sweep: <repo>#<n>: ...`),
+# a job summary table, and a final line
+# `doc-auto-merge-sweep: scanned N, ... merged M, errors E, api requests R, core quota used U`.
+# An error, a failed or incomplete search, or a missing token is a red run; a
+# pending PR is not.
+
+on:
+  schedule:
+    - cron: "4,14,24,34,44,54 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Report what would merge, merge nothing (forced while DOC_AUTO_MERGE_SWEEP_ENABLED is not "true")
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  # One sweep at a time; a queued run waits rather than cancelling one that
+  # may be between its final read and its merge call.
+  group: doc-auto-merge-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    # Main only (a dispatch from a branch would run that branch's copy with the
+    # PAT). On schedule only when the kill switch is on; a dispatch always runs
+    # and is a dry run unless the switch is on and dry_run is false.
+    if: >-
+      github.repository == 'Automation-Architecture/.github'
+      && github.ref == 'refs/heads/main'
+      && (vars.DOC_AUTO_MERGE_SWEEP_ENABLED == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # No checkout. Keep it that way (see the header).
+      - name: Merge green documentation-only PRs across the org
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          # The kill switch: merging needs exactly "true".
+          ENABLED: ${{ vars.DOC_AUTO_MERGE_SWEEP_ENABLED }}
+          # "false" only for a dispatch that unticked dry_run; a schedule is a
+          # real run (it only runs with the switch on).
+          DRY_RUN_INPUT: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || 'false' }}
+          # Same values as doc-auto-merge.yml / review-verdict.yml. Keep in step.
+          DOC_ONLY_PATTERN: '\.(md|markdown)\z'
+          HOLD_LABEL: "no-auto-merge"
+          MAX_FILES: "300"
+          VERCEL_CONTEXT_PATTERN: '^Vercel( – .+)?\z'
+          # The per-repo merger's own job: not CI.
+          MERGER_JOB: doc-auto-merge
+          # app-slug/check-name, comma-separated: reviewers, not CI.
+          IGNORED_CHECKS: "greptile-apps/Greptile Review"
+          MAX_MERGES: "10"
+          SETTLE_SECONDS: "60"
+          RUN_BUDGET_SECONDS: "420"
+          MIN_RATE_REMAINING: "1000"
+          MAX_RETRIES: "2"
+          BACKOFF_SECONDS: "30"
+        run: |
+          set -euo pipefail
+          say() { echo "doc-auto-merge-sweep: $*"; }
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::AAA_ORG_TOKEN is not available; cannot read or merge the org's PRs."; exit 1; }
+          [[ "${ORG:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::bad ORG '${ORG:-}'"; exit 1; }
+          for v in MAX_MERGES SETTLE_SECONDS RUN_BUDGET_SECONDS MIN_RATE_REMAINING MAX_RETRIES BACKOFF_SECONDS MAX_FILES; do
+            [[ "${!v:-}" =~ ^[0-9]+$ ]] || { echo "::error::bad $v '${!v:-}'"; exit 1; }
+          done
+          HOLD_LABEL="${HOLD_LABEL:-no-auto-merge}"
+          MERGER_JOB="${MERGER_JOB:-doc-auto-merge}"
+          IGNORED_CHECKS="${IGNORED_CHECKS:-}"
+          # The kill switch, failing closed: anything but exactly "true" plus
+          # an explicit dry_run=false (or a schedule) is a dry run.
+          DRY=yes
+          if [ "${ENABLED:-}" = "true" ] && [ "${DRY_RUN_INPUT:-}" = "false" ]; then DRY=no; fi
+          WORK=$(mktemp -d)
+          CALLS="$WORK/calls"; : > "$CALLS"
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          started=$SECONDS
+
+          # Every GitHub API call goes through here: counted, and retried with a
+          # growing back-off when GitHub names a rate limit (403/429). Any other
+          # failure is returned to the caller. Output as `gh api` prints it.
+          api() {
+            local attempt=0 out errf="$WORK/err.$BASHPID"
+            while :; do
+              echo . >> "$CALLS"
+              if out=$(gh api "$@" 2>"$errf"); then
+                [ -z "$out" ] || printf '%s\n' "$out"
+                return 0
+              fi
+              if [ "$attempt" -lt "$MAX_RETRIES" ] && grep -qiE 'rate limit|HTTP 429' "$errf"; then
+                attempt=$((attempt + 1))
+                echo "::warning::GitHub rate limit on $1; backing off $((BACKOFF_SECONDS * attempt))s (retry $attempt of $MAX_RETRIES)." >&2
+                sleep $((BACKOFF_SECONDS * attempt))
+                continue
+              fi
+              cat "$errf" >&2 || true
+              return 1
+            done
+          }
+          # The core quota left, from the response headers of a cheap call.
+          # Not GET /rate_limit: for this PAT it reported a full, unused quota
+          # while the headers of real calls showed it in use (2026-10-04).
+          core_remaining() {
+            gh api -i user 2>/dev/null | tr -d '\r' \
+              | awk -F': *' 'tolower($1) == "x-ratelimit-remaining" { print $2; exit }' || true
+          }
+
+          # ── One PR ─────────────────────────────────────────────────────
+          # eval_pr <repo> <n> <check|merge> <expected head or ""> <result file>
+          # Always run in a subshell. Writes ONE line to the result file:
+          #   skip|wait|notgreen|ready <head>|would-merge|merged|refused|error <why>
+          # and exits 0, or 1 for an error (the run ends red).
+          eval_pr() {
+            REPO=$1; PR_NUMBER=$2; MODE=$3; EXPECT_HEAD=$4; RESULT=$5
+            HEAD=""; BASE_REF=""; BASE_TIP=""; VERCEL_REQUIRED=""; VERCEL_FOR=""; FILE_COUNT=""
+            finish() { local k=$1; shift; echo "$k $*" > "$RESULT"; say "$REPO#$PR_NUMBER: $*"; exit 0; }
+            fail() { echo "error $*" > "$RESULT"; echo "::error::$REPO#$PR_NUMBER: $*"; exit 1; }
+
+            qualify() {
+              local pr changed files verdict
+              pr=$(api "repos/$REPO/pulls/$PR_NUMBER") || fail "could not read the PR"
+              [ "$(echo "$pr" | jq -r '.merged // false')" != "true" ] || finish skip "already merged."
+              [ "$(echo "$pr" | jq -r '.state // empty')" = "open" ] || finish skip "not open."
+              [ "$(echo "$pr" | jq -r 'if .draft == false then "no" else "yes" end')" = "no" ] || finish skip "draft; drafts never auto-merge."
+              case "$(echo "$pr" | jq -r --arg l "$HOLD_LABEL" '
+                  if (.labels | type) != "array" then "unreadable"
+                  elif any(.labels[]; .name == $l) then "yes" else "no" end')" in
+                no) ;;
+                yes) finish skip "held by the ${HOLD_LABEL} label; a person merges it." ;;
+                *) finish skip "labels unreadable, so the hold cannot be ruled out; not merging." ;;
+              esac
+              [ "$(echo "$pr" | jq -r '.head.repo.full_name // empty')" = "$REPO" ] || finish skip "branch is not in ${REPO} (a fork, or deleted); forks never auto-merge."
+              HEAD=$(echo "$pr" | jq -r '.head.sha // empty')
+              BASE_REF=$(echo "$pr" | jq -r '.base.ref // empty')
+              if ! [[ "$HEAD" =~ ^[0-9a-f]{40}$ ]] || [ -z "$BASE_REF" ]; then
+                fail "no readable head SHA or base ref"
+              fi
+              if [ -n "$EXPECT_HEAD" ] && [ "$HEAD" != "$EXPECT_HEAD" ]; then
+                finish wait "head moved from ${EXPECT_HEAD:0:7} to ${HEAD:0:7} since the first look; the next sweep evaluates it."
+              fi
+              changed=$(echo "$pr" | jq -r '.changed_files // empty')
+              if ! [[ "$changed" =~ ^[0-9]+$ ]] || [ "$changed" -eq 0 ] || [ "$changed" -ge "$MAX_FILES" ]; then
+                finish skip "changed_files is '${changed}', not 1-$((MAX_FILES - 1)); not a documentation-only candidate."
+              fi
+              # --paginate reports a truncated list (3000-file cap) as complete,
+              # hence the count comparison.
+              files=$(api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" | jq -s 'add // []') \
+                || fail "could not read the changed files"
+              verdict=$(echo "$files" | jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" '
+                  if type != "array" then "the changed-file list is not a list"
+                  elif length != $n then "the changed-file list holds \(length) of \($n) files"
+                  elif any(.[]; (.filename | type) != "string" or .filename == "") then "a changed file has no name"
+                  else
+                    [.[] | .filename, (.previous_filename // empty)]
+                    | map(select(type != "string" or (test($pat) | not)))
+                    | if length == 0 then "doc"
+                      else "\(length) changed path(s) are not Markdown" end
+                  end') || fail "could not classify the changed files"
+              [ "$verdict" = "doc" ] || finish skip "not documentation-only (${verdict})."
+              # GitHub computes mergeability lazily: null is unknown (GitHub
+              # decides at merge time); false is a conflict, which no sweep fixes.
+              [ "$(echo "$pr" | jq -r '.mergeable | tostring')" != "false" ] || finish wait "documentation-only, but GitHub reports a merge conflict."
+              FILE_COUNT="$changed"
+            }
+
+            # BASE_TIP = the base branch's live tip; non-zero (and empty) if unreadable.
+            read_base_tip() {
+              local ref_enc tip
+              BASE_TIP=""
+              ref_enc=$(jq -rn --arg b "$BASE_REF" '$b | @uri | gsub("%2F"; "/")')
+              tip=$(api "repos/$REPO/git/ref/heads/$ref_enc" --jq 'select(.object.type == "commit") | .object.sha') || return 1
+              [[ "$tip" =~ ^[0-9a-f]{40}$ ]] || return 1
+              BASE_TIP="$tip"
+            }
+
+            # VERCEL_REQUIRED = Vercel contexts on the last 3 base commits ending
+            # at BASE_TIP (a JSON list), VERCEL_FOR = BASE_TIP. Non-zero, both
+            # empty, if any read fails (CI then reads as pending).
+            vercel_required() {
+              local shas sha st found="[]"
+              VERCEL_REQUIRED=""; VERCEL_FOR=""
+              [[ "$BASE_TIP" =~ ^[0-9a-f]{40}$ ]] || return 1
+              shas=$(api "repos/$REPO/commits?sha=$BASE_TIP&per_page=3" --jq '.[].sha') || return 1
+              [ -n "$shas" ] || return 1
+              [ "$(printf '%s\n' "$shas" | head -n 1)" = "$BASE_TIP" ] || return 1
+              for sha in $shas; do
+                [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+                st=$(api --paginate "repos/$REPO/commits/$sha/status?per_page=100" --jq '.statuses[]' | jq -s '.') || return 1
+                found=$(jq -cn --argjson f "$found" --argjson st "$st" --arg pat "$VERCEL_CONTEXT_PATTERN" '
+                  $f + [$st[] | .context | select(type == "string" and test($pat))] | unique') || return 1
+              done
+              VERCEL_REQUIRED="$found"
+              VERCEL_FOR="$BASE_TIP"
+            }
+
+            # Prints green, pending:<why> or red:<why> for HEAD against BASE_TIP.
+            # An unreadable API is pending, never green.
+            checks_state() {
+              local runs statuses rules branch base_enc cancelled self_ids id url run_id path
+              [[ "$BASE_TIP" =~ ^[0-9a-f]{40}$ ]] || { echo "pending:could not read the tip of ${BASE_REF}"; return 0; }
+              base_enc=$(jq -rn --arg b "$BASE_REF" '$b | @uri')
+              runs=$(api --paginate "repos/$REPO/commits/$HEAD/check-runs?per_page=100" --jq '.check_runs[]' | jq -s '.') \
+                || { echo "pending:could not read check-runs"; return 0; }
+              # Each run gets `_b`, its binding: none (not bound to a PR of this
+              # repository), other (another PR), current (this PR, this head,
+              # this live tip) or stale (this PR, any other candidate).
+              runs=$(echo "$runs" | jq -c --arg repo "$REPO" --arg pr "$PR_NUMBER" --arg head "$HEAD" --arg tip "$BASE_TIP" '
+                  def binding:
+                    ([(.external_id // "") | strings
+                      | capture("^(?<repo>[^#:/\\s]+/[^#:/\\s]+)#(?<n>[0-9]+):(?<rest>.*)$")] | .[0]) as $m
+                    | if $m == null or ($m.repo | ascii_downcase) != ($repo | ascii_downcase) then {bound: "none"}
+                      elif $m.n != $pr then {bound: "other", n: $m.n}
+                      else ([$m.rest | capture("^(?<base>[0-9a-f]{40}):(?<head>[0-9a-f]{40}):")] | .[0]) as $k
+                        | if $k != null and $k.head == $head and $k.base == $tip
+                          then {bound: "current", n: $m.n}
+                          else {bound: "stale", n: $m.n, base: ($k.base // "?"), head: ($k.head // "?")} end
+                      end;
+                  map(. + {_b: binding})') || { echo "pending:could not classify the check-runs"; return 0; }
+              # Newest cancelled Actions jobs among the runs that count for this
+              # candidate: those of review-verdict.yml or doc-auto-merge.yml are
+              # superseded, not a CI result. Read from the run's path.
+              self_ids="[]"
+              cancelled=$(echo "$runs" | jq -r --arg job "$MERGER_JOB" '
+                map(select(._b.bound != "other"))
+                | group_by([(.app.slug // ""), .name]) | map(max_by(.id))[]
+                | select(._b.bound == "none" or ._b.bound == "current")
+                | select((.app.slug // "") == "github-actions" and .conclusion == "cancelled" and .name != $job)
+                | "\(.id) \(.details_url // "")"')
+              while read -r id url; do
+                [ -n "$id" ] || continue
+                run_id=$(printf '%s' "$url" | sed -nE 's#.*/actions/runs/([0-9]+).*#\1#p')
+                if [ -z "$run_id" ] || ! path=$(api "repos/$REPO/actions/runs/$run_id" --jq '.path // empty'); then
+                  echo "pending:could not tell which workflow cancelled check ${id} belongs to"; return 0
+                fi
+                case "${path%%@*}" in
+                  .github/workflows/review-verdict.yml|.github/workflows/doc-auto-merge.yml)
+                    self_ids=$(echo "$self_ids" | jq --argjson i "$id" '. + [$i]') ;;
+                esac
+              done <<< "$cancelled"
+              statuses=$(api --paginate "repos/$REPO/commits/$HEAD/status?per_page=100" --jq '.statuses[]' | jq -s '.') \
+                || { echo "pending:could not read commit statuses"; return 0; }
+              rules=$(api --paginate "repos/$REPO/rules/branches/$base_enc?per_page=100" | jq -s 'add // []') \
+                || { echo "pending:could not read the rules on ${BASE_REF}"; return 0; }
+              branch=$(api "repos/$REPO/branches/$base_enc") || { echo "pending:could not read branch ${BASE_REF}"; return 0; }
+              if [ -z "$VERCEL_REQUIRED" ] || [ "$VERCEL_FOR" != "$BASE_TIP" ]; then
+                echo "pending:could not read the base branch's Vercel statuses"; return 0
+              fi
+              jq -rn --argjson runs "$runs" --argjson st "$statuses" --argjson rules "$rules" \
+                  --argjson branch "$branch" --arg job "$MERGER_JOB" --arg ign "$IGNORED_CHECKS" \
+                  --argjson selfids "$self_ids" --argjson vercel "$VERCEL_REQUIRED" --arg tip "$BASE_TIP" '
+                def ok: IN("success", "neutral", "skipped");
+                def newest: group_by([(.app.slug // ""), .name]) | map(max_by(.id));
+                def counts: ._b.bound == "none" or ._b.bound == "current";
+                def owner: if ._b.bound == "other" then "PR #\(._b.n)"
+                           else "an older candidate of this PR (base \(._b.base[0:7]), head \(._b.head[0:7]))" end;
+                ($ign | split(",") | map(sub("^\\s+"; "") | sub("\\s+$"; "")) | map(select(length > 0))) as $ignored
+                # The commit as this PR sees it: the newest run per (app, name)
+                # among those not bound to another PR. If that newest run is
+                # bound to an older candidate of this PR, the check is
+                # pending, required or not: the producer has not published for
+                # the live candidate yet (dropping it instead would let the
+                # state go green early).
+                | ($runs | map(select(._b.bound != "other")) | newest) as $mine
+                | ($mine | map(select(counts))) as $all
+                # What GitHub enforces: the newest run per (app, name) on the
+                # commit, whichever PR or candidate it belongs to.
+                | ($runs | newest) as $enforced
+                | ($st | group_by(.context) | map(max_by([(.updated_at // ""), (.id // 0)]))) as $st
+                | ($mine | map(select(
+                      ((.app.slug // "") == "github-actions" and .name == $job | not)
+                      and (.id as $i | $selfids | index($i) | not)
+                      and (((.app.slug // "") + "/" + .name) as $k | $ignored | index($k) | not)))) as $judged
+                | ($judged | map(select(counts))) as $ci
+                | ([$judged[] | select(._b.bound == "stale")
+                    | "\(.name) (bound to an older candidate of this PR: base \(._b.base[0:7]), head \(._b.head[0:7]); waiting for a run keyed on live tip \($tip[0:7]))"]) as $stale
+                | ([$rules[]? | select(.type == "required_status_checks")
+                    | .parameters.required_status_checks[]? | {context, app: .integration_id}]
+                   + [($branch.protection.required_status_checks.checks // [])[] | {context, app: .app_id}]
+                   + [($branch.protection.required_status_checks.contexts // [])[] | {context: ., app: null}]
+                   | unique_by([.context, .app])) as $req
+                | ([$req[] | . as $r
+                    | select(
+                        ([$all[] | select(.name == $r.context
+                                          and ($r.app == null or $r.app == -1 or .app.id == $r.app)
+                                          and .status == "completed" and (.conclusion | ok))] | length) == 0
+                        and ([$st[] | select(.context == $r.context and .state == "success"
+                                             and ($r.app == null or $r.app == -1))] | length) == 0)
+                    | $r.context
+                      + (if any($runs[]; .name == $r.context and ._b.bound == "stale")
+                         then " (bound to an older candidate of this PR; waiting for a run keyed on live tip \($tip[0:7]))"
+                         else "" end)]
+                   + [$vercel[] | . as $c
+                      | select([$st[] | select(.context == $c and .state == "success")] | length == 0)
+                      | "\($c) (Vercel status not reported as success on this commit)"]) as $missing
+                | ([$req[] | . as $r
+                    | $enforced[] | select(.name == $r.context
+                                           and ($r.app == null or $r.app == -1 or .app.id == $r.app)
+                                           and (counts | not)
+                                           and (.status != "completed" or (.conclusion | ok | not)))
+                    | "\(.name) (\(.conclusion // .status) for \(owner))"]) as $shadowed
+                | ([$ci[] | select(.status == "completed"
+                      and (.conclusion | IN("failure", "timed_out", "startup_failure", "stale", "cancelled")))
+                    | "\(.name) (\(.conclusion))"]
+                  + [$st[] | select(.state == "failure" or .state == "error") | "\(.context) (\(.state))"]) as $red
+                | ([$ci[] | select(.status != "completed" or .conclusion == "action_required") | .name]
+                  + [$st[] | select(.state == "pending") | .context] + $stale) as $running
+                | if ($red | length) > 0 then "red:" + ($red | join(", "))
+                  elif ($running | length) > 0 then "pending:still running or waiting: " + ($running | unique | join(", "))
+                  elif ($missing | length) > 0 then "pending:required check(s) not passed yet: " + ($missing | unique | join(", "))
+                  elif ($shadowed | length) > 0 then "pending:GitHub enforces the newest run of a required check on this commit, and it belongs to another PR or an older candidate: " + ($shadowed | unique | join(", "))
+                  else "green" end' || echo "pending:could not evaluate the checks"
+            }
+
+            qualify
+            read_base_tip || true
+            if [ "$MODE" = "check" ]; then
+              vercel_required || true
+              state=$(checks_state)
+              case "$state" in
+                green) finish ready "$HEAD documentation-only (${FILE_COUNT} files), CI green against base ${BASE_TIP:0:7}; final snapshot after the settle." ;;
+                red:*) finish notgreen "documentation-only, CI not green on ${HEAD:0:7}: ${state#red:}." ;;
+                *) finish wait "documentation-only (${FILE_COUNT} files) at ${HEAD:0:7}; ${state#pending:}." ;;
+              esac
+            fi
+
+            # Final snapshot (MODE=merge): qualify above re-read the PR and its
+            # files and required the head pass 1 saw; the tip was read first
+            # and is pinned; Vercel and CI are judged against it.
+            [ -n "$BASE_TIP" ] || fail "could not read the tip of ${BASE_REF}, so the base cannot be pinned; nothing merged"
+            PINNED="$BASE_TIP"
+            vercel_required || true
+            state=$(checks_state)
+            case "$state" in
+              green) ;;
+              red:*) finish notgreen "CI changed in the final snapshot: ${state#red:}; not merging." ;;
+              *) finish wait "CI changed in the final snapshot: ${state#pending:}; not merging." ;;
+            esac
+            if [ "$DRY" = "yes" ]; then
+              finish would-merge "dry run: would squash-merge ${HEAD:0:7} onto ${PINNED:0:7} (documentation-only, ${FILE_COUNT} files, CI green)."
+            fi
+            # Re-read the tip immediately before the merge call: the merge API
+            # pins only the head.
+            read_base_tip || fail "could not re-read the tip of ${BASE_REF} before merging (evaluated against ${PINNED:0:7}); nothing merged"
+            if [ "$BASE_TIP" != "$PINNED" ]; then
+              echo "::warning::$REPO#$PR_NUMBER: ${BASE_REF} moved from ${PINNED:0:7} to ${BASE_TIP:0:7} after the evaluation; not merging (the next sweep evaluates the new tip)."
+              finish refused "base moved from ${PINNED:0:7} to ${BASE_TIP:0:7}; not merged."
+            fi
+            say "$REPO#$PR_NUMBER: CI green on ${HEAD:0:7} against base ${PINNED:0:7}; squash-merging."
+            echo . >> "$CALLS"
+            # Never retried: the outcome is read back instead.
+            if ! gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/merge" -f merge_method=squash -f sha="$HEAD" >/dev/null; then
+              if [ "$(api "repos/$REPO/pulls/$PR_NUMBER" --jq '.merged' || echo false)" = "true" ]; then
+                finish skip "merged by someone else (e.g. the per-repo workflow) first."
+              fi
+              fail "GitHub refused to merge ${HEAD:0:7} (a ruleset, a push that moved the head, or a conflict); nothing merged"
+            fi
+            merged=$(api "repos/$REPO/pulls/$PR_NUMBER" --jq '"\(.merged) \(.merge_commit_sha // "")"' || echo "unknown")
+            [ "${merged%% *}" = "true" ] || fail "the merge call returned success but the PR reads as not merged (${merged})"
+            parent=$(api "repos/$REPO/commits/${merged#* }" --jq '.parents[0].sha // empty' || true)
+            if ! [[ "$parent" =~ ^[0-9a-f]{40}$ ]]; then
+              fail "merged as ${merged#* }, but its parent could not be read, so the evaluated base ${PINNED:0:7} is unconfirmed. The merge stands; check it"
+            elif [ "$parent" != "$PINNED" ]; then
+              fail "merged as ${merged#* } onto ${parent:0:7}, not the evaluated base ${PINNED:0:7}: the base moved inside the merge round trip. The merge stands; check it"
+            fi
+            finish merged "merged as ${merged#* } onto ${PINNED:0:7} (documentation-only, CI green, no review required by policy)."
+          }
+
+          # ── The sweep ────────────────────────────────────────────────────
+          rate_start=$(core_remaining)
+          if [[ "$rate_start" =~ ^[0-9]+$ ]] && [ "$rate_start" -lt "$MIN_RATE_REMAINING" ]; then
+            echo "::warning::only $rate_start core API requests left for this token (need $MIN_RATE_REMAINING); skipping this sweep."
+            say "skipped: rate limit low ($rate_start left)."
+            exit 0
+          fi
+          say "mode: $([ "$DRY" = yes ] && echo "DRY RUN (merges nothing)" || echo "merging") (switch '${ENABLED:-}', dry_run input '${DRY_RUN_INPUT:-}')."
+
+          # Open, non-draft, unheld PRs org-wide, oldest first. A page flagged
+          # incomplete_results, or more matches than the search returns (1000),
+          # is a red run: never a silently partial sweep.
+          list=$(api -X GET --paginate search/issues \
+                   -f q="org:$ORG is:pr is:open draft:false archived:false -label:$HOLD_LABEL" \
+                   -f sort=created -f order=asc -f per_page=100 \
+                   --jq 'if (.incomplete_results != false) or ((.total_count | type) != "number") or (.total_count > 1000)
+                         then "INCOMPLETE \(.total_count)" else (.items[] | (.repository_url // "") + " " + (.number | tostring)) end') \
+            || { echo "::error::the PR search failed; nothing evaluated."; exit 1; }
+          if grep -q '^INCOMPLETE' <<<"$list"; then
+            echo "::error::the PR search returned incomplete results ($(grep -m1 '^INCOMPLETE' <<<"$list")); not sweeping a partial list."
+            exit 1
+          fi
+
+          {
+            echo "### Doc auto-merge sweep ($([ "$DRY" = yes ] && echo "dry run" || echo "live"))"
+            echo
+            echo "| PR | Pass | Decision |"
+            echo "|---|---|---|"
+          } >> "$SUMMARY"
+          record() { printf '| %s | %s | %s |\n' "$1" "$2" "$(printf '%s' "$3" | tr '|\n' '/ ' | cut -c1-300)" >> "$SUMMARY"; }
+
+          scanned=0; docs=0; ready=0; waiting=0; notgreen=0; merged=0; would=0; refused=0; errors=0; deferred=0
+          declare -a READY=()
+          i=0
+          while read -r url n; do
+            [ -n "${url:-}" ] || continue
+            repo="${url#https://api.github.com/repos/}"
+            if ! [[ "$repo" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || [ "${repo%%/*}" != "$ORG" ] || ! [[ "$n" =~ ^[1-9][0-9]{0,9}$ ]]; then
+              say "unexpected search item; ignored."; continue
+            fi
+            if [ $((SECONDS - started)) -ge "$RUN_BUDGET_SECONDS" ]; then
+              deferred=$((deferred + 1)); continue
+            fi
+            scanned=$((scanned + 1)); i=$((i + 1))
+            res="$WORK/p1.$i"; : > "$res"
+            # errexit stays ON inside the subshell (it would be off under `||`):
+            # an unexpected failure ends that PR's evaluation as an error.
+            set +e; ( set -e; eval_pr "$repo" "$n" check "" "$res" ) </dev/null; rc=$?; set -e
+            line=$(head -n 1 "$res" 2>/dev/null || true)
+            kind="${line%% *}"
+            if [ "$rc" -ne 0 ] || [ -z "$line" ]; then
+              kind=error; [ -n "$line" ] || echo "::error::$repo#$n: evaluation stopped without a decision."
+            fi
+            case "$kind" in
+              ready) ready=$((ready + 1)); docs=$((docs + 1)); READY+=("$repo $n ${line#ready }") ;;
+              wait) waiting=$((waiting + 1)); [[ "$line" == *documentation-only* ]] && docs=$((docs + 1)) ;;
+              notgreen) notgreen=$((notgreen + 1)); docs=$((docs + 1)) ;;
+              error) errors=$((errors + 1)) ;;
+            esac
+            record "$repo#$n" 1 "${line:-error}"
+          done <<<"$list"
+          [ "$deferred" -eq 0 ] || say "run budget of ${RUN_BUDGET_SECONDS}s reached; $deferred PR(s) wait for the next sweep."
+
+          if [ "${#READY[@]}" -gt 0 ]; then
+            say "${#READY[@]} documentation-only PR(s) green; settling ${SETTLE_SECONDS}s before the final snapshot."
+            sleep "$SETTLE_SECONDS"
+            j=0
+            for entry in "${READY[@]}"; do
+              read -r repo n head _ <<<"$entry"
+              if [ $((merged + would)) -ge "$MAX_MERGES" ]; then
+                say "$repo#$n: cap of $MAX_MERGES merges per run reached; the next sweep merges it."
+                record "$repo#$n" 2 "cap reached; next sweep"
+                continue
+              fi
+              j=$((j + 1)); res="$WORK/p2.$j"; : > "$res"
+              set +e; ( set -e; eval_pr "$repo" "$n" merge "$head" "$res" ) </dev/null; rc=$?; set -e
+              line=$(head -n 1 "$res" 2>/dev/null || true)
+              kind="${line%% *}"
+              if [ "$rc" -ne 0 ] || [ -z "$line" ]; then
+                kind=error; [ -n "$line" ] || echo "::error::$repo#$n: final snapshot stopped without a decision."
+              fi
+              case "$kind" in
+                merged) merged=$((merged + 1)) ;;
+                would-merge) would=$((would + 1)) ;;
+                refused) refused=$((refused + 1)) ;;
+                error) errors=$((errors + 1)) ;;
+              esac
+              record "$repo#$n" 2 "${line:-error}"
+            done
+          fi
+
+          rate_end=$(core_remaining)
+          used="?"
+          if [[ "$rate_start" =~ ^[0-9]+$ ]] && [[ "$rate_end" =~ ^[0-9]+$ ]] && [ "$rate_end" -le "$rate_start" ]; then
+            used=$((rate_start - rate_end))
+          fi
+          requests=$(wc -l < "$CALLS" | tr -d ' ')
+          final="scanned $scanned, documentation-only $docs, green $ready, waiting $waiting, not green $notgreen, $([ "$DRY" = yes ] && echo "would merge $would" || echo "merged $merged"), refused $refused, deferred $deferred, errors $errors, api requests $requests, core quota used $used (left ${rate_end:-?})"
+          say "$final"
+          { echo; echo "$final"; } >> "$SUMMARY"
+          [ "$errors" -eq 0 ] || exit 1
