@@ -72,8 +72,9 @@ name: Doc auto-merge sweep
 # A check-run whose external_id starts `<this repo>#<n>:<base>:<head>:` is
 # bound to PR #n (the gate, review-verdict). It counts for this PR only if n
 # is this PR and its key's head is the PR's current head. The delivery gate's
-# own check (GATE_CHECK, or any run from GATE_APP_ID) must ALSO carry the base
-# branch's LIVE tip, read in the same snapshot (git/ref/heads/<base>): the
+# own check (GATE_CHECK, or any run from GATE_APP_ID) must be bound this way
+# (an unbound or other-repository gate run is stale, never a pass) and must
+# ALSO carry the base branch's LIVE tip, read in the same snapshot (git/ref/heads/<base>): the
 # gate is the authority on base freshness (v2.10 re-evaluates every open PR on
 # each base push). Every other PR-bound check is matched on PR and head only
 # and its base field is ignored (Brad, 2026-10-04): review-verdict keys on the
@@ -100,16 +101,21 @@ name: Doc auto-merge sweep
 #
 # ── The merge ──────────────────────────────────────────────────────────────
 # The final snapshot reads the base tip FIRST and evaluates the PR-bound
-# checks and Vercel against it. The tip is re-read immediately before
+# checks and Vercel against it. Immediately before the merge the PR is read
+# once more (still open, not a draft, no hold label, same head, same branch,
+# same base ref: a change is refused with a warning), and the tip is re-read
+# immediately before
 # PUT /pulls/{n}/merge (merge_method squash, `sha` = head, so a push in
 # between makes GitHub refuse). A tip that moved is refused (a warning, no
 # merge; the next sweep evaluates the new tip); an unreadable tip is a red
 # run. After the merge the PR must read as merged and the squash commit's
 # first parent must be the pinned tip, else a red run (the merge stands but is
 # never unverified and silent). Residual (accepted, as in doc-auto-merge.yml):
-# a base push inside the final re-read-then-merge round trip (about a second)
-# is not prevented; the merge API has no expected-base parameter, and the
-# parent check reports it. No commit title or message is passed: GitHub's
+# a base push, hold label or retarget inside the final re-read-then-merge
+# round trip (about a second) is not prevented; the merge API has no
+# expected-base or expected-labels parameter, and the parent check reports a
+# moved base. A merge call that fails while the PR then reads as merged (a
+# lost response, or another merger won) gets the same parent check. No commit title or message is passed: GitHub's
 # squash defaults, exactly as the per-repo workflow merges. Never an admin
 # bypass, never native auto-merge.
 #
@@ -363,13 +369,17 @@ jobs:
               # candidate).
               runs=$(echo "$runs" | jq -c --arg repo "$REPO" --arg pr "$PR_NUMBER" --arg head "$HEAD" --arg tip "$BASE_TIP" \
                   --arg gate "$GATE_CHECK" --argjson gateapp "$GATE_APP_ID" '
+                  # A delivery-gate run (by name or App) counts ONLY when bound
+                  # to this candidate: an unbound, free-form or other-repo key
+                  # from the gate is stale, never a pass (Codex P1 on #82).
                   def binding:
-                    ([(.external_id // "") | strings
+                    ((.name == $gate) or (.app.id == $gateapp)) as $isgate
+                    | ([(.external_id // "") | strings
                       | capture("^(?<repo>[^#:/\\s]+/[^#:/\\s]+)#(?<n>[0-9]+):(?<rest>.*)$")] | .[0]) as $m
-                    | if $m == null or ($m.repo | ascii_downcase) != ($repo | ascii_downcase) then {bound: "none"}
+                    | if $m == null or ($m.repo | ascii_downcase) != ($repo | ascii_downcase) then
+                        (if $isgate then {bound: "stale", n: $pr, base: "?", head: "?", gate: true} else {bound: "none"} end)
                       elif $m.n != $pr then {bound: "other", n: $m.n}
                       else ([$m.rest | capture("^(?<base>[^:]*):(?<head>[0-9a-f]{40}):")] | .[0]) as $k
-                        | (.name == $gate or .app.id == $gateapp) as $isgate
                         | if $k != null and $k.head == $head and (($isgate | not) or $k.base == $tip)
                           then {bound: "current", n: $m.n}
                           else {bound: "stale", n: $m.n, base: ($k.base // "?"), head: ($k.head // "?"), gate: $isgate} end
@@ -498,8 +508,24 @@ jobs:
             if [ "$DRY" = "yes" ]; then
               finish would-merge "dry run: would squash-merge ${HEAD:0:7} onto ${PINNED:0:7} (documentation-only, ${FILE_COUNT} files, CI green)."
             fi
-            # Re-read the tip immediately before the merge call: the merge API
-            # pins only the head.
+            # Immediately before the merge call, re-read the PR (the merge API
+            # pins only the head: a hold label, a retarget or a draft added
+            # during the snapshot reads would not stop it; Codex P1s on #82),
+            # then the tip of the base it was evaluated against.
+            pr=$(api "repos/$REPO/pulls/$PR_NUMBER") || fail "could not re-read the PR right before merging; nothing merged"
+            recheck=$(echo "$pr" | jq -r --arg l "$HOLD_LABEL" --arg head "$HEAD" --arg base "$BASE_REF" --arg repo "$REPO" '
+                if .merged == true or .state != "open" then "it is no longer open"
+                elif .draft != false then "it became a draft"
+                elif (.labels | type) != "array" then "its labels are unreadable"
+                elif any(.labels[]; .name == $l) then "it is now held by the \($l) label"
+                elif (.head.sha // "") != $head then "its head moved"
+                elif (.head.repo.full_name // "") != $repo then "its branch is no longer in this repository"
+                elif (.base.ref // "") != $base then "it was retargeted from \($base) to \(.base.ref // "?")"
+                else "ok" end') || fail "could not check the PR right before merging; nothing merged"
+            if [ "$recheck" != "ok" ]; then
+              echo "::warning::$REPO#$PR_NUMBER: changed during the final snapshot (${recheck}); not merging."
+              finish refused "changed during the final snapshot: ${recheck}; not merged."
+            fi
             read_base_tip || fail "could not re-read the tip of ${BASE_REF} before merging (evaluated against ${PINNED:0:7}); nothing merged"
             if [ "$BASE_TIP" != "$PINNED" ]; then
               echo "::warning::$REPO#$PR_NUMBER: ${BASE_REF} moved from ${PINNED:0:7} to ${BASE_TIP:0:7} after the evaluation; not merging (the next sweep evaluates the new tip)."
@@ -508,21 +534,25 @@ jobs:
             say "$REPO#$PR_NUMBER: CI green on ${HEAD:0:7} against base ${PINNED:0:7}; squash-merging."
             echo . >> "$CALLS"
             # Never retried: the outcome is read back instead.
+            how="merged"
             if ! gh api -X PUT "repos/$REPO/pulls/$PR_NUMBER/merge" -f merge_method=squash -f sha="$HEAD" >/dev/null; then
-              if [ "$(api "repos/$REPO/pulls/$PR_NUMBER" --jq '.merged' || echo false)" = "true" ]; then
-                finish skip "merged by someone else (e.g. the per-repo workflow) first."
-              fi
-              fail "GitHub refused to merge ${HEAD:0:7} (a ruleset, a push that moved the head, or a conflict); nothing merged"
+              # The call failed, but the merge may have happened (a lost
+              # response, or another merger won): if the PR reads as merged,
+              # the same parent check applies (Codex P2 on #82).
+              merged=$(api "repos/$REPO/pulls/$PR_NUMBER" --jq '"\(.merged) \(.merge_commit_sha // "")"' || echo "unknown")
+              [ "${merged%% *}" = "true" ] || fail "GitHub refused to merge ${HEAD:0:7} (a ruleset, a push that moved the head, or a conflict); nothing merged"
+              how="reads as merged although the merge call failed (a lost response, or another merger won);"
+            else
+              merged=$(api "repos/$REPO/pulls/$PR_NUMBER" --jq '"\(.merged) \(.merge_commit_sha // "")"' || echo "unknown")
+              [ "${merged%% *}" = "true" ] || fail "the merge call returned success but the PR reads as not merged (${merged})"
             fi
-            merged=$(api "repos/$REPO/pulls/$PR_NUMBER" --jq '"\(.merged) \(.merge_commit_sha // "")"' || echo "unknown")
-            [ "${merged%% *}" = "true" ] || fail "the merge call returned success but the PR reads as not merged (${merged})"
             parent=$(api "repos/$REPO/commits/${merged#* }" --jq '.parents[0].sha // empty' || true)
             if ! [[ "$parent" =~ ^[0-9a-f]{40}$ ]]; then
               fail "merged as ${merged#* }, but its parent could not be read, so the evaluated base ${PINNED:0:7} is unconfirmed. The merge stands; check it"
             elif [ "$parent" != "$PINNED" ]; then
               fail "merged as ${merged#* } onto ${parent:0:7}, not the evaluated base ${PINNED:0:7}: the base moved inside the merge round trip. The merge stands; check it"
             fi
-            finish merged "merged as ${merged#* } onto ${PINNED:0:7} (documentation-only, CI green, no review required by policy)."
+            finish merged "${how} as ${merged#* } onto ${PINNED:0:7} (documentation-only, CI green, no review required by policy)."
           }
 
           # ── The sweep ────────────────────────────────────────────────────

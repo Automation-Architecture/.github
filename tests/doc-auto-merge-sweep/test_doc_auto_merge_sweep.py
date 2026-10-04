@@ -239,9 +239,10 @@ case("299 changed files: merges", world(one(), {f"{REPO}/pulls/7": pr(7, files=2
                                                     [{"filename": f"f/{i}.md"} for i in range(99)]]}}),
      merged={W7})
 case("0 changed files: not merged", world(one(), {f"{REPO}/pulls/7": pr(7, files=0), f"{REPO}/pulls/7/files": []}))
-case("draft never merges (search lagged)", one(draft=True), says="draft")
-case("hold label stops it (search lagged)", one(labels=("no-auto-merge",)), says="held by")
-case("labels unreadable: not merged", world(one(), {f"{REPO}/pulls/7": {**pr(7), "labels": None}}))
+case("draft never merges (search lagged)", one(draft=True), says="drafts never auto-merge")
+case("hold label stops it (search lagged)", one(labels=("no-auto-merge",)), says="a person merges it")
+case("labels unreadable: not merged", world(one(), {f"{REPO}/pulls/7": {**pr(7), "labels": None}}),
+     says="cannot be ruled out")
 case("fork PR never merges", one(head_repo="mallory/widget"), says="fork")
 case("already merged: nothing to do", world(one(), {f"{REPO}/pulls/7": pr(7, merged=True, state="closed")}))
 case("merge conflict: waits, no merge call", one(mergeable=False), says="merge conflict")
@@ -319,8 +320,16 @@ case("another PR's failing gate is the NEWEST run GitHub enforces: pending, not 
 case("unparseable key bound to this PR: pending",
      one(runs=[run_(GATE, slug="agency-delivery-gate", rid=5, app_id=GATE_APP, external_id=f"{REPO}#7:junk")],
          required=REQ_GATE), says="older candidate")
-case("gate keyed on another repo's PR #7 is not bound here (counts as unbound)",
-     one(runs=[gate("success", 5, 7, repo="acme/other", base=LAGGING)], required=REQ_GATE), merged={W7})
+case("gate keyed on another repo's PR #7: never a pass, pending",
+     one(runs=[gate("success", 5, 7, repo="acme/other")], required=REQ_GATE), says="older candidate")
+case("gate run with no external_id: never a pass, pending",
+     one(runs=[run_(GATE, slug="agency-delivery-gate", rid=5, app_id=GATE_APP)], required=REQ_GATE),
+     says="older candidate")
+case("gate App run with a free-form external_id: pending",
+     one(runs=[run_("gate-extra", slug="agency-delivery-gate", rid=5, app_id=GATE_APP, external_id="whatever")]),
+     says="older candidate")
+case("non-gate check bound to another repo's PR counts as unbound: merges",
+     one(runs=[verdict("success", 6, 7, repo="acme/other")], required=REQ_VERDICT), merged={W7})
 case("tip unreadable in pass 1: pending, no merge",
      one(runs=[gate("success", 5, 7)], required=REQ_GATE, repo_kw={"tip_value": "__error"}),
      says="could not read the tip")
@@ -346,10 +355,27 @@ case("merge reported but PR reads not merged: red",
      world(one(), {f"{REPO}/pulls/7@merged": pr(7)}), merged={W7}, exit_ok=False, says="reads as not merged")
 case("GitHub refuses the merge: red",
      world(one(), {"__merge_fails": [f"{REPO}/pulls/7/merge"]}), merged={W7}, exit_ok=False)
-case("merge refused because it was already merged by someone else: not red",
+case("merge call fails but the PR reads as merged onto the pinned tip: verified, not red",
      world(one(), {"__merge_fails": [f"{REPO}/pulls/7/merge"],
-                   f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7), pr(7, merged=True, state="closed")]}}),
-     merged={W7}, says="merged by someone else")
+                   f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7), pr(7), pr(7, merged=True, state="closed")]}}),
+     merged={W7}, says="although the merge call failed")
+case("merge call fails, PR reads as merged onto another parent: red",
+     world(one(), {"__merge_fails": [f"{REPO}/pulls/7/merge"],
+                   f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7), pr(7), pr(7, merged=True, state="closed")]},
+                   f"{REPO}/commits/{MERGE_SHA}": {"sha": MERGE_SHA, "parents": [{"sha": MOVED}]}}),
+     merged={W7}, exit_ok=False, says="not the evaluated base")
+case("hold label added right before the merge call: refused, no merge",
+     world(one(), {f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7), pr(7, labels=("no-auto-merge",))]}}),
+     says="now held by")
+case("retargeted right before the merge call: refused, no merge",
+     world(one(), {f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7), {**pr(7), "base": {"ref": "release", "sha": LAGGING}}]}}),
+     says="retargeted from main to release")
+case("made a draft right before the merge call: refused, no merge",
+     world(one(), {f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7), pr(7, draft=True)]}}), says="became a draft")
+case("head moved right before the merge call: refused, no merge",
+     world(one(), {f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7), pr(7, head=NEW_HEAD)]}}), says="head moved")
+case("PR unreadable right before the merge call: red, no merge",
+     world(one(), {f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7), "__error"]}}), exit_ok=False)
 case("CI turns red in the final snapshot: not merged",
      world(one(), {f"{REPO}/commits/{HEAD}/check-runs": {"__seq": [
          {"check_runs": [run_("unittest")]}, {"check_runs": [run_("unittest", "failure", rid=2)]}]}}),
