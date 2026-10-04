@@ -141,6 +141,12 @@ def gate(conclusion, rid, n, base=TIP, head=HEAD, repo=REPO):
                 external_id=f"{repo}#{n}:{base}:{head}:v2.10")
 
 
+def verdict(conclusion, rid, n, base=TIP, head=HEAD, repo=REPO):
+    """review-verdict.yml's check, bound to PR #n (keys on the pulls `.base.sha`)."""
+    return run_("review/verdict", conclusion, rid=rid, app_id=15368,
+                external_id=f"{repo}#{n}:{base}:{head}:review-verdict")
+
+
 def tip(sha):
     return {"ref": "refs/heads/main", "object": {"sha": sha, "type": "commit"}}
 
@@ -210,6 +216,7 @@ def case(name, fx, merged=(), exit_ok=True, env=None, says=None, not_says=None, 
 W7 = f"{REPO}#7"
 GREEN = [run_("unittest", rid=1), run_("lint", "skipped", rid=2)]
 REQ_GATE = [(GATE, GATE_APP)]
+REQ_VERDICT = [("review/verdict", 15368)]
 
 # ── Eligibility ────────────────────────────────────────────────────────────
 case("doc-only, no CI at all: merges", one(), merged={W7})
@@ -285,6 +292,24 @@ case("older-candidate run that FAILED: pending, never red",
      not_says="CI not green")
 case("bound check failed for the live candidate: not green",
      one(runs=[gate("failure", 5, 7)], required=REQ_GATE), says="not green")
+case("review/verdict bound to this PR and head, keyed on a stale base: counts, merges",
+     one(runs=[verdict("success", 6, 7, base=LAGGING)], required=REQ_VERDICT), merged={W7})
+case("review/verdict bound to this PR, older head: pending",
+     one(runs=[verdict("success", 6, 7, head=NEW_HEAD)], required=REQ_VERDICT), says="older candidate")
+case("review/verdict stale base + gate on live tip, both required: merges",
+     one(runs=[verdict("success", 6, 7, base=LAGGING), gate("success", 5, 7)], required=REQ_VERDICT + REQ_GATE),
+     merged={W7})
+case("review/verdict stale base + gate on a stale base: pending (gate is the base authority)",
+     one(runs=[verdict("success", 6, 7, base=LAGGING), gate("success", 5, 7, base=LAGGING)],
+         required=REQ_VERDICT + REQ_GATE), says="keyed on live tip")
+case("a run from the gate App under another name is held to the live tip too",
+     one(runs=[run_("gate-extra", slug="agency-delivery-gate", rid=5, app_id=GATE_APP,
+                    external_id=f"{REPO}#7:{LAGGING}:{HEAD}:v2.10")]), says="older candidate")
+case("a run named like the gate from another app is held to the live tip too",
+     one(runs=[run_(GATE, rid=5, app_id=777, external_id=f"{REPO}#7:{LAGGING}:{HEAD}:v2.10")]),
+     says="older candidate")
+case("review/verdict bound to ANOTHER PR does not count: pending",
+     one(runs=[verdict("success", 6, 8, base=LAGGING)], required=REQ_VERDICT), says="required check(s) not passed")
 case("gate bound to ANOTHER PR at the same head does not count: pending",
      one(runs=[gate("success", 5, 8)], required=REQ_GATE), says="required check(s) not passed")
 case("another PR's failing gate (older) is ignored for this PR: merges",
@@ -420,6 +445,7 @@ def static_checks():
     for k in ("DOC_ONLY_PATTERN", "HOLD_LABEL", "MAX_FILES", "VERCEL_CONTEXT_PATTERN", "IGNORED_CHECKS"):
         assert str(env[k]) == str(canon[k]), f"{k} must match doc-auto-merge.yml"
     assert str(env["MAX_MERGES"]) == "10"
+    assert env["GATE_CHECK"] == GATE and str(env["GATE_APP_ID"]) == str(GATE_APP), "the gate is the base authority"
     return env
 
 

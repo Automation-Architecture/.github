@@ -28,11 +28,9 @@ name: Doc auto-merge sweep
 # keys on the pulls API `.base.sha`, which lags the tip, so under the rule
 # below every gate run reads as an older candidate and no PR whose rules
 # require the gate would merge (fail closed, but useless). Turn the switch on
-# only after v2.10 is deployed and verified. review-verdict.yml binds its
-# check the same way (`<repo>#<pr>:<base>:<head>:review-verdict`) but still
-# keys on `.base.sha`; in a repo whose rules require review/verdict, a doc PR
-# whose `.base.sha` lags the tip waits here until review-verdict keys on the
-# live tip too (a follow-up; waiting is the safe side).
+# only after v2.10 is deployed and verified. Only the gate's own check is
+# held to the live tip (see "Freshness" below); other PR-bound checks such as
+# review/verdict are matched on PR and head alone (Brad, 2026-10-04).
 #
 # ── What qualifies ─────────────────────────────────────────────────────────
 # The canonical doc-auto-merge.yml definition, unchanged (keep in step with it
@@ -70,15 +68,21 @@ name: Doc auto-merge sweep
 # reviewer checks in IGNORED_CHECKS (no review is required).
 # Pending, missing, unreadable and non-success never merge.
 #
-# ── Freshness: PR-bound checks count only for the live candidate ──────────
-# A check-run whose external_id starts `<this repo>#<n>:` is bound to PR #n
-# (the gate, review-verdict). It counts for this PR only if n is this PR, its
-# key's head is the PR's current head AND its key's base is the base branch's
-# LIVE tip, read in the same snapshot (git/ref/heads/<base>). Any other run
-# bound to this PR (older head, older base, unparseable key) is an older
-# candidate: it reads as missing, so the PR waits for the producer to publish
-# for the live candidate (never green, never red). A run bound to ANOTHER PR
-# is ignored for this one, even at the same commit. external_id is opaque to
+# ── Freshness: PR-bound checks count only for the current candidate ───────
+# A check-run whose external_id starts `<this repo>#<n>:<base>:<head>:` is
+# bound to PR #n (the gate, review-verdict). It counts for this PR only if n
+# is this PR and its key's head is the PR's current head. The delivery gate's
+# own check (GATE_CHECK, or any run from GATE_APP_ID) must ALSO carry the base
+# branch's LIVE tip, read in the same snapshot (git/ref/heads/<base>): the
+# gate is the authority on base freshness (v2.10 re-evaluates every open PR on
+# each base push). Every other PR-bound check is matched on PR and head only
+# and its base field is ignored (Brad, 2026-10-04): review-verdict keys on the
+# pulls API `.base.sha`, which lags the tip, and the gate already vouches for
+# the base. Any other run bound to this PR (another head, a gate run on
+# another base, an unparseable key) is an older candidate: it reads as
+# missing, so the PR waits for the producer to publish for the current
+# candidate (never green, never red). A run bound to ANOTHER PR is ignored for
+# this one, even at the same commit. external_id is opaque to
 # GitHub, though: a ruleset enforces the newest run of a required check on
 # the commit whichever PR it belongs to, so a required check whose newest run
 # belongs to another PR or an older candidate and has not passed is pending.
@@ -197,6 +201,9 @@ jobs:
           MERGER_JOB: doc-auto-merge
           # app-slug/check-name, comma-separated: reviewers, not CI.
           IGNORED_CHECKS: "greptile-apps/Greptile Review"
+          # The delivery gate: the only PR-bound check held to the live base tip.
+          GATE_CHECK: "agency-delivery/gate"
+          GATE_APP_ID: "5021608"
           MAX_MERGES: "10"
           SETTLE_SECONDS: "60"
           RUN_BUDGET_SECONDS: "420"
@@ -214,6 +221,8 @@ jobs:
           HOLD_LABEL="${HOLD_LABEL:-no-auto-merge}"
           MERGER_JOB="${MERGER_JOB:-doc-auto-merge}"
           IGNORED_CHECKS="${IGNORED_CHECKS:-}"
+          GATE_CHECK="${GATE_CHECK:-agency-delivery/gate}"
+          [[ "${GATE_APP_ID:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::bad GATE_APP_ID '${GATE_APP_ID:-}'"; exit 1; }
           # The kill switch, failing closed: anything but exactly "true" plus
           # an explicit dry_run=false (or a schedule) is a dry run.
           DRY=yes
@@ -350,17 +359,20 @@ jobs:
                 || { echo "pending:could not read check-runs"; return 0; }
               # Each run gets `_b`, its binding: none (not bound to a PR of this
               # repository), other (another PR), current (this PR, this head,
-              # this live tip) or stale (this PR, any other candidate).
-              runs=$(echo "$runs" | jq -c --arg repo "$REPO" --arg pr "$PR_NUMBER" --arg head "$HEAD" --arg tip "$BASE_TIP" '
+              # and for the gate this live tip) or stale (this PR, any other
+              # candidate).
+              runs=$(echo "$runs" | jq -c --arg repo "$REPO" --arg pr "$PR_NUMBER" --arg head "$HEAD" --arg tip "$BASE_TIP" \
+                  --arg gate "$GATE_CHECK" --argjson gateapp "$GATE_APP_ID" '
                   def binding:
                     ([(.external_id // "") | strings
                       | capture("^(?<repo>[^#:/\\s]+/[^#:/\\s]+)#(?<n>[0-9]+):(?<rest>.*)$")] | .[0]) as $m
                     | if $m == null or ($m.repo | ascii_downcase) != ($repo | ascii_downcase) then {bound: "none"}
                       elif $m.n != $pr then {bound: "other", n: $m.n}
-                      else ([$m.rest | capture("^(?<base>[0-9a-f]{40}):(?<head>[0-9a-f]{40}):")] | .[0]) as $k
-                        | if $k != null and $k.head == $head and $k.base == $tip
+                      else ([$m.rest | capture("^(?<base>[^:]*):(?<head>[0-9a-f]{40}):")] | .[0]) as $k
+                        | (.name == $gate or .app.id == $gateapp) as $isgate
+                        | if $k != null and $k.head == $head and (($isgate | not) or $k.base == $tip)
                           then {bound: "current", n: $m.n}
-                          else {bound: "stale", n: $m.n, base: ($k.base // "?"), head: ($k.head // "?")} end
+                          else {bound: "stale", n: $m.n, base: ($k.base // "?"), head: ($k.head // "?"), gate: $isgate} end
                       end;
                   map(. + {_b: binding})') || { echo "pending:could not classify the check-runs"; return 0; }
               # Newest cancelled Actions jobs among the runs that count for this
@@ -394,7 +406,7 @@ jobs:
               fi
               jq -rn --argjson runs "$runs" --argjson st "$statuses" --argjson rules "$rules" \
                   --argjson branch "$branch" --arg job "$MERGER_JOB" --arg ign "$IGNORED_CHECKS" \
-                  --argjson selfids "$self_ids" --argjson vercel "$VERCEL_REQUIRED" --arg tip "$BASE_TIP" '
+                  --argjson selfids "$self_ids" --argjson vercel "$VERCEL_REQUIRED" --arg tip "$BASE_TIP" --arg head "$HEAD" --arg gate "$GATE_CHECK" '
                 def ok: IN("success", "neutral", "skipped");
                 def newest: group_by([(.app.slug // ""), .name]) | map(max_by(.id));
                 def counts: ._b.bound == "none" or ._b.bound == "current";
@@ -419,7 +431,7 @@ jobs:
                       and (((.app.slug // "") + "/" + .name) as $k | $ignored | index($k) | not)))) as $judged
                 | ($judged | map(select(counts))) as $ci
                 | ([$judged[] | select(._b.bound == "stale")
-                    | "\(.name) (bound to an older candidate of this PR: base \(._b.base[0:7]), head \(._b.head[0:7]); waiting for a run keyed on live tip \($tip[0:7]))"]) as $stale
+                    | "\(.name) (bound to an older candidate of this PR: base \(._b.base[0:7]), head \(._b.head[0:7]); waiting for a run for head \($head[0:7])\(if ._b.gate then " keyed on live tip \($tip[0:7])" else "" end))"]) as $stale
                 | ([$rules[]? | select(.type == "required_status_checks")
                     | .parameters.required_status_checks[]? | {context, app: .integration_id}]
                    + [($branch.protection.required_status_checks.checks // [])[] | {context, app: .app_id}]
@@ -434,7 +446,8 @@ jobs:
                                              and ($r.app == null or $r.app == -1))] | length) == 0)
                     | $r.context
                       + (if any($runs[]; .name == $r.context and ._b.bound == "stale")
-                         then " (bound to an older candidate of this PR; waiting for a run keyed on live tip \($tip[0:7]))"
+                         then " (bound to an older candidate of this PR; waiting for a run for head \($head[0:7])"
+                              + (if $r.context == $gate then " keyed on live tip \($tip[0:7])" else "" end) + ")"
                          else "" end)]
                    + [$vercel[] | . as $c
                       | select([$st[] | select(.context == $c and .state == "success")] | length == 0)
