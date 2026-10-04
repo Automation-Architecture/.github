@@ -78,7 +78,9 @@ name: Doc auto-merge sweep
 # judged in pass 1 AND again in the final snapshot after the settle:
 #   (a) Codex finished on the current head: a row of Codex's live summary
 #       comment (by CODEX_BOT via the CODEX_APP App, opening with
-#       `<!-- codex-pull-request-review-summary -->`) that is
+#       `<!-- codex-pull-request-review-summary -->`, and last edited by the
+#       Codex App itself: GraphQL editor and newest edit, as in
+#       review-verdict.yml, since a writer can edit it) that is
 #       `✅ **Completed**` and names a 7-40 hex prefix of the head, with no
 #       other row for the head still Running; or a Codex review object with
 #       commit_id = head that carries findings (review-verdict.yml's
@@ -403,7 +405,7 @@ jobs:
             # clean and timeout may merge; blocked never does (a person must);
             # wait is the next sweep. Anything unreadable is wait, never a merge.
             codex_state() {
-              local comments reviews inline hdate now after="" page=0 page_json found blocking="[]"
+              local comments reviews inline hdate now after="" page=0 page_json found blocking="[]" verified="[]" node meta ok
               local -a after_arg
               comments=$(api --paginate "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --jq '.[]' | jq -s '.') \
                 || { echo "wait:could not read the PR comments, so Codex activity cannot be ruled out"; return 0; }
@@ -445,12 +447,43 @@ jobs:
                 after=$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.endCursor // empty')
                 [ -n "$after" ] || { echo "wait:the review threads report another page but no cursor"; return 0; }
               done
+              # A writer can edit Codex's summary comment, and the REST object
+              # still names the bot and App, so a row counts only from a summary
+              # that Codex itself last edited (GraphQL editor and newest edit),
+              # exactly review-verdict.yml's check (Codex P2 on #84). One that
+              # someone else edited is ignored; an unreadable one is a wait.
+              for node in $(echo "$comments" | jq -r --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" '
+                  .[] | select((.user.login // "") == $bot and (.user.type // "") == "Bot"
+                    and (.performed_via_github_app.slug // "") == $app
+                    and ((.body // "") | startswith("<!-- codex-pull-request-review-summary -->"))) | .node_id // "?"'); do
+                [[ "$node" =~ ^[A-Za-z0-9_=-]{1,100}$ ]] || { echo "wait:a Codex review summary has no readable node_id"; return 0; }
+                # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
+                meta=$(api graphql -f id="$node" -f query='
+                    query($id: ID!) { node(id: $id) { ... on IssueComment {
+                      lastEditedAt author { login } editor { login }
+                      userContentEdits(first: 1) { nodes { editor { login } } } } } }') \
+                  || { echo "wait:could not read who last edited the Codex review summary"; return 0; }
+                ok=$(echo "$meta" | jq -r --arg app "$CODEX_APP" '
+                  .data.node as $c
+                  | if $c == null then "no"
+                    elif ($c.author.login // "") != $app then "no"
+                    elif $c.lastEditedAt == null then "yes"
+                    elif ($c.editor.login // "") != $app then "no"
+                    elif (($c.userContentEdits.nodes // []) | length) == 0 then "no"
+                    elif ($c.userContentEdits.nodes[0].editor.login // "") != $app then "no"
+                    else "yes" end') || { echo "wait:could not evaluate who last edited the Codex review summary"; return 0; }
+                if [ "$ok" = "yes" ]; then
+                  verified=$(jq -cn --argjson v "$verified" --arg n "$node" '$v + [$n]')
+                else
+                  say "$REPO#$PR_NUMBER: Codex review summary ${node} was last edited by someone other than Codex; its rows are ignored." >&2
+                fi
+              done
               # The head commit date: the earliest the head can have been pushed.
               # Unreadable leaves it empty, which only matters for the timeout.
               hdate=$(api "repos/$REPO/git/commits/$HEAD" --jq '.committer.date // empty' || true)
               now=$(date -u +%s)
               jq -rn --argjson comments "$comments" --argjson reviews "$reviews" --argjson inline "$inline" \
-                  --argjson threads "$blocking" --arg head "$HEAD" --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
+                  --argjson threads "$blocking" --argjson verified "$verified" --arg head "$HEAD" --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
                   --arg skip "$REVIEW_SKIP_PATTERN" --arg updated "${PR_UPDATED:-}" --arg hdate "${hdate:-}" \
                   --argjson now "$now" --argjson wait "$DOC_CODEX_WAIT_MINUTES" '
                 def ts: if type == "string" and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}")
@@ -480,7 +513,8 @@ jobs:
                 # naming this head (a 7-40 hex prefix of it).
                 | ([$comments[] | select(isbot and (.user.type // "") == "Bot"
                       and (.performed_via_github_app.slug // "") == $app
-                      and ((.body // "") | startswith("<!-- codex-pull-request-review-summary -->")))
+                      and ((.body // "") | startswith("<!-- codex-pull-request-review-summary -->"))
+                      and (.node_id as $n | $verified | index($n)))
                     | (.body | [split("\n")[] | select(startswith("|"))] | .[2:])[]
                     | (capture("\\A\\| [^|]+ \\| (?<status>[^|]*) \\| `(?<sha>[0-9a-f]{7,40})` \\| [^|]+ \\|\\z") // {status: null, sha: null})
                   ]) as $rows

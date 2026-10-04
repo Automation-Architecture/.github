@@ -199,7 +199,7 @@ def summary(sha, status="completed", at=None):
     body = ("<!-- codex-pull-request-review-summary -->\n\n## Codex Review Summary\n\n"
             "| Review | Status | Commit | Review trigger |\n| --- | --- | --- | --- |\n"
             f"| 📝 **Code Review** | {cell} | `{sha[:7]}` | PR opened |\n\n\n<details>about</details>")
-    return {"id": 900, "user": {"login": CODEX, "type": "Bot"},
+    return {"id": 900, "node_id": "IC_900", "user": {"login": CODEX, "type": "Bot"},
             "performed_via_github_app": {"slug": "chatgpt-codex-connector"}, "body": body,
             "created_at": ago(110), "updated_at": at}
 
@@ -235,10 +235,19 @@ def threads_fx(repo, n, nodes=()):
         "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": list(nodes)}}}}}
 
 
+def editors(last="chatgpt-codex-connector", newest="chatgpt-codex-connector", edited=True):
+    """GraphQL answer for who last edited a comment (review-verdict's check)."""
+    return {"data": {"node": {"lastEditedAt": ago(100) if edited else None,
+                              "author": {"login": "chatgpt-codex-connector"}, "editor": {"login": last} if edited else None,
+                              "userContentEdits": {"nodes": [{"editor": {"login": newest}}] if edited else []}}}}
+
+
 def codex_fx(n, repo=REPO, head=HEAD, comments=None, reviews=(), inline=(), threads=(), head_date=None):
     """Codex activity on PR #n. Default: the summary shows `head` Completed, nothing open."""
+    comments = list(comments) if comments is not None else [summary(head)]
     return {
-        f"{repo}/issues/{n}/comments": list(comments) if comments is not None else [summary(head)],
+        **{f"graphql/{c['node_id']}/null": editors() for c in comments if c.get("node_id")},
+        f"{repo}/issues/{n}/comments": comments,
         f"{repo}/pulls/{n}/reviews": list(reviews),
         f"{repo}/pulls/{n}/comments": list(inline),
         f"{repo}/git/commits/{head}": {"sha": head, "committer": {"date": head_date or ago(120)}},
@@ -513,6 +522,18 @@ case("unreadable summary row: waits", cx(comments=[{**summary(HEAD), "body": sum
 case("summary comment not from the Codex App does not count: timeout path",
      world(cx(comments=[{**summary(HEAD), "performed_via_github_app": None}], head_date=ago(4)),
            {f"{REPO}/pulls/7": pr(7, updated=ago(4))}), says="Codex posted nothing", merge_calls=0)
+case("summary edited by a writer (forged Completed row): ignored, waits for the timeout",
+     world(cx(head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, updated=ago(4)), "graphql/IC_900/null": editors(last="mallory")}),
+     says="last edited by someone other than Codex", merge_calls=0)
+case("summary whose newest edit is by a writer: ignored",
+     world(cx(head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, updated=ago(4)),
+                                  "graphql/IC_900/null": editors(newest="mallory")}), says="of 15 min", merge_calls=0)
+case("summary never edited (Codex wrote it Completed): counts", world(cx(), {"graphql/IC_900/null": editors(edited=False)}),
+     merged={W7})
+case("summary editor unreadable: waits", world(cx(), {"graphql/IC_900/null": "__error"}),
+     says="could not read who last edited", merge_calls=0)
+case("forged summary over an open P1: still blocked",
+     world(cx(threads=[thread("P1")]), {"graphql/IC_900/null": editors(last="mallory")}), says="left for a person")
 case("comments unreadable: waits", world(cx(), {f"{REPO}/issues/7/comments": "__error"}), says="could not read the PR comments")
 case("reviews unreadable: waits", world(cx(), {f"{REPO}/pulls/7/reviews": "__error"}), says="could not read the PR reviews")
 case("inline comments unreadable: waits", world(cx(), {f"{REPO}/pulls/7/comments": "__error"}),
@@ -717,9 +738,9 @@ def main():
                 if isinstance(v, dict) and "number" in v:
                     ok = ok and c.get("sha") == v["head"]["sha"]
             if says is not None:
-                ok = ok and says in out.stdout
+                ok = ok and says in out.stdout + out.stderr
             if not_says is not None:
-                ok = ok and not_says not in out.stdout
+                ok = ok and not_says not in out.stdout + out.stderr
             failures += not ok
             print(f"{'PASS' if ok else 'FAIL'}  {name}  (merged {sorted(got)}, exit {out.returncode})")
             if os.environ.get("VERBOSE"):
