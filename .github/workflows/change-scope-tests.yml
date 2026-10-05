@@ -1,0 +1,24 @@
+name: Change scope tests
+
+on:
+  pull_request:
+    paths:
+      - actions/change-scope/**
+      - .github/workflows/change-scope-tests.yml
+      - tests/change-scope/**
+  push:
+    branches: [main]
+    paths:
+      - actions/change-scope/**
+      - .github/workflows/change-scope-tests.yml
+      - tests/change-scope/**
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 tests/change-scope/test_change_scope.py
