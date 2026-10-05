@@ -1,0 +1,282 @@
+name: Auto-merge setting guard
+
+# LIVES ONLY IN Automation-Architecture/.github. Not a canonical copy: never
+# sync it into a repo (one run here covers the whole org). This repository is
+# public, so the run's own minutes are free.
+#
+# Why (Brad approved 2026-10-05): the per-repo doc-auto-merge.yml copies,
+# which carried event-driven handlers that disarmed GitHub's native
+# auto-merge, are being deleted in favour of the central sweeps. That is safe
+# only while the repository setting "Allow auto-merge" (REST allow_auto_merge,
+# GraphQL autoMergeAllowed) is OFF on every repo: with it on, anyone can arm
+# native auto-merge on a PR and GitHub merges it as soon as the ruleset is
+# satisfied, bypassing the Codex verdict, the hold label and the doc merger's
+# checks. It was off on all 107 non-archived repos on 2026-10-05.
+#
+# ── What it does ──────────────────────────────────────────────────────────
+# Once a day it lists EVERY repository of the org through GraphQL
+# (organization.repositories, paginated; the REST /orgs/{org}/repos list
+# missed a repo on 2026-10-05) and reads autoMergeAllowed. A non-archived
+# repo with it on is a finding. Archived repos are read-only, so they are
+# listed in the summary for information and never alert.
+#
+# If any repo is flagged it opens, or updates, ONE issue in this repository,
+# titled ISSUE_TITLE and labelled ALERT_LABEL (created if missing), listing the
+# repos and why the setting must stay off. The body is rewritten only when the
+# list changes; a closed issue is reopened rather than duplicated. When a later
+# run finds no flagged repo, the open issue gets a closing comment and is
+# closed. Only issues written by github-actions[bot] count: this repository is
+# public, so anyone can open an issue with the same title or label.
+#
+# The guard only reports. It never changes a repository setting.
+#
+# ── Fails closed ──────────────────────────────────────────────────────────
+# A missing token, a failed or malformed GraphQL page, a GraphQL `errors`
+# field, a null node, a non-boolean autoMergeAllowed or isArchived, a
+# duplicate repo, a page loop that does not end, a listing whose length is not
+# the reported totalCount, a totalCount that differs from the org's REST
+# repository counts (public_repos + total_private_repos, a second independent
+# source), or a listing without this repository makes the run RED. A red run is
+# the alert that the guard itself is broken.
+#
+# ── Credentials ───────────────────────────────────────────────────────────
+# Reading the settings of other private repos needs an org-wide credential.
+# The only one here is AAA_ORG_TOKEN (web3sea, an org owner; classic PAT;
+# 1Password vault aaa-APIs, item aaa-org-token), the same token the org-wide
+# sweeps use. It is used only in the first step, only for GET requests (the
+# GraphQL query is a read), and it never meets code from a PR: the job runs
+# only on schedule or a dispatch of main. Every write (the issue, its comments
+# and the label) uses GITHUB_TOKEN, whose only permission is issues: write.
+#
+# ── Triggers ──────────────────────────────────────────────────────────────
+# Daily at 05:43 UTC, and workflow_dispatch from main only (the job
+# condition: `--ref <branch>` would run a branch's copy with the PAT).
+# `dry_run` lists and reports without touching the issue.
+#
+# Observability: one line per run,
+# `auto-merge-setting-guard: checked N non-archived repos (A archived); flagged K: ...`,
+# the list in the job summary, and the issue. Watch for: no run on a day
+# (schedule dropped), a red run (broken guard), an open issue with label
+# ALERT_LABEL (a repo has native auto-merge back on).
+
+on:
+  schedule:
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List and summarize only; never write to the issue"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-setting-guard
+  cancel-in-progress: false
+
+env:
+  ALERT_LABEL: "auto-merge-setting"
+  ISSUE_TITLE: "Native auto-merge is enabled on org repositories"
+  # A hard stop for the page loop (100 repos a page).
+  MAX_PAGES: "50"
+
+jobs:
+  check:
+    if: github.repository == 'Automation-Architecture/.github' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: List every org repo's auto-merge setting (org PAT, read-only)
+        id: list
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+          SELF_REPO: ${{ github.repository }}
+          REPORT_FILE: ${{ runner.temp }}/auto-merge-setting-report.json
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+          OUT="${GITHUB_OUTPUT:-/dev/null}"
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::AAA_ORG_TOKEN is not available; cannot read the org's repository settings."; exit 1; }
+          [[ "$ORG" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::bad org"; exit 1; }
+          [[ "$SELF_REPO" == "$ORG/"* ]] || { echo "::error::bad repository"; exit 1; }
+          [[ "${MAX_PAGES:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::MAX_PAGES must be a positive whole number"; exit 1; }
+          case "${DRY_RUN:-false}" in true|false) ;; *) echo "::error::bad dry_run"; exit 1 ;; esac
+
+          # All repositories, archived included: totalCount then matches the
+          # REST org counts, which include archived repos.
+          # shellcheck disable=SC2016 # GraphQL variables, not shell ones
+          QUERY='query($org: String!, $after: String) {
+            organization(login: $org) {
+              repositories(first: 100, after: $after, orderBy: {field: NAME, direction: ASC}) {
+                totalCount
+                pageInfo { hasNextPage endCursor }
+                nodes { nameWithOwner isArchived autoMergeAllowed }
+              }
+            }
+          }'
+          nodes="[]"; total=""; after=""; page=0
+          while :; do
+            page=$((page + 1))
+            [ "$page" -le "$MAX_PAGES" ] || { echo "::error::the repository listing did not end within $MAX_PAGES pages"; exit 1; }
+            args=(-F org="$ORG" -f query="$QUERY")
+            [ -z "$after" ] || args+=(-f after="$after")
+            if ! resp=$(gh api graphql "${args[@]}"); then
+              echo "::error::GraphQL repository listing failed on page $page"; exit 1
+            fi
+            if ! conn=$(jq -ce '
+                if type != "object" then error("not an object")
+                elif (.errors // []) != [] then error("GraphQL errors: " + (.errors | tojson))
+                else .data.organization.repositories end
+                | if type != "object" then error("no repositories connection") else . end
+                | if (.totalCount | type) != "number" then error("totalCount") else . end
+                | if (.nodes | type) != "array" then error("nodes") else . end
+                | if (.pageInfo.hasNextPage | type) != "boolean" then error("hasNextPage") else . end
+                | .nodes |= map(
+                    if type != "object" then error("a null or non-object node")
+                    elif (.nameWithOwner | type) != "string" then error("nameWithOwner")
+                    elif (.isArchived | type) != "boolean" then error("isArchived on \(.nameWithOwner)")
+                    elif (.autoMergeAllowed | type) != "boolean" then error("autoMergeAllowed on \(.nameWithOwner)")
+                    else {name: .nameWithOwner, archived: .isArchived, on: .autoMergeAllowed} end)' <<<"$resp"); then
+              echo "::error::GraphQL page $page is malformed; see the jq error above"; exit 1
+            fi
+            t=$(jq -r '.totalCount' <<<"$conn")
+            if [ -z "$total" ]; then total=$t
+            elif [ "$t" != "$total" ]; then echo "::error::totalCount changed during the listing ($total -> $t); retry later"; exit 1
+            fi
+            nodes=$(jq -c --argjson add "$(jq -c '.nodes' <<<"$conn")" '. + $add' <<<"$nodes")
+            [ "$(jq -r '.pageInfo.hasNextPage' <<<"$conn")" = true ] || break
+            after=$(jq -r '.pageInfo.endCursor // empty' <<<"$conn")
+            [ -n "$after" ] || { echo "::error::page $page has a next page but no endCursor"; exit 1; }
+          done
+
+          # Completeness: the listing is exactly totalCount distinct repos, and
+          # totalCount agrees with the org's REST counts (an independent source).
+          got=$(jq 'length' <<<"$nodes")
+          distinct=$(jq 'map(.name) | unique | length' <<<"$nodes")
+          [ "$got" = "$total" ] || { echo "::error::listed $got repos but totalCount is $total; the listing is incomplete"; exit 1; }
+          [ "$distinct" = "$got" ] || { echo "::error::the listing repeats a repository ($distinct distinct of $got)"; exit 1; }
+          if ! counts=$(gh api "orgs/$ORG" --jq '[.public_repos, .total_private_repos] | @json'); then
+            echo "::error::reading the org's repository counts failed"; exit 1
+          fi
+          rest=$(jq -r 'if (map(type) == ["number", "number"]) then add else error("missing counts") end' <<<"$counts" 2>/dev/null) \
+            || { echo "::error::the org's REST repository counts are missing (public_repos, total_private_repos): $counts"; exit 1; }
+          [ "$rest" = "$total" ] || { echo "::error::GraphQL lists $total repos but REST counts $rest (public_repos + total_private_repos); not trusting either"; exit 1; }
+          jq -e --arg self "$SELF_REPO" 'any(.[]; .name == $self)' <<<"$nodes" > /dev/null \
+            || { echo "::error::the listing does not include $SELF_REPO; not trusting it"; exit 1; }
+
+          jq -n --argjson n "$nodes" '{
+              checked: ($n | map(select(.archived | not)) | length),
+              archived: ($n | map(select(.archived)) | length),
+              flagged: ($n | map(select((.archived | not) and .on) | .name) | sort),
+              archived_on: ($n | map(select(.archived and .on) | .name) | sort)
+            }' > "$REPORT_FILE"
+          jq -r '"auto-merge-setting-guard: checked \(.checked) non-archived repos (\(.archived) archived); flagged \(.flagged | length)"
+              + (if (.flagged | length) > 0 then ": " + (.flagged | join(", ")) else "" end)
+              + (if (.archived_on | length) > 0 then "; archived with it on (ignored): " + (.archived_on | join(", ")) else "" end)' "$REPORT_FILE"
+          jq -r '"### Native auto-merge setting\n\nChecked \(.checked) non-archived repositories (\(.archived) archived repositories skipped).\n\n"
+              + (if (.flagged | length) == 0 then "No repository allows native auto-merge.\n"
+                 else "**Allow auto-merge is ON in:**\n\n" + (.flagged | map("- `\(.)`") | join("\n")) + "\n" end)
+              + (if (.archived_on | length) > 0 then "\nArchived, setting on, ignored (read-only): " + (.archived_on | map("`\(.)`") | join(", ")) + "\n" else "" end)' \
+              "$REPORT_FILE" >> "$SUMMARY"
+          echo "dry_run=$DRY_RUN" >> "$OUT"
+
+      - name: Open, update or close the guard issue (GITHUB_TOKEN)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPORT_FILE: ${{ runner.temp }}/auto-merge-setting-report.json
+          BODY_FILE: ${{ runner.temp }}/auto-merge-setting-body.md
+          DRY_RUN: ${{ steps.list.outputs.dry_run }}
+          BOT_LOGIN: "github-actions[bot]"
+        run: |
+          set -euo pipefail
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+          say() { echo "auto-merge-setting-guard: $*"; echo "$*" >> "$SUMMARY"; }
+          [[ "$REPO" =~ ^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$ ]] || { echo "::error::bad repo"; exit 1; }
+          [[ "$ALERT_LABEL" =~ ^[a-z0-9-]+$ ]] || { echo "::error::bad label"; exit 1; }
+          case "${DRY_RUN:-}" in true|false) ;; *) echo "::error::bad dry_run"; exit 1 ;; esac
+          flagged=$(jq -ce '.flagged | if type == "array" and all(.[]; type == "string") then . else error("flagged") end' "$REPORT_FILE") \
+            || { echo "::error::bad report"; exit 1; }
+          count=$(jq 'length' <<<"$flagged")
+          # The repo list, sorted, is the issue's identity for "changed or not".
+          LIST_MARK="<!-- auto-merge-setting-guard:repos=$(jq -r 'join(",")' <<<"$flagged") -->"
+          RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/$REPO/actions/runs/${GITHUB_RUN_ID:-0}"
+
+          # The guard issue: ours (bot-authored, labelled, exact title), open
+          # first, else the newest closed one.
+          issues=$(gh api --paginate "repos/$REPO/issues?labels=$ALERT_LABEL&state=all&per_page=100") \
+            || { echo "::error::listing the guard issues failed"; exit 1; }
+          issue=$(jq -cs --arg t "$ISSUE_TITLE" --arg bot "$BOT_LOGIN" '
+              [add // [] | .[] | select((.pull_request | not) and .title == $t and .user.login == $bot)]
+              | (map(select(.state == "open")) | sort_by(.number) | first) // (sort_by(.number) | last) // empty
+              | {number, state, body: (.body // "")}' <<<"$issues") \
+            || { echo "::error::the guard issue list is malformed"; exit 1; }
+          n=""; state=""
+          if [ -n "$issue" ]; then
+            n=$(jq -r '.number' <<<"$issue"); state=$(jq -r '.state' <<<"$issue")
+            [[ "$n" =~ ^[0-9]+$ ]] || { echo "::error::bad issue number"; exit 1; }
+          fi
+
+          if [ "$count" -eq 0 ]; then
+            if [ "$state" != open ]; then say "No repository allows native auto-merge; no open guard issue."; exit 0; fi
+            if [ "$DRY_RUN" = true ]; then say "Dry run: would close #$n (no repository allows native auto-merge); nothing written."; exit 0; fi
+            printf 'No non-archived repository allows native auto-merge any more. Closing.\n\nRun: %s\n' "$RUN_URL" > "$BODY_FILE"
+            gh api -X POST "repos/$REPO/issues/$n/comments" -F body=@"$BODY_FILE" > /dev/null \
+              || { echo "::error::commenting on #$n failed"; exit 1; }
+            gh api -X PATCH "repos/$REPO/issues/$n" -f state=closed -f state_reason=completed > /dev/null \
+              || { echo "::error::closing #$n failed"; exit 1; }
+            say "No repository allows native auto-merge: closed #$n."
+            exit 0
+          fi
+
+          {
+            echo "$LIST_MARK"
+            echo "The repository setting **Allow auto-merge** (REST \`allow_auto_merge\`, GraphQL \`autoMergeAllowed\`) is ON in $count non-archived repositor$( [ "$count" -eq 1 ] && echo y || echo ies):"
+            echo
+            jq -r '.[] | "- [`\(.)`](https://github.com/\(.)/settings)"' <<<"$flagged"
+            echo
+            echo "**Why it must stay off.** Org PRs merge only through the central sweeps, after a completed Codex review on the head, no open P0/P1 finding and green CI. The per-repo doc-auto-merge.yml copies that disarmed native auto-merge are being removed. With this setting on, anyone can arm native auto-merge on a PR and GitHub merges it as soon as the ruleset is satisfied, bypassing the Codex verdict, the hold label and the doc merger's checks."
+            echo
+            echo "**To fix:** in each repository, Settings > General > Pull Requests, untick \"Allow auto-merge\" (or \`gh api -X PATCH repos/<owner>/<repo> -F allow_auto_merge=false\`). Check that no open PR has auto-merge armed. This issue closes itself on the first daily run that finds none."
+            echo
+            echo "Reported by auto-merge-setting-guard.yml (report only; it never changes settings). Last run: $RUN_URL"
+          } > "$BODY_FILE"
+          names=$(jq -r 'join(", ")' <<<"$flagged")
+
+          if [ -n "$issue" ] && [ "$state" = open ] && jq -e --arg m "$LIST_MARK" '.body | contains($m)' <<<"$issue" > /dev/null; then
+            say "Still flagged ($names); #$n is open and up to date."
+            exit 0
+          fi
+          if [ "$DRY_RUN" = true ]; then say "Dry run: would report $count repo(s) ($names) on \"$ISSUE_TITLE\"; nothing written."; exit 0; fi
+
+          # The label, created if missing (a 404 only; any other error is red).
+          if ! gh api "repos/$REPO/labels/$ALERT_LABEL" > /dev/null 2> "$RUNNER_TEMP/label.err"; then
+            grep -q 'HTTP 404' "$RUNNER_TEMP/label.err" || { cat "$RUNNER_TEMP/label.err" >&2; echo "::error::reading label $ALERT_LABEL failed"; exit 1; }
+            gh api -X POST "repos/$REPO/labels" -f name="$ALERT_LABEL" -f color=d93f0b \
+              -f description="An org repo allows native auto-merge (auto-merge-setting-guard.yml)" > /dev/null \
+              || { echo "::error::creating label $ALERT_LABEL failed"; exit 1; }
+          fi
+
+          if [ -z "$issue" ]; then
+            out=$(gh api -X POST "repos/$REPO/issues" -f title="$ISSUE_TITLE" -F body=@"$BODY_FILE" -f "labels[]=$ALERT_LABEL") \
+              || { echo "::error::opening the guard issue failed"; exit 1; }
+            created=$(jq -r '.number // empty' <<<"$out")
+            [[ "$created" =~ ^[0-9]+$ ]] || { echo "::error::opening the guard issue returned no issue number"; exit 1; }
+            say "Flagged $count repo(s) ($names): opened #$created."
+            exit 0
+          fi
+          if [ "$state" != open ]; then
+            gh api -X PATCH "repos/$REPO/issues/$n" -f state=open > /dev/null \
+              || { echo "::error::reopening #$n failed"; exit 1; }
+          fi
+          gh api -X PATCH "repos/$REPO/issues/$n" -F body=@"$BODY_FILE" > /dev/null \
+            || { echo "::error::updating #$n failed"; exit 1; }
+          printf 'The flagged list is now: %s\n\nRun: %s\n' "$names" "$RUN_URL" > "$BODY_FILE.comment"
+          gh api -X POST "repos/$REPO/issues/$n/comments" -F body=@"$BODY_FILE.comment" > /dev/null \
+            || { echo "::error::commenting on #$n failed"; exit 1; }
+          say "Flagged $count repo(s) ($names): $( [ "$state" = open ] && echo updated || echo reopened ) #$n."

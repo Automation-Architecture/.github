@@ -1,0 +1,32 @@
+name: Auto-merge setting guard tests
+
+# Runs the offline suite for auto-merge-setting-guard.yml. It runs the PR's own
+# copy of the workflow's step scripts against a stub `gh` with fixture JSON
+# for the GraphQL repository listing: no token, no network calls to GitHub's API,
+# read-only permissions.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/auto-merge-setting-guard.yml
+      - .github/workflows/auto-merge-setting-guard-tests.yml
+      - tests/auto-merge-setting-guard/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/auto-merge-setting-guard.yml
+      - .github/workflows/auto-merge-setting-guard-tests.yml
+      - tests/auto-merge-setting-guard/**
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: uv run --python 3.12 --with 'PyYAML>=6,<7' python tests/auto-merge-setting-guard/test_auto_merge_setting_guard.py
