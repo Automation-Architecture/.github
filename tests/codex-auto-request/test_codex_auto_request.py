@@ -32,6 +32,7 @@ COMMITTED = "2026-10-01T09:58:00Z"   # head commit's committer date
 PUSHED = "2026-10-01T10:00:00Z"      # synchronize event time
 RETARGET = "2026-10-01T10:30:00Z"    # edited (base changed) event time
 READY = "2026-10-01T10:30:00Z"       # ready_for_review event time
+LABELED = "2026-10-01T10:40:00Z"     # labeled (hold label) event time
 SUMMARY = "<!-- codex-pull-request-review-summary -->"
 
 # Stub gh: `gh api [-X M] [--paginate] [--jq Q] [-f k=v] <path>`. "__error" fails
@@ -205,6 +206,35 @@ case("Markdown-only PR whose labels are unreadable: nudged (the exemption cannot
      with_(base(files=("README.md",)), **{f"/pulls/{PR}": {**pr(files=("README.md",)), "labels": None}}))
 case("Markdown-only PR with an unrelated label: skips", "skip", base(files=("README.md",), labels=("documentation",)))
 case("code PR held by no-auto-merge: nudges as before", "nudge", base(labels=("no-auto-merge",)))
+
+# --- the hold label's labeled event (Codex P2s on aaa-pr-bot#50, ai-agent-jira-vibe#27) ---
+LABEL_ENV = {"EVENT_AT": LABELED, "AFTER_EVENT": "true", "EVENT_ACTION": "labeled"}
+HOLD = ("no-auto-merge",)
+# On a code PR the label changes nothing: Codex was required already, so evidence
+# from before the label still counts and no second review is requested.
+case("labeled, code PR Codex already reviewed before the label: skips", "skip",
+     base(labels=HOLD, reviews=[review()]), env=LABEL_ENV)
+case("labeled, code PR with a Codex row from before the label: skips", "skip",
+     base(labels=HOLD, comments=[summary(row("Completed", HEAD))]), env=LABEL_ENV)
+case("labeled, code PR a person asked about after the push but before the label: skips", "skip",
+     base(labels=HOLD, comments=[comment("web3sea", "@codex review", at="2026-10-01T10:01:00Z")]), env=LABEL_ENV)
+case("labeled, code PR with nothing from Codex: nudges", "nudge", base(labels=HOLD), env=LABEL_ENV)
+# On a Markdown-only PR the label switches the Codex requirement on: earlier evidence
+# (from while it was exempt) does not count.
+case("labeled, Markdown-only PR Codex reviewed before the label: nudges (the label turns Codex on)", "nudge",
+     base(files=("README.md",), labels=HOLD, reviews=[review()]), env=LABEL_ENV)
+case("labeled, Markdown-only PR, label removed during the wait: skips", "skip",
+     with_(base(files=("README.md",), labels=HOLD),
+           **{f"/pulls/{PR}": seq(pr(files=("README.md",), labels=HOLD), pr(files=("README.md",)))}), env=LABEL_ENV)
+case("held Markdown-only PR (opened), label removed during the wait: skips", "skip",
+     with_(base(files=("README.md",), labels=HOLD),
+           **{f"/pulls/{PR}": seq(pr(files=("README.md",), labels=HOLD), pr(files=("README.md",)))}))
+case("held Markdown-only PR, still held after the wait: nudges", "nudge",
+     with_(base(files=("README.md",), labels=HOLD),
+           **{f"/pulls/{PR}": seq(pr(files=("README.md",), labels=HOLD), pr(files=("README.md",), labels=HOLD))}),
+     env=LABEL_ENV)
+case("code PR, label removed during the wait: still nudges (code needs Codex either way)", "nudge",
+     with_(base(labels=HOLD), **{f"/pulls/{PR}": seq(pr(labels=HOLD), pr())}), env=LABEL_ENV)
 
 # --- (b) Codex already touched the head, ANY status -------------------------------
 for st in ("Completed", "Running", "Queued", "Failed"):

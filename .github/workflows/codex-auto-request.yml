@@ -61,8 +61,14 @@ name: Codex auto-request
 #     (c) only after the label (below): a Markdown-only PR retargeted while
 #     unheld was skipped by the retarget run, so evidence from before that
 #     retarget must not suppress the nudge (Codex P2 on qa-template#8 and
-#     aa-project-pipeline#18). An extra nudge is acceptable; a missed one is
-#     not.
+#     aa-project-pipeline#18). That cutoff applies ONLY when the label turns
+#     the Codex requirement on, i.e. the PR is Markdown-only: a code PR already
+#     needed Codex, so on a labeled event it counts all evidence for the head
+#     as an opened run would, and earns no second review (Codex P2 on
+#     aaa-pr-bot#50). A held Markdown-only PR is re-checked after the wait:
+#     if the label came off meanwhile, the exemption is back and nothing is
+#     posted (Codex P2 on ai-agent-jira-vibe#27; there is no unlabeled
+#     trigger to cancel the run).
 #   - Otherwise wait DELAY_SECONDS (3 minutes) so Codex's own auto-review can
 #     start, then post `@codex review` once if ALL hold:
 #   (a) the PR is still open, still not a draft, and the event's head is
@@ -135,6 +141,8 @@ jobs:
           EVENT_AT: ${{ (github.event.action == 'synchronize' || github.event.action == 'edited' || github.event.action == 'ready_for_review' || github.event.action == 'labeled') && github.event.pull_request.updated_at || '' }}
           # Count Codex rows, reviews and requests only after EVENT_AT.
           AFTER_EVENT: ${{ github.event.action == 'edited' || github.event.action == 'ready_for_review' || github.event.action == 'labeled' }}
+          # Which event: a labeled run on a code PR drops the cutoff (header).
+          EVENT_ACTION: ${{ github.event.action }}
           CODEX_BOT: "chatgpt-codex-connector[bot]"
           DELAY_SECONDS: "180"
           # doc-auto-merge.yml's definition of a Markdown-only PR.
@@ -161,6 +169,7 @@ jobs:
             echo "::error::retarget or ready event without an event time"; exit 1
           fi
           state_q='.state + " " + .head.sha + " " + (.draft | tostring)'
+          held_doc=0
 
           # Markdown-only PRs need no Codex review (the gate exempts them).
           pr=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
@@ -181,17 +190,35 @@ jobs:
                   if (.labels | type) != "array" then "yes"
                   elif any(.labels[]; .name == $l) then "yes" else "no" end' <<<"$pr")
             if [ "$kind" = doc ] && [ "$held" != no ]; then
+              held_doc=1
               say "Markdown-only, but held by the ${HOLD_LABEL:-no-auto-merge} label (or its labels are unreadable), so review-verdict needs Codex; treated like code."
             else
               [ "$kind" != doc ] || decide false "Markdown-only PR ($changed file(s)); the gate needs no Codex review, so no nudge."
             fi
           fi
 
+          # The hold label only changes anything for a Markdown-only PR. On a
+          # code PR it needed Codex all along: count every row, review and
+          # request for the head, as an opened run would (header).
+          if [ "${EVENT_ACTION:-}" = labeled ] && [ "$held_doc" != 1 ]; then
+            AFTER_EVENT=false; EVENT_AT=""
+            say "hold label on a code PR: its Codex requirement is unchanged, so earlier evidence for ${EVENT_HEAD:0:7} still counts."
+          fi
+
           sleep "${DELAY_SECONDS:-180}"
 
           # (a) still open, still not a draft, still this head.
-          now=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq "$state_q")
+          pr=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+          now=$(jq -r "$state_q" <<<"$pr")
           [ "$now" = "open $EVENT_HEAD false" ] || decide false "the PR moved on (now: ${now:-unreadable}); nothing to do."
+          # A Markdown-only PR nudged only because it was held: still held? If
+          # the label came off during the wait, the exemption is back.
+          if [ "$held_doc" = 1 ]; then
+            held=$(jq -r --arg l "${HOLD_LABEL:-no-auto-merge}" '
+                  if (.labels | type) != "array" then "yes"
+                  elif any(.labels[]; .name == $l) then "yes" else "no" end' <<<"$pr")
+            [ "$held" != no ] || decide false "the ${HOLD_LABEL:-no-auto-merge} label came off during the wait; Markdown-only again, so no nudge."
+          fi
 
           # Since when (b) and (c) look: the push, or the retarget.
           since="${EVENT_AT:-}"
