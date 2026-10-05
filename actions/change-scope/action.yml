@@ -1,0 +1,50 @@
+name: Change scope
+description: >-
+  Tells a CI job whether a pull request changes code, or only Markdown and
+  workflow files that this job does not run. A gate-required job uses it to skip
+  its heavy steps on a docs-only PR while still reporting success.
+
+# Cost lever 1 (2026-10-05). The gate requires each listed check to be present
+# and `success` on the PR head: a skipped job, or a workflow that a `paths`
+# filter never started, blocks the merge. So a required job keeps running and
+# guards its expensive steps with `if: steps.<id>.outputs.code == 'true'`.
+#
+# Usage, as the first step of the job:
+#
+#   - id: scope
+#     uses: Automation-Architecture/.github/actions/change-scope@<sha>
+#     with:
+#       code-paths: |        # optional: Markdown this job consumes, local
+#         prompts/**         # reusable workflows it calls, etc.
+#
+# The job needs `pull-requests: read`. Any event other than a pull request, an
+# API error, or a missing permission gives code=true, so the job runs in full.
+
+inputs:
+  code-paths:
+    description: Newline-separated globs that always count as code.
+    required: false
+    default: ''
+  token:
+    description: Token that can read the pull request's files.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  code:
+    description: "'true' unless every changed file is skippable."
+    value: ${{ steps.classify.outputs.code }}
+  reason:
+    description: One line saying why.
+    value: ${{ steps.classify.outputs.reason }}
+
+runs:
+  using: composite
+  steps:
+    - id: classify
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        CODE_PATHS: ${{ inputs.code-paths }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+      run: python3 "$GITHUB_ACTION_PATH/change_scope.py"
