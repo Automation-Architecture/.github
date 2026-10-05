@@ -103,7 +103,7 @@ def run(event, stub_files="", mode="ok", pr="7", code_paths=""):
                    CODE_PATHS=code_paths)
         p = subprocess.run([sys.executable, str(SCRIPT)], env=env, capture_output=True, text=True)
         calls = (d / "calls").read_text() if (d / "calls").exists() else ""
-        result = dict(line.split("=", 1) for line in out.read_text().splitlines())
+        result = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
         return p, result, calls
 
 
@@ -135,6 +135,11 @@ check("e2e push no api", calls, "")
 p, r, calls = run("pull_request", lines("README.md"), pr="")
 check("e2e no pr number", r.get("code"), "true")
 check("e2e no pr no api", calls, "")
+
+evil = json.dumps({"filename": "src/a\ncode=false\nreason=x", "previous_filename": None})
+p, r, _ = run("pull_request", evil)
+check("e2e newline injection", r.get("code"), "true")
+check("e2e one code line", p.returncode, 0)
 
 if failures:
     print("\n".join(failures))

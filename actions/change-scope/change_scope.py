@@ -97,11 +97,15 @@ def main():
     event = os.environ.get("GITHUB_EVENT_NAME", "")
     files = list_files() if event in ("pull_request", "pull_request_target") else []
     code, reason = classify(event, files, code_globs, own_workflow())
+    # Filenames come from the PR: drop control characters (a newline could
+    # inject a second `code=` line into GITHUB_OUTPUT) and write `code` last,
+    # so nothing in `reason` can override it.
+    reason = "".join(ch if ch.isprintable() else "?" for ch in reason)[:300]
     print(f"change-scope: code={str(code).lower()} ({reason})")
     if not code:
         print("::notice title=change-scope::Docs/workflow-only change: heavy steps skipped, check reports success.")
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-        out.write(f"code={str(code).lower()}\nreason={reason}\n")
+        out.write(f"reason={reason}\ncode={str(code).lower()}\n")
     return 0
 
 
