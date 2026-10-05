@@ -136,6 +136,10 @@ p, r, calls = run("pull_request", lines("README.md"), pr="")
 check("e2e no pr number", r.get("code"), "true")
 check("e2e no pr no api", calls, "")
 
+os.environ.update(GITHUB_REPOSITORY="acme/app",
+                  GITHUB_WORKFLOW_REF="acme/app/.github/workflows/ci@nightly.yml@refs/heads/main")
+check("own workflow with @", cs.own_workflow(), ".github/workflows/ci@nightly.yml")
+
 evil = json.dumps({"filename": "src/a\ncode=false\nreason=x", "previous_filename": None})
 p, r, _ = run("pull_request", evil)
 check("e2e newline injection", r.get("code"), "true")

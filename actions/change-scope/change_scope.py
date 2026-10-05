@@ -42,7 +42,7 @@ def own_workflow():
     """`owner/repo/.github/workflows/ci.yml@refs/...` -> `.github/workflows/ci.yml`."""
     ref = os.environ.get("GITHUB_WORKFLOW_REF", "")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
-    path = ref.split("@", 1)[0]
+    path = ref.rsplit("@", 1)[0]  # the ref follows the last @; a filename may contain one
     if repo and path.startswith(repo + "/"):
         return path[len(repo) + 1:]
     return None
