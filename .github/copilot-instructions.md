@@ -65,10 +65,13 @@ Paths to skip for style / correctness review:
 
 ## What "approved" means in this org
 
-A PR is mergeable when:
-1. CodeRabbit status check is green (or no actionable findings).
-2. `copilot-pull-request-reviewer` status check is green (you).
-3. CI passes.
-4. The author has addressed all actionable findings or explicitly resolved them.
+Copilot and CodeRabbit reviews are advisory, not a merge gate. Codex is the one required reviewer, and the org
+ruleset `aaa-agency-delivery-gate` requires the `agency-delivery/gate` check on the default branch, with no bypass
+actors (admins included). A PR is mergeable when:
+1. Codex has reviewed the current head.
+2. No P0 or P1 finding is open. P2/P3 findings get one round of fixes; leftovers go to a follow-up issue.
+3. CI is green.
 
-Repo admins can bypass via admin-merge, but only when reviewer findings have been triaged.
+Merge pinned to the head: `gh pr merge <n> --squash --match-head-commit <head-sha>`. Never use `--admin`. No human
+approval is required. Markdown-only PRs are merged by the central doc sweep in `.github`. Canonical page:
+aaa-runbooks `reference/merge-gate-target-system.md`.
