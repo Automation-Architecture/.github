@@ -59,3 +59,9 @@ safety net for when a generator regresses or a new one appears — **not** a
 substitute for fixing the generator. Its scope is a narrow allowlist; per-period
 deliverables (e.g. the weekly `draft(weekly): funston` PRs, where each week is
 distinct) are deliberately excluded.
+
+The reaper fails closed on reads: if it cannot list the org's repos, or cannot
+read the open PRs of any repo, the run ends red and names the unreadable repos
+(the readable ones are still reaped). A green run therefore means every repo was
+actually checked, not that a read error was mistaken for "nothing to reap".
+Offline tests: `tests/stale-snapshot-reaper/`.

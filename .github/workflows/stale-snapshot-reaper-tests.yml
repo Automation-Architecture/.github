@@ -1,0 +1,31 @@
+name: Stale snapshot reaper tests
+
+# Runs the offline suite for stale-snapshot-reaper.yml. It runs the PR's own
+# copy of the workflow's step scripts against a stub `gh` with fixture JSON
+# for `gh repo list` and `gh pr list`: no token, no network calls to GitHub's API,
+# read-only permissions.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/stale-snapshot-reaper.yml
+      - .github/workflows/stale-snapshot-reaper-tests.yml
+      - tests/stale-snapshot-reaper/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/stale-snapshot-reaper.yml
+      - .github/workflows/stale-snapshot-reaper-tests.yml
+      - tests/stale-snapshot-reaper/**
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: uv run --python 3.12 --with 'PyYAML>=6,<7' python tests/stale-snapshot-reaper/test_stale_snapshot_reaper.py

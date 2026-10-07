@@ -23,6 +23,15 @@ name: Stale Snapshot PR Reaper
 # Prereq: AAA_ORG_TOKEN needs pull-requests:write + contents:write on org repos.
 # If it lacks them every close fails and the job fails loudly (by design — a
 # reaper that silently does nothing is the failure mode we're avoiding).
+#
+# Read failures fail the run too (GAAA-3938): if `gh repo list` fails or returns
+# nothing, the run stops red before touching anything; if `gh pr list` fails for
+# a repo (or returns something that is not a JSON array), that repo is recorded,
+# the other repos are still reaped as usual, and the run ends red. A read error
+# must never look like "nothing to reap".
+#
+# Tests: tests/stale-snapshot-reaper/ (offline, stub gh), run by
+# stale-snapshot-reaper-tests.yml.
 
 on:
   schedule:
@@ -57,25 +66,53 @@ jobs:
           TITLE_PAT='^chore(\(husser\))?: daily board sweep|^chore: sync sprint-progress\.json'
           BOT_PAT='^(web3sea|aaa-dashboard-bot|github-actions)'
 
-          repos=$(gh repo list Automation-Architecture --no-archived --limit 500 \
-                    --json nameWithOwner --jq '.[].nameWithOwner')
+          # A failed or empty org listing stops the run red: an empty list would
+          # otherwise read as "nothing to reap".
+          if ! repos=$(gh repo list Automation-Architecture --no-archived --limit 500 \
+                         --json nameWithOwner --jq '.[].nameWithOwner'); then
+            echo "::error::gh repo list failed; cannot tell which repos to check. Check AAA_ORG_TOKEN and the GitHub API status."
+            exit 1
+          fi
+          if [ -z "$repos" ]; then
+            echo "::error::gh repo list returned no repositories; refusing to report 'nothing to reap'. Check AAA_ORG_TOKEN."
+            exit 1
+          fi
 
           : > actions.md
+          : > read-errors.md
           echo "DRY_RUN=$DRY_RUN"
 
           for repo in $repos; do
+            # A failed PR listing is recorded (the run ends red below) and the
+            # repo is skipped; the other repos are still reaped.
+            if ! prs=$(gh pr list --repo "$repo" --state open --limit 200 \
+                         --json number,title,author,createdAt,headRefName); then
+              echo "- READ-FAILED $repo (gh pr list failed)" >> read-errors.md
+              continue
+            fi
+            # `--json` always prints at least `[]`; empty stdout with a zero exit is
+            # a broken read, and jq would turn it into an empty (green) plan.
+            if [ -z "$prs" ]; then
+              echo "- READ-FAILED $repo (gh pr list returned no output)" >> read-errors.md
+              continue
+            fi
             # Group matching PRs into families (title with digits/punct stripped);
             # within each family keep the newest, mark the rest to close.
-            plan=$(gh pr list --repo "$repo" --state open --limit 200 \
-                     --json number,title,author,createdAt,headRefName \
-                   | jq -c --arg pat "$TITLE_PAT" --arg bots "$BOT_PAT" '
+            if ! plan=$(printf '%s' "$prs" | jq -c --arg pat "$TITLE_PAT" --arg bots "$BOT_PAT" '
                        def famkey: (.title|ascii_downcase|gsub("[0-9]";"")|gsub("[-_/(),.]";" ")|gsub("\\s+";" ")|gsub("^ | $";""));
-                       [ .[] | select((.title|test($pat;"i")) and (.author.login|test($bots))) ]
+                       if type != "array" then error("gh pr list did not return a JSON array") else . end
+                       | [ .[] | select((.title|test($pat;"i")) and (.author.login|test($bots))) ]
                        | group_by(famkey)
                        | map(sort_by(.createdAt) | {keep: .[-1].number, close: [.[:-1][] | {number, headRefName}]})
                        | map(select(.close|length > 0))
-                     ' 2>/dev/null || echo '[]')
-            [ -z "$plan" ] && continue
+                     '); then
+              echo "- READ-FAILED $repo (gh pr list output was not a JSON array of PRs)" >> read-errors.md
+              continue
+            fi
+            if [ -z "$plan" ]; then
+              echo "- READ-FAILED $repo (no plan computed from gh pr list output)" >> read-errors.md
+              continue
+            fi
             [ "$plan" = "[]" ] && continue
 
             echo "$plan" | jq -c '.[]' | while read -r fam; do
@@ -99,13 +136,23 @@ jobs:
           done
 
           # The pipe-fed while loops run in subshells, so tally from the file.
-          closed=$(grep -c '^- closed'   actions.md 2>/dev/null || echo 0)
-          failed=$(grep -c '^- FAILED'   actions.md 2>/dev/null || echo 0)
-          dry=$(grep -c '^- \[dry-run\]' actions.md 2>/dev/null || echo 0)
-          echo "=== Reaper summary: closed=$closed  failed=$failed  dry_run_would_close=$dry ==="
-          cat actions.md 2>/dev/null || echo "(no actions)"
+          # (grep -c prints 0 and exits 1 on no match, so `|| true`, not `|| echo 0`.)
+          scanned=$(printf '%s\n' "$repos" | grep -c . || true)
+          closed=$(grep -c '^- closed'   actions.md || true)
+          failed=$(grep -c '^- FAILED'   actions.md || true)
+          dry=$(grep -c '^- \[dry-run\]' actions.md || true)
+          unread=$(grep -c '^- READ-FAILED' read-errors.md || true)
+          echo "=== Reaper summary: repos=$scanned  unreadable=$unread  closed=$closed  failed=$failed  dry_run_would_close=$dry ==="
+          if [ -s actions.md ]; then cat actions.md; else echo "(no actions)"; fi
+          cat read-errors.md
 
+          status=0
           if [ "${failed:-0}" -gt 0 ]; then
             echo "::error::Reaper failed to close $failed PR(s) — verify AAA_ORG_TOKEN has pull-requests:write + contents:write on org repos."
-            exit 1
+            status=1
           fi
+          if [ "${unread:-0}" -gt 0 ]; then
+            echo "::error::Could not read open PRs in $unread of $scanned repo(s); those repos were not reaped (listed above)."
+            status=1
+          fi
+          exit "$status"
