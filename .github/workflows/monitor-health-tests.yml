@@ -1,0 +1,35 @@
+name: Monitor Health tests
+
+# Offline suite for scripts/monitor_health.py: fake GitHub reads, fake clock,
+# no token, no network.
+on:
+  pull_request:
+    paths:
+      - scripts/monitor_health.py
+      - monitor-health/**
+      - tests/monitor-health/**
+      - .github/workflows/monitor-health.yml
+      - .github/workflows/monitor-health-canary.yml
+      - .github/workflows/monitor-health-tests.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/monitor_health.py
+      - monitor-health/**
+      - tests/monitor-health/**
+      - .github/workflows/monitor-health.yml
+      - .github/workflows/monitor-health-canary.yml
+      - .github/workflows/monitor-health-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    name: monitor health tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests/monitor-health -v
