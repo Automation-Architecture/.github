@@ -23,7 +23,7 @@ WORKFLOW = ROOT / ".github/workflows/stale-snapshot-reaper.yml"
 ORG = "Automation-Architecture"
 
 # Stub gh. Fixtures: "repos" (list of names, or "__error"), "prs" {repo: list
-# | "__error" | "__raw" | any JSON}, "close_fail" [repo#num, ...]. Every call
+# | "__error" | "__raw" | "__empty" | any JSON}, "close_fail" [repo#num, ...]. Every call
 # is appended to STATE_DIR/calls as JSON.
 STUB = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
@@ -47,6 +47,7 @@ if args[:2] == ["pr", "list"]:
     v = fx["prs"].get(opt("--repo"), [])
     if v == "__error": fail()
     if v == "__raw": sys.stdout.write("<html>bad gateway</html>"); sys.exit(0)
+    if v == "__empty": sys.exit(0)
     sys.stdout.write(json.dumps(v)); sys.exit(0)
 if args[:2] == ["pr", "close"]:
     if f"{opt('--repo')}#{args[2]}" in fx.get("close_fail", []): fail("HTTP 403")
@@ -140,6 +141,8 @@ case("gh pr list returns non-JSON: red", {"repos": ["a"], "prs": {R: "__raw"}}, 
      says=(f"READ-FAILED {R}",))
 case("gh pr list returns a JSON object, not an array: red", {"repos": ["a"], "prs": {R: {"message": "x"}}},
      ok=False, says=(f"READ-FAILED {R}",))
+case("gh pr list exits 0 with no output: red", {"repos": ["a"], "prs": {R: "__empty"}}, ok=False,
+     says=(f"READ-FAILED {R} (gh pr list returned no output)",))
 case("read failure in a dry run is still red", {"repos": ["a"], "prs": {R: "__error"}}, ok=False, dry_run="true")
 
 

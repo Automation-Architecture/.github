@@ -90,6 +90,12 @@ jobs:
               echo "- READ-FAILED $repo (gh pr list failed)" >> read-errors.md
               continue
             fi
+            # `--json` always prints at least `[]`; empty stdout with a zero exit is
+            # a broken read, and jq would turn it into an empty (green) plan.
+            if [ -z "$prs" ]; then
+              echo "- READ-FAILED $repo (gh pr list returned no output)" >> read-errors.md
+              continue
+            fi
             # Group matching PRs into families (title with digits/punct stripped);
             # within each family keep the newest, mark the rest to close.
             if ! plan=$(printf '%s' "$prs" | jq -c --arg pat "$TITLE_PAT" --arg bots "$BOT_PAT" '
@@ -103,7 +109,10 @@ jobs:
               echo "- READ-FAILED $repo (gh pr list output was not a JSON array of PRs)" >> read-errors.md
               continue
             fi
-            [ -z "$plan" ] && continue
+            if [ -z "$plan" ]; then
+              echo "- READ-FAILED $repo (no plan computed from gh pr list output)" >> read-errors.md
+              continue
+            fi
             [ "$plan" = "[]" ] && continue
 
             echo "$plan" | jq -c '.[]' | while read -r fam; do
