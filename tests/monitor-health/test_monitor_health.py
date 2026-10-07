@@ -621,6 +621,21 @@ class Main(unittest.TestCase):
         self.assertIn("cannot read its alert issue", alerts.posts[0][1])
         self.assertIn("r/a.yml", alerts.posts[0][1])
 
+    def test_issue_write_failure_still_reaches_slack(self):
+        alerts = FakeAlerts()
+        orig_write = alerts.write
+
+        def write(method, endpoint, payload=None):
+            if endpoint.endswith("/issues"):
+                raise mh.AlertError("POST issues: HTTP 403")
+            return orig_write(method, endpoint, payload)
+        alerts.write = write
+        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(alerts.posts), 1)
+        self.assertIn("could not write its alert issue", alerts.posts[0][1])
+        self.assertIn("r/a.yml", alerts.posts[0][1])
+
     def test_failed_slack_is_resent_next_run(self):
         alerts = FakeAlerts()
         good_post = alerts.post

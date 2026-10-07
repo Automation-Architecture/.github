@@ -627,15 +627,29 @@ def deliver(findings, *, read_alert, write, post, alert_repo, slack_url, run_url
         patch(issue["number"], {"state": "closed", "state_reason": "completed"})
         return p
 
-    if p["action"] == "create":
-        ensure_label(read_alert, write, alert_repo, LABEL, "b60205", "Monitor Health reconciler findings (GAAA-3937)")
-        issue = write("POST", f"repos/{alert_repo}/issues", {"title": title, "body": body, "labels": [LABEL]})
-    else:
-        patch(issue["number"], {"title": title, "body": body})
-        if p["action"] == "update":
-            write("POST", f"repos/{alert_repo}/issues/{issue['number']}/comments",
-                  {"body": f"Problems changed at {iso(now)}.\n\nNew: {', '.join(p['new']) or 'none'}\n\n"
-                           f"Resolved: {', '.join(p['resolved']) or 'none'}\n\nRun: {run_url}"})
+    issue_error = None
+    try:
+        if p["action"] == "create":
+            ensure_label(read_alert, write, alert_repo, LABEL, "b60205", "Monitor Health reconciler findings (GAAA-3937)")
+            issue = write("POST", f"repos/{alert_repo}/issues", {"title": title, "body": body, "labels": [LABEL]})
+        else:
+            patch(issue["number"], {"title": title, "body": body})
+            if p["action"] == "update":
+                write("POST", f"repos/{alert_repo}/issues/{issue['number']}/comments",
+                      {"body": f"Problems changed at {iso(now)}.\n\nNew: {', '.join(p['new']) or 'none'}\n\n"
+                               f"Resolved: {', '.join(p['resolved']) or 'none'}\n\nRun: {run_url}"})
+    except (AlertError, ReadError) as exc:
+        issue_error = exc
+    if issue_error is not None:
+        # The issue write failed: Slack does not depend on it, so send the
+        # full findings there (no pending state can be recorded), then fail.
+        log(f"issue write failed ({issue_error}); sending findings to Slack")
+        if slack_url:
+            text = (f"Monitor Health: could not write its alert issue in {alert_repo} ({issue_error}). "
+                    f"{len(findings)} problem(s) this run. Run: {run_url}\n"
+                    + "\n".join(f"- {f['subject']}: {f['message']}" for f in findings))
+            post_with_retry(post, slack_url, truncate(text), sleep=sleep)
+        raise AlertError(f"alert issue write failed: {issue_error}") from issue_error
     if needs_post:
         post_with_retry(post, slack_url, slack_text(p, findings, issue.get("html_url", ""), run_url), sleep=sleep)
         _, body = render_issue(findings, now, run_url, True, slack_pending=False)
@@ -645,7 +659,10 @@ def deliver(findings, *, read_alert, write, post, alert_repo, slack_url, run_url
 
 def heartbeat(config, findings, *, read_alert, write, post, alert_repo, slack_url, run_url, now, dry_run, log):
     watched = len(config["workflows"])
-    issue = find_bot_issue(read_alert, alert_repo, LABEL)
+    try:
+        issue = find_bot_issue(read_alert, alert_repo, LABEL)
+    except ReadError:
+        issue = None  # the link is optional; never let it block the heartbeat
     status = (f"{len(findings)} open problem(s): {issue['html_url']}" if findings and issue
               else f"{len(findings)} open problem(s)")
     text = (f"Monitor Health weekly heartbeat: alive, watching {watched} scheduled workflows, the gate's /health "
