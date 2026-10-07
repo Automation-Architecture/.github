@@ -1,0 +1,275 @@
+{
+  "_comment": [
+    "Monitor Health watch list (GAAA-3937). Read by scripts/monitor_health.py.",
+    "workflows[]: repo (in org), workflow (file name), window_hours (newest SCHEDULED run must be younger),",
+    "min_runs_24h (scheduled runs created in the last 24h; 0 = not asserted), owner, why.",
+    "Windows and floors are calibrated from 7 days of history read on 2026-10-07: GitHub delivered",
+    "~56% of the 10-minute doc sweep (80-81/day, longest gap 94 min), ~93% of the 30-minute Codex",
+    "sweep (44-45/day, longest gap 114 min) and ~100% of the hourly rollout monitor (23-24/day; 13 on",
+    "the 10-03 outage day, longest gap 168 min). Daily jobs start up to ~55 min late, hence 27h.",
+    "See docs/monitor-health.md before changing a number."
+  ],
+  "org": "Automation-Architecture",
+  "workflows": [
+    {
+      "repo": ".github",
+      "workflow": "codex-review-sweep.yml",
+      "window_hours": 3,
+      "min_runs_24h": 24,
+      "owner": "Engineer",
+      "why": "requests Codex reviews org-wide (every 30 min)"
+    },
+    {
+      "repo": ".github",
+      "workflow": "doc-auto-merge-sweep.yml",
+      "window_hours": 2,
+      "min_runs_24h": 40,
+      "owner": "Engineer",
+      "why": "merges approved Markdown-only PRs org-wide (every 10 min)"
+    },
+    {
+      "repo": ".github",
+      "workflow": "rollout-monitor.yml",
+      "window_hours": 4,
+      "min_runs_24h": 16,
+      "owner": "Engineer",
+      "why": "hourly rollout PR report"
+    },
+    {
+      "repo": ".github",
+      "workflow": "auto-merge-setting-guard.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "native auto-merge must stay off org-wide"
+    },
+    {
+      "repo": ".github",
+      "workflow": "actions-budget-alert.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "Actions minutes budget"
+    },
+    {
+      "repo": ".github",
+      "workflow": "org-secret-scan.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "gitleaks across the org"
+    },
+    {
+      "repo": ".github",
+      "workflow": "stale-snapshot-reaper.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "closes superseded snapshot PRs"
+    },
+    {
+      "repo": ".github",
+      "workflow": "pr-stale.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "org PR stale/close janitor (GAAA-3961)"
+    },
+    {
+      "repo": ".github",
+      "workflow": "monitor-health-canary.yml",
+      "window_hours": 4,
+      "min_runs_24h": 16,
+      "owner": "Engineer",
+      "why": "hourly no-op: forced-failure target and a direct measure of GitHub schedule delivery"
+    },
+    {
+      "repo": "aaa-pr-bot",
+      "workflow": "stale-pr-sweep.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "daily stale PR nags"
+    },
+    {
+      "repo": "aaa-internal-dashboard",
+      "workflow": "daily-pr-audit.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "daily PR-tooling audit (red until Brad sets GH_TOKEN_AUDIT + SLACK_WEBHOOK_URL)"
+    },
+    {
+      "repo": "aaa-internal-dashboard",
+      "workflow": "workflow-heartbeat.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "AAAID-55 heartbeat for daily-pr-audit"
+    },
+    {
+      "repo": "aaa-client-dashboard",
+      "workflow": "sync-jira-data.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "client dashboard Jira sync"
+    },
+    {
+      "repo": "aaa-client-dashboard",
+      "workflow": "sync-linear-data.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "client dashboard Linear sync (OAuth app)"
+    },
+    {
+      "repo": "aaa-client-dashboard",
+      "workflow": "sync-horizon.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "client dashboard horizon sync"
+    },
+    {
+      "repo": "aaa-client-dashboard",
+      "workflow": "sync-github-activity.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "client dashboard GitHub activity backstop"
+    },
+    {
+      "repo": "aaa-client-dashboard",
+      "workflow": "sync-dashboard-docs.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "client dashboard docs sync"
+    },
+    {
+      "repo": "aaa-client-dashboard",
+      "workflow": "dashboard-watchdog.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "client's-eye watchdog; it cross-watches this reconciler"
+    },
+    {
+      "repo": "ptg-content-generator",
+      "workflow": "nightly-main.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "nightly main CI"
+    },
+    {
+      "repo": "aios-cdp",
+      "workflow": "nightly-main.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "nightly main CI"
+    },
+    {
+      "repo": "aios-signals",
+      "workflow": "nightly-main.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "nightly main CI"
+    },
+    {
+      "repo": "aios-second-brain",
+      "workflow": "nightly-main.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "nightly main CI"
+    },
+    {
+      "repo": "roofdata",
+      "workflow": "nightly-main.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "nightly main CI"
+    },
+    {
+      "repo": "opportunity-builder",
+      "workflow": "nightly-main.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "nightly main CI"
+    },
+    {
+      "repo": "aaa-hooks",
+      "workflow": "nightly-main.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "nightly main CI"
+    },
+    {
+      "repo": "au-group",
+      "workflow": "smoke-e2e.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "production smoke E2E"
+    },
+    {
+      "repo": "fas-portal",
+      "workflow": "nightly-e2e.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "production smoke E2E"
+    },
+    {
+      "repo": "fas-portal",
+      "workflow": "signin-e2e.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "production sign-in E2E"
+    },
+    {
+      "repo": "invoice-tracker",
+      "workflow": "backup-turso.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "Turso database backup"
+    }
+  ],
+  "gate_health": {
+    "name": "agency-delivery-gate",
+    "url": "https://agency-delivery-gate.engineer-009.workers.dev/health",
+    "expect_status": "ok",
+    "policy_repo": "aaa-pr-bot",
+    "policy_path": "gate/policy/gate-policy.json",
+    "policy_ref": "main",
+    "deploy_grace_hours": 6,
+    "owner": "Engineer"
+  },
+  "codex_blockers": {
+    "check_name": "agency-delivery/gate",
+    "app_slug": "agency-delivery-gate",
+    "code_prefix": "CODEX_",
+    "max_age_hours": 6,
+    "alert_missing_gate_check": true,
+    "exclude_repos": [
+      "rmbc"
+    ],
+    "ignore_labels": [
+      "hold",
+      "on-hold",
+      "do-not-merge",
+      "do not merge",
+      "blocked"
+    ],
+    "owner": "Engineer"
+  }
+}

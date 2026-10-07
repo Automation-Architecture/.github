@@ -1,0 +1,73 @@
+name: Monitor Health
+
+# Org Monitor Health reconciler (GAAA-3937). Hourly, it checks every scheduled
+# workflow in monitor-health/watchlist.json (state active, newest scheduled run
+# inside its window, newest completed scheduled run successful, 24h run count
+# above its floor), the delivery gate's /health and policy revision, and open
+# PRs held by CODEX_* gate blockers for too long. Findings go to one rolling
+# issue in this repository (label `monitor-health`) and, when the
+# SLACK_DEVOPS_WEBHOOK_URL repository secret is set, to #dev-ops whenever the
+# set of findings changes. Monday's 13:41 run also sends a weekly heartbeat.
+#
+# Red run = the reconciler could not do its job (a read failed, or an alert
+# was not delivered). Findings alone keep the run green: they are reported
+# through the issue and Slack. The aaa-client-dashboard Dashboard Watchdog
+# cross-watches this workflow (newest scheduled run < 6h and successful).
+#
+# Read-only on the org: AAA_ORG_TOKEN is used for GET calls only. Writes are
+# limited to this repository's issues/labels through GITHUB_TOKEN.
+#
+# Docs: docs/monitor-health.md. Forced-failure test: docs/monitor-health-forced-failure-test.md.
+# Tests: tests/monitor-health/ (monitor-health-tests.yml).
+
+on:
+  schedule:
+    - cron: "23 * * * *"   # hourly, off the :00 peak (GitHub drops more runs there)
+    - cron: "41 13 * * 1"  # Monday 13:41 UTC: weekly heartbeat (plus a normal reconcile)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report only: no issue or Slack writes"
+        type: boolean
+        default: false
+      heartbeat:
+        description: "Send the weekly heartbeat now"
+        type: boolean
+        default: false
+      codex_max_age_hours:
+        description: "Override the aged-CODEX_* threshold for this run (hours; empty = watch list value)"
+        type: string
+        default: ""
+      test_dead_slack:
+        description: "Forced-failure test: post to a dead webhook (expect a red run plus the issue)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: monitor-health
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Reconcile scheduled monitors
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ALERT_TOKEN: ${{ github.token }}
+          ALERT_REPO: ${{ github.repository }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_DEVOPS_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEARTBEAT: ${{ (github.event.schedule == '41 13 * * 1' || inputs.heartbeat) && 'true' || 'false' }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          CODEX_MAX_AGE_HOURS: ${{ inputs.codex_max_age_hours }}
+          TEST_DEAD_SLACK: ${{ inputs.test_dead_slack && 'true' || 'false' }}
+        run: python3 scripts/monitor_health.py --config monitor-health/watchlist.json

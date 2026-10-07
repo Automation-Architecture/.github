@@ -1,0 +1,30 @@
+name: Monitor Health canary
+
+# A scheduled no-op watched by the Monitor Health reconciler (GAAA-3937). It
+# gives the forced-failure test a safe "completed but failed" scheduled run
+# (set the repository variable MONITOR_HEALTH_CANARY_FAIL=true; delete it to
+# revert) without breaking a real monitor, and its run count is a direct
+# measure of how many hourly schedules GitHub delivers. Public repository:
+# no Actions minutes are billed.
+
+on:
+  schedule:
+    - cron: "53 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Canary
+        env:
+          FORCE_FAIL: ${{ vars.MONITOR_HEALTH_CANARY_FAIL }}
+        run: |
+          if [ "$FORCE_FAIL" = "true" ]; then
+            echo "::error::MONITOR_HEALTH_CANARY_FAIL=true: forced failure for the Monitor Health test"
+            exit 1
+          fi
+          echo "canary ok"
