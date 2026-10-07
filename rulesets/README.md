@@ -33,7 +33,11 @@ per PR with `gh pr merge --auto --squash`.
   PR that edits `.github/workflows/review-verdict.yml` could publish its own
   `review/verdict`. The removed `dev-ops` approval on `.github/**` used to cover
   that. Codex still reviews such a PR; the gap is accepted, not closed.
-- Org admins may bypass on a PR.
+- This ruleset lists org admins as bypass actors, but that no longer opens a way round the gate: the org
+  ruleset `aaa-agency-delivery-gate` (`24516917`) requires `agency-delivery/gate` on every default branch with
+  no bypass actors. Never use `gh pr merge --admin`; merge with
+  `gh pr merge <n> --squash --match-head-commit <head-sha>` once Codex has reviewed the head, no P0/P1 is
+  open and CI is green.
 
 **Create it only after** `review-verdict.yml` is on `main` in every targeted
 repo and has been seen publishing on real PRs. Team has no dry-run mode: a
