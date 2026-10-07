@@ -19,8 +19,9 @@ all repos: PR required, no force-push, no deletion, no approvals) is not stored 
 
 Moves merge enforcement from the old `auto-merge.yml` workflow (retired
 2026-09-29) into GitHub, which checks these
-rules at the moment of merge. Merging is GitHub's native auto-merge, opted into
-per PR with `gh pr merge --auto --squash`.
+rules at the moment of merge. Do not use native auto-merge (`gh pr merge --auto`); merge with a
+normal squash pinned to the verified head, `gh pr merge <n> --squash --match-head-commit <head-sha>`,
+once Codex has reviewed that head, no P0/P1 is open and CI is green.
 
 - `review/verdict` must pass, from GitHub Actions (`integration_id` 15368). It
   is published by `.github/workflows/review-verdict.yml`.
