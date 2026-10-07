@@ -1,7 +1,7 @@
 name: Org PR stale tests
 
 # Offline suite for pr-stale.yml: YAML structure (windows, exempt labels,
-# actions/stale@v9, main-only) and the list-job script against a stub `gh`.
+# main-only, no actions/stale retarget) and the janitor script against a stub `gh`.
 # Live dry-run (no labels/closes):
 #   gh workflow run pr-stale.yml -R Automation-Architecture/.github -r main -f dry_run=true
 on:

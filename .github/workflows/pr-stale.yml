@@ -5,10 +5,10 @@ name: Org PR stale
 # public, so the run's own minutes are free.
 #
 # GAAA-3961 WIP/age SLA for pull requests:
-#   - stale after 7 days of inactivity (actions/stale@v9 days-before-pr-stale)
-#   - close 7 days after the stale mark (days-before-pr-close: 7) = 14 days
-#     of inactivity in total
-# Issues are not touched (days-before-issue-stale/close: -1).
+#   - stale after 7 days of inactivity
+#   - close 7 days after the stale label was applied (14 days of inactivity
+#     in total, matching actions/stale days-before-pr-stale/close)
+# Issues are not touched (this script only lists pull requests).
 #
 # Exempt while labeled: do-not-stale, security, client-bug.
 # client-bug is exempt (not a longer window): a client-facing bug may wait
@@ -17,17 +17,22 @@ name: Org PR stale
 #
 # Comments say reopen = PM renewed WIP.
 #
-# actions/stale@v9 is single-repo. This job lists every non-archived org repo
-# and runs the action once per repo with GITHUB_REPOSITORY set to that repo
-# and AAA_ORG_TOKEN as repo-token (pull-requests: write across the org).
+# Why not actions/stale@v9: that action has no owner/repo inputs. It uses
+# github.context.repo (the workflow's repository). Default GITHUB_* env vars
+# are not overwritable, so a matrix cannot retarget it. This job is the
+# equivalent janitor: every list/label/comment/close call names the target
+# as `gh ... --repo owner/name` or `gh api repos/owner/name/...`.
 # Do not copy this workflow into other repos. Do not add Autopilot-class
 # listeners; this is a scheduled janitor only.
 #
-# Dry run: workflow_dispatch with dry_run=true sets debug-only (no labels,
-# no closes). Manual check:
+# Dry run: workflow_dispatch with dry_run=true writes nothing.
 #   gh workflow run pr-stale.yml -R Automation-Architecture/.github -r main -f dry_run=true
 #
-# Offline checks: tests/pr-stale/test_pr_stale.py (structure + list script).
+# Read failures fail the run (same idea as GAAA-3938): an empty or failed
+# org listing is red; a failed per-repo PR/events read is recorded, other
+# repos still run, and the job ends red.
+#
+# Offline checks: tests/pr-stale/test_pr_stale.py (structure + script).
 
 on:
   schedule:
@@ -46,68 +51,200 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  list:
+  stale:
     if: github.repository == 'Automation-Architecture/.github' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      repos: ${{ steps.list.outputs.repos }}
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+      DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+      ORG: ${{ github.repository_owner }}
+      STALE_DAYS: "7"
+      CLOSE_DAYS: "7"
+      STALE_LABEL: stale
+      EXEMPT_LABELS: "do-not-stale,security,client-bug"
+      STALE_MSG: |
+        This pull request is stale because it has been open 7 days with no activity. It will be closed in 7 more days (14 days of inactivity in total) unless someone comments or adds `do-not-stale`, `security`, or `client-bug`.
+
+        Reopening this PR means PM renewed WIP.
+      CLOSE_MSG: |
+        Closing as stale after 14 days of inactivity.
+
+        Reopen if this is still work in progress — a reopen is PM renewed WIP, not an automatic revive.
     steps:
-      - id: list
-        env:
-          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
-          ORG: ${{ github.repository_owner }}
+      - name: Stale and close inactive org PRs
         run: |
           set -euo pipefail
+
           [ -n "${GH_TOKEN:-}" ] || { echo "::error::AAA_ORG_TOKEN is not available; cannot list org repositories."; exit 1; }
-          [[ "$ORG" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::bad org"; exit 1; }
-          if ! repos=$(gh repo list "$ORG" --no-archived --limit 500 --json nameWithOwner --jq 'map(.nameWithOwner)'); then
-            echo "::error::gh repo list failed; cannot tell which repos to stale. Check AAA_ORG_TOKEN."; exit 1
+          [[ "${ORG:-}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::bad org"; exit 1; }
+          [[ "${STALE_DAYS:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::STALE_DAYS must be a positive whole number"; exit 1; }
+          [[ "${CLOSE_DAYS:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::CLOSE_DAYS must be a positive whole number"; exit 1; }
+          [[ "${STALE_LABEL:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "::error::bad stale label"; exit 1; }
+          case "${DRY_RUN:-false}" in true|false) ;; *) echo "::error::bad dry_run"; exit 1 ;; esac
+          [[ "${EXEMPT_LABELS:-}" == "do-not-stale,security,client-bug" ]] || { echo "::error::EXEMPT_LABELS drifted"; exit 1; }
+
+          now_raw="${NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+          NOW_EPOCH=$(date -u -d "$now_raw" +%s) || { echo "::error::bad NOW timestamp: $now_raw"; exit 1; }
+          STALE_SECS=$((STALE_DAYS * 86400))
+          CLOSE_SECS=$((CLOSE_DAYS * 86400))
+          # Label+comment we apply ourselves bumps updatedAt a few seconds after
+          # the labeled event; do not treat that as human activity.
+          OWN_MARK_SLACK=300
+
+          TMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          : > "$TMP/actions.md"
+          : > "$TMP/read-errors.md"
+          [ -n "${STALE_MSG:-}" ] && [ -n "${CLOSE_MSG:-}" ] || { echo "::error::stale/close messages missing"; exit 1; }
+          printf '%s' "$STALE_MSG" > "$TMP/stale-pr-message.md"
+          printf '%s' "$CLOSE_MSG" > "$TMP/close-pr-message.md"
+          STALE_MSG_FILE="$TMP/stale-pr-message.md"
+          CLOSE_MSG_FILE="$TMP/close-pr-message.md"
+
+          if ! repos=$(gh repo list "$ORG" --no-archived --limit 500 --json nameWithOwner --jq '.[].nameWithOwner'); then
+            echo "::error::gh repo list failed; cannot tell which repos to stale. Check AAA_ORG_TOKEN."
+            exit 1
           fi
-          n=$(jq -c 'if type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$")) then length else error("repos") end' <<<"$repos") \
-            || { echo "::error::gh repo list did not return a JSON array of owner/name"; exit 1; }
-          [ "$n" -gt 0 ] || { echo "::error::gh repo list returned no repositories; refusing to run stale. Check AAA_ORG_TOKEN."; exit 1; }
-          repos=$(jq -c . <<<"$repos")
-          echo "repos=$repos" >> "$GITHUB_OUTPUT"
-          echo "org-pr-stale: listed $n non-archived repos"
+          if [ -z "$repos" ]; then
+            echo "::error::gh repo list returned no repositories; refusing to run stale. Check AAA_ORG_TOKEN."
+            exit 1
+          fi
 
-  stale:
-    needs: list
-    if: github.repository == 'Automation-Architecture/.github' && github.ref == 'refs/heads/main' && needs.list.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      max-parallel: 8
-      matrix:
-        repo: ${{ fromJson(needs.list.outputs.repos) }}
-    steps:
-      - name: Stale PRs in ${{ matrix.repo }}
-        uses: actions/stale@v9
-        env:
-          GITHUB_REPOSITORY: ${{ matrix.repo }}
-        with:
-          repo-token: ${{ secrets.AAA_ORG_TOKEN }}
-          days-before-stale: -1
-          days-before-close: -1
-          days-before-issue-stale: -1
-          days-before-issue-close: -1
-          days-before-pr-stale: 7
-          days-before-pr-close: 7
-          stale-pr-label: stale
-          exempt-pr-labels: "do-not-stale,security,client-bug"
-          operations-per-run: 100
-          ascending: true
-          debug-only: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
-          stale-pr-message: >
-            This pull request is stale because it has been open 7 days with no
-            activity. It will be closed in 7 more days (14 days of inactivity
-            in total) unless someone comments or adds `do-not-stale`,
-            `security`, or `client-bug`.
+          echo "DRY_RUN=$DRY_RUN NOW=$now_raw stale=${STALE_DAYS}d close=${CLOSE_DAYS}d after label"
 
-            Reopening this PR means PM renewed WIP.
-          close-pr-message: >
-            Closing as stale after 14 days of inactivity.
+          for repo in $repos; do
+            [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$ ]] || {
+              echo "- READ-FAILED $repo (not owner/name)" >> "$TMP/read-errors.md"
+              continue
+            }
+            if ! prs=$(gh pr list --repo "$repo" --state open --limit 500 --json number,updatedAt,labels); then
+              echo "- READ-FAILED $repo (gh pr list failed)" >> "$TMP/read-errors.md"
+              continue
+            fi
+            if [ -z "$prs" ]; then
+              echo "- READ-FAILED $repo (gh pr list returned no output)" >> "$TMP/read-errors.md"
+              continue
+            fi
+            if ! printf '%s' "$prs" | jq -e 'type == "array"' >/dev/null; then
+              echo "- READ-FAILED $repo (gh pr list did not return a JSON array of PRs)" >> "$TMP/read-errors.md"
+              continue
+            fi
 
-            Reopen if this is still work in progress — a reopen is PM renewed
-            WIP, not an automatic revive.
+            printf '%s\n' "$prs" | jq -c --arg label "$STALE_LABEL" --arg exempt "$EXEMPT_LABELS" '
+              .[]
+              | .number as $n
+              | select(($n | type) == "number")
+              | {
+                  number: $n,
+                  updatedAt: (.updatedAt // ""),
+                  names: [(.labels // [])[] | .name | select(type == "string")],
+                  stale: ((.labels // []) | any(.name == $label)),
+                  exempt: ((.labels // []) | any(.name as $n | ($exempt | split(",") | index($n))))
+                }
+            ' > "$TMP/pr-lines.${repo//\//_}" || {
+              echo "- READ-FAILED $repo (could not parse PR list)" >> "$TMP/read-errors.md"
+              continue
+            }
+
+            while IFS= read -r row || [ -n "${row:-}" ]; do
+              [ -z "$row" ] && continue
+              num=$(jq -r '.number' <<<"$row")
+              updated=$(jq -r '.updatedAt' <<<"$row")
+              stale=$(jq -r '.stale' <<<"$row")
+              exempt=$(jq -r '.exempt' <<<"$row")
+              [[ "$num" =~ ^[0-9]+$ ]] || {
+                echo "- READ-FAILED $repo (bad PR number)" >> "$TMP/read-errors.md"
+                continue
+              }
+              if [ "$exempt" = true ]; then
+                echo "- skip $repo #$num (exempt label)" >> "$TMP/actions.md"
+                continue
+              fi
+              if ! updated_epoch=$(date -u -d "$updated" +%s); then
+                echo "- READ-FAILED $repo #$num (bad updatedAt $updated)" >> "$TMP/read-errors.md"
+                continue
+              fi
+
+              if [ "$stale" = true ]; then
+                if ! events=$(gh api --paginate "repos/$repo/issues/$num/events"); then
+                  echo "- READ-FAILED $repo #$num (events failed)" >> "$TMP/read-errors.md"
+                  continue
+                fi
+                if [ -z "$events" ]; then
+                  echo "- READ-FAILED $repo #$num (events empty)" >> "$TMP/read-errors.md"
+                  continue
+                fi
+                labeled_at=$(printf '%s' "$events" | jq -rs --arg l "$STALE_LABEL" '
+                  add
+                  | if type != "array" then error("events") else . end
+                  | [ .[] | select(.event == "labeled" and .label.name == $l) | .created_at ]
+                  | last // empty
+                ') || {
+                  echo "- READ-FAILED $repo #$num (events were not a JSON array)" >> "$TMP/read-errors.md"
+                  continue
+                }
+                if [ -z "$labeled_at" ]; then
+                  echo "- READ-FAILED $repo #$num (stale label has no labeled event)" >> "$TMP/read-errors.md"
+                  continue
+                fi
+                if ! labeled_epoch=$(date -u -d "$labeled_at" +%s); then
+                  echo "- READ-FAILED $repo #$num (bad labeled-at $labeled_at)" >> "$TMP/read-errors.md"
+                  continue
+                fi
+                if [ $((updated_epoch - labeled_epoch)) -gt "$OWN_MARK_SLACK" ]; then
+                  if [ "$DRY_RUN" = true ]; then
+                    echo "- [dry-run] unstale $repo #$num" >> "$TMP/actions.md"
+                    continue
+                  fi
+                  if gh api -X DELETE "repos/$repo/issues/$num/labels/$STALE_LABEL" >/dev/null; then
+                    echo "- unstale $repo #$num" >> "$TMP/actions.md"
+                  else
+                    echo "- FAILED unstale $repo #$num" >> "$TMP/actions.md"
+                  fi
+                elif [ $((NOW_EPOCH - labeled_epoch)) -ge "$CLOSE_SECS" ]; then
+                  if [ "$DRY_RUN" = true ]; then
+                    echo "- [dry-run] close $repo #$num" >> "$TMP/actions.md"
+                    continue
+                  fi
+                  if gh pr close "$num" --repo "$repo" --comment "$(cat "$CLOSE_MSG_FILE")"; then
+                    echo "- close $repo #$num" >> "$TMP/actions.md"
+                  else
+                    echo "- FAILED close $repo #$num" >> "$TMP/actions.md"
+                  fi
+                fi
+              elif [ $((NOW_EPOCH - updated_epoch)) -ge "$STALE_SECS" ]; then
+                if [ "$DRY_RUN" = true ]; then
+                  echo "- [dry-run] stale $repo #$num" >> "$TMP/actions.md"
+                  continue
+                fi
+                if gh api -X POST "repos/$repo/issues/$num/labels" -f "labels[]=$STALE_LABEL" >/dev/null \
+                  && gh api -X POST "repos/$repo/issues/$num/comments" -F body=@"$STALE_MSG_FILE" >/dev/null; then
+                  echo "- stale $repo #$num" >> "$TMP/actions.md"
+                else
+                  echo "- FAILED stale $repo #$num" >> "$TMP/actions.md"
+                fi
+              fi
+            done < "$TMP/pr-lines.${repo//\//_}"
+          done
+
+          scanned=$(printf '%s\n' "$repos" | grep -c . || true)
+          marked=$(grep -c '^- stale ' "$TMP/actions.md" || true)
+          closed=$(grep -c '^- close ' "$TMP/actions.md" || true)
+          unstale=$(grep -c '^- unstale ' "$TMP/actions.md" || true)
+          failed=$(grep -c '^- FAILED ' "$TMP/actions.md" || true)
+          dry=$(grep -c '^- \[dry-run\]' "$TMP/actions.md" || true)
+          unread=$(grep -c '^- READ-FAILED' "$TMP/read-errors.md" || true)
+          echo "=== org-pr-stale: repos=$scanned  unreadable=$unread  stale=$marked  unstale=$unstale  closed=$closed  failed=$failed  dry_run=$dry ==="
+          if [ -s "$TMP/actions.md" ]; then cat "$TMP/actions.md"; else echo "(no actions)"; fi
+          cat "$TMP/read-errors.md"
+
+          status=0
+          if [ "${failed:-0}" -gt 0 ]; then
+            echo "::error::org-pr-stale failed $failed write(s) — verify AAA_ORG_TOKEN has pull-requests:write on org repos."
+            status=1
+          fi
+          if [ "${unread:-0}" -gt 0 ]; then
+            echo "::error::Could not read PRs or events in $unread of $scanned repo(s); those were skipped (listed above)."
+            status=1
+          fi
+          exit "$status"
