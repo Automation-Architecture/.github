@@ -25,8 +25,22 @@ WORKFLOW = ROOT / ".github/workflows/auto-merge-setting-guard.yml"
 ORG = "acme"
 REPO = "acme/.github"
 BOT = "github-actions[bot]"
-TITLE = "Native auto-merge is enabled on org repositories"
+TITLE = "Native auto-merge setting is out of allowlist policy"
 LABEL = "auto-merge-setting"
+ALLOWLIST_DOC = ROOT / "docs/auto-merge-allowlist.txt"
+EXPECTED_ALLOWLIST = (
+    ".github", "LKID", "aaa-SOP", "aaa-aios", "aaa-automation-inventory", "aaa-bin",
+    "aaa-client-dashboard", "aaa-discovery", "aaa-discovery-template", "aaa-finance-tracker",
+    "aaa-hooks", "aaa-intelligence", "aaa-internal-dashboard", "aaa-lead-pipeline",
+    "aaa-outreach", "aaa-portfolio", "aaa-pr-bot", "aaa-profit-run-rate", "aaa-rabbit",
+    "aaa-runbooks", "aaa-sentry-instrument", "aaa-ux-review", "aaa-watchtower", "aaa-website",
+    "aios-cdp", "aios-coffee", "aios-hotdata", "aios-mts-native-variant", "aios-signals",
+    "au-group", "client-registry", "collabworld-outreach", "fas-portal", "fidelity-dashboard",
+    "fidelity-dashboard-qa", "fidelity-qa", "freight-auditor", "heygen-video-automation",
+    "ic-linkedin-dashboard", "ic-stripe", "invoice-tracker", "kidneyhood-zendesk-agent",
+    "new-zealand-shores", "opportunity-builder", "proposal-iq", "ptg-campaign-brief-agent",
+    "ptg-content-generator", "rmbc", "roofdata", "skill-shelf", "vehicle-intelligence-engine",
+)
 
 # Stub gh. Keys are the API path without a leading "/" or "repos/" and
 # without the query. "graphql" is served from fx["graphql"]: {cursor: page},
@@ -147,20 +161,25 @@ def issue(n, state="open", user=BOT, body="", title=TITLE, pr=False):
     return i
 
 
-def mark(*names):
-    return "<!-- auto-merge-setting-guard:repos=" + ",".join(f"{ORG}/{n}" for n in names) + " -->"
+def mark(*, on=(), off=()):
+    """Issue identity comment. `on` = unexpected ON; `off` = allowlisted OFF."""
+    entries = [(f"{ORG}/{n}", "off") for n in off] + [(f"{ORG}/{n}", "on") for n in on]
+    entries.sort(key=lambda x: x[0])
+    return "<!-- auto-merge-setting-guard:repos=" + ",".join(f"{n}:{why}" for n, why in entries) + " -->"
 
 
 CASES = []
 
 
-def case(name, fx, *, ok=True, red_at=None, says=(), not_says=(), env=None, writes=None, flagged=None, check=None):
+def case(name, fx, *, ok=True, red_at=None, says=(), not_says=(), env=None, writes=None, flagged=None,
+         check=None, allowlist=""):
     """ok: the run is green. red_at: the step that must fail ("list",
     "report"). says / not_says: stdout substrings. writes: the exact list of
     "METHOD key" writes, in order. flagged: the exact flagged repos (short
-    names). check(writes, report, calls): extra assertions."""
+    names). allowlist: file body (default empty = OFF-everywhere).
+    check(writes, report, calls): extra assertions."""
     CASES.append(dict(name=name, fx=fx, ok=ok, red_at=red_at, says=says, not_says=not_says, env=env or {},
-                      writes=writes, flagged=flagged, check=check))
+                      writes=writes, flagged=flagged, check=check, allowlist=allowlist))
 
 
 ISSUE_POST = f"POST {REPO}/issues"
@@ -172,31 +191,65 @@ ONE_ON = quiet_repos() + [repo("hot", on=True)]
 TWO_ON = quiet_repos() + [repo("hot", on=True), repo("warm", on=True)]
 
 # ── Detection ──────────────────────────────────────────────────────────────
-case("all off, no issue: no writes", world(), flagged=[], writes=[], says=("checked 3 non-archived repos (0 archived); flagged 0",
+case("all off, no issue: no writes", world(), flagged=[], writes=[], says=("checked 3 non-archived repos (0 archived); allowlist 0; flagged 0",
                                                                           "no open guard issue"))
 case("one repo on: opens the issue with label, list and why", world(ONE_ON), flagged=["hot"],
      writes=[ISSUE_POST], says=("opened #99",),
      check=lambda w, r, c: w[0]["fields"]["title"] == TITLE and w[0]["fields"]["labels"] == [LABEL]
-     and mark("hot") in w[0]["fields"]["body"] and "Why it must stay off" in w[0]["fields"]["body"]
-     and "acme/hot" in w[0]["fields"]["body"] and "never changes settings" in w[0]["fields"]["body"])
+     and mark(on=["hot"]) in w[0]["fields"]["body"] and "GAAA-3961" in w[0]["fields"]["body"]
+     and "Not allowlisted, setting ON" in w[0]["fields"]["body"]
+     and "acme/hot" in w[0]["fields"]["body"] and "never changes a repository setting" in w[0]["fields"]["body"])
 case("archived repo with it on: ignored, named in the log", world(quiet_repos() + [repo("old", on=True, archived=True)]),
      flagged=[], writes=[], says=("(1 archived)", "archived with it on (ignored): acme/old"))
 case("flagged list is sorted", world(quiet_repos() + [repo("zeta", on=True), repo("alpha", on=True)]),
-     flagged=["alpha", "zeta"], check=lambda w, r, c: mark("alpha", "zeta") in w[0]["fields"]["body"])
+     flagged=["alpha", "zeta"], check=lambda w, r, c: mark(on=["alpha", "zeta"]) in w[0]["fields"]["body"])
 case("repos on a later page are found (pagination follows cursors)",
      world(quiet_repos(5) + [repo("late", on=True)], gql=pages(quiet_repos(5) + [repo("late", on=True)], size=2)),
      flagged=["late"], check=lambda w, r, c: [x["fields"].get("after", "") for x in c if x["key"] == "graphql"]
      == ["", "c1", "c2"])
 
+# ── Allowlist mode (GAAA-3961) ─────────────────────────────────────────────
+case("allowlisted repo on: not flagged", world(quiet_repos() + [repo("kept", on=True)]),
+     allowlist="kept\n", flagged=[], writes=[], says=("allowlist 1; flagged 0",))
+case("allowlisted repo off: flagged", world(quiet_repos() + [repo("kept")]),
+     allowlist="kept\n", flagged=["kept"], writes=[ISSUE_POST],
+     check=lambda w, r, c: mark(off=["kept"]) in w[0]["fields"]["body"]
+     and "Allowlisted, setting OFF" in w[0]["fields"]["body"]
+     and r["allowlisted_off"] == ["acme/kept"] and r["unexpected_on"] == [])
+case("allowlisted on is ok; other on is flagged",
+     world(quiet_repos() + [repo("kept", on=True), repo("hot", on=True)]),
+     allowlist="kept\n", flagged=["hot"],
+     check=lambda w, r, c: mark(on=["hot"]) in w[0]["fields"]["body"] and r["unexpected_on"] == ["acme/hot"])
+case("allowlisted off and unexpected on both flagged, sorted",
+     world(quiet_repos() + [repo("kept"), repo("hot", on=True)]),
+     allowlist="kept\n", flagged=["hot", "kept"],
+     check=lambda w, r, c: mark(on=["hot"], off=["kept"]) in w[0]["fields"]["body"]
+     and "Allowlisted, setting OFF" in w[0]["fields"]["body"]
+     and "Not allowlisted, setting ON" in w[0]["fields"]["body"])
+case("allowlist owner/name form matches", world(quiet_repos() + [repo("kept", on=True)]),
+     allowlist=f"{ORG}/kept\n", flagged=[])
+case("allowlist comments and blanks are ignored", world(quiet_repos() + [repo("kept", on=True)]),
+     allowlist="# heading\n\nkept\n# trailing\n", flagged=[])
+case("archived allowlisted repo off: ignored", world(quiet_repos() + [repo("old", archived=True)]),
+     allowlist="old\n", flagged=[], writes=[])
+case("missing allowlist file: red", world(), env={"ALLOWLIST_FILE": "/no/such/allowlist"},
+     ok=False, red_at="list", says=("allowlist file missing",))
+case("malformed allowlist line: red", world(), allowlist="acme/too/many/slashes\n",
+     ok=False, red_at="list", says=("expected owner/name or name",))
+case("duplicate allowlist entry: red", world(), allowlist="hot\nhot\n",
+     ok=False, red_at="list", says=("duplicate allowlist entry",))
+case("bad repository name in allowlist: red", world(), allowlist="has space\n",
+     ok=False, red_at="list", says=("bad repository name",))
+
 # ── Issue lifecycle ────────────────────────────────────────────────────────
 case("label missing: created, then the issue", world(ONE_ON, label=False), writes=[LABEL_POST, ISSUE_POST])
-case("open issue with the same list: no writes", world(ONE_ON, issues=[issue(7, body=mark("hot") + "\nx")]),
+case("open issue with the same list: no writes", world(ONE_ON, issues=[issue(7, body=mark(on=["hot"]) + "\nx")]),
      writes=[], says=("#7 is open and up to date",))
 case("open issue, list changed: body updated and a comment",
-     world(TWO_ON, issues=[issue(7, body=mark("hot"))]), writes=[PATCH7, COMMENT7], says=("updated #7",),
-     check=lambda w, r, c: mark("hot", "warm") in w[0]["fields"]["body"] and "state" not in w[0]["fields"])
+     world(TWO_ON, issues=[issue(7, body=mark(on=["hot"]))]), writes=[PATCH7, COMMENT7], says=("updated #7",),
+     check=lambda w, r, c: mark(on=["hot", "warm"]) in w[0]["fields"]["body"] and "state" not in w[0]["fields"])
 case("closed issue: reopened, body updated, comment (no duplicate)",
-     world(ONE_ON, issues=[issue(7, state="closed", body=mark("hot"))]),
+     world(ONE_ON, issues=[issue(7, state="closed", body=mark(on=["hot"]))]),
      writes=[PATCH7, PATCH7, COMMENT7], says=("reopened #7",),
      check=lambda w, r, c: w[0]["fields"] == {"state": "open"})
 case("open issue preferred over a newer closed one", world(ONE_ON, issues=[issue(9, state="closed"), issue(7)]),
@@ -204,7 +257,7 @@ case("open issue preferred over a newer closed one", world(ONE_ON, issues=[issue
 case("newest closed issue reused", world(ONE_ON, issues=[issue(3, state="closed"), issue(7, state="closed")]),
      writes=[PATCH7, PATCH7, COMMENT7])
 case("all off, open issue: closing comment then closed",
-     world(issues=[issue(7, body=mark("hot"))]), writes=[COMMENT7, PATCH7], says=("closed #7",),
+     world(issues=[issue(7, body=mark(on=["hot"]))]), writes=[COMMENT7, PATCH7], says=("closed #7",),
      check=lambda w, r, c: w[1]["fields"] == {"state": "closed", "state_reason": "completed"})
 case("all off, closed issue: nothing to do", world(issues=[issue(7, state="closed")]), writes=[])
 case("an issue by someone else is ignored (public repo)", world(ONE_ON, issues=[issue(7, user="mallory")]),
@@ -295,23 +348,63 @@ def structure_checks(wf):
     if wf.get("permissions") != {}:
         errs.append("top-level permissions must be {}")
     job = wf["jobs"]["check"]
-    if job.get("permissions") != {"issues": "write"}:
+    if job.get("permissions") != {"contents": "read", "issues": "write"}:
         errs.append(f"job permissions are {job.get('permissions')}")
     if "refs/heads/main" not in job.get("if", "") or "Automation-Architecture/.github" not in job.get("if", ""):
         errs.append("job must be limited to main of this repository")
-    for st in job["steps"]:
-        if "uses" in st:
-            errs.append(f"step uses an action ({st['uses']}): no checkout or third-party code")
+    uses_steps = [st for st in job["steps"] if "uses" in st]
+    if len(uses_steps) != 1 or not str(uses_steps[0].get("uses", "")).startswith("actions/checkout@"):
+        errs.append(f"only actions/checkout is allowed besides the two scripts; got {[st.get('uses') for st in uses_steps]}")
+    if uses_steps[0].get("with", {}).get("persist-credentials") is not False:
+        errs.append("checkout must set persist-credentials: false")
+    if "AAA_ORG_TOKEN" in json.dumps(uses_steps[0]):
+        errs.append("checkout must not see the PAT")
     pat = [st.get("id") or st["name"] for st in job["steps"] if "AAA_ORG_TOKEN" in json.dumps(st.get("env", {}))]
     if pat != ["list"]:
         errs.append(f"AAA_ORG_TOKEN is exposed to steps {pat}; only the listing may see it")
-    lst = job["steps"][0]["run"]
+    if "ALLOWLIST_FILE" not in json.dumps(job["steps"]):
+        errs.append("the listing must read ALLOWLIST_FILE")
+    lst = next(st["run"] for st in job["steps"] if st.get("id") == "list")
     if "isArchived:" in lst.replace(" ", "") or "/repos" in lst:
         errs.append("the listing must be GraphQL organization.repositories over all repos (no REST list, no filter)")
     if "-X" in lst or "mutation" in lst:
         errs.append("the PAT step must not write")
     if wf["env"].get("ALERT_LABEL") != LABEL or wf["env"].get("ISSUE_TITLE") != TITLE:
         errs.append("ALERT_LABEL / ISSUE_TITLE changed; update the tests deliberately")
+    header = WORKFLOW.read_text().split("on:", 1)[0]
+    if "GAAA-3961" not in header or "supersedes 2026-10-05" not in header:
+        errs.append("header must say GAAA-3961 allowlist supersedes 2026-10-05 OFF-everywhere")
+    if "never changes a repository setting" not in header and "never PAT-writes" not in header:
+        if "The guard only reports. It never changes a repository setting." not in header:
+            errs.append("header must keep report-only")
+    return errs
+
+
+def production_allowlist_checks():
+    errs = []
+    if not ALLOWLIST_DOC.is_file():
+        return ["docs/auto-merge-allowlist.txt is missing"]
+    names = []
+    for i, raw in enumerate(ALLOWLIST_DOC.read_text().splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "/" in line:
+            errs.append(f"line {i}: production file uses bare names, got {line!r}")
+            continue
+        names.append(line)
+    if names != list(EXPECTED_ALLOWLIST):
+        errs.append(f"allowlist names drifted (got {len(names)}, expected {len(EXPECTED_ALLOWLIST)})")
+        missing = [n for n in EXPECTED_ALLOWLIST if n not in names]
+        extra = [n for n in names if n not in EXPECTED_ALLOWLIST]
+        if missing:
+            errs.append(f"missing {missing}")
+        if extra:
+            errs.append(f"extra {extra}")
+    if len(names) != 51:
+        errs.append(f"expected 51 allowlisted repos, got {len(names)}")
+    if len(names) != len(set(names)):
+        errs.append("duplicate names in the production allowlist")
     return errs
 
 
@@ -321,10 +414,16 @@ def main():
     for e in errs:
         print(f"FAIL  structure: {e}")
     if not errs:
-        print("PASS  structure: triggers, permissions, PAT scope, read-only listing")
-    steps = {st.get("id", "report"): st for st in wf["jobs"]["check"]["steps"]}
+        print("PASS  structure: triggers, permissions, PAT scope, read-only listing, allowlist")
+    aerrs = production_allowlist_checks()
+    for e in aerrs:
+        print(f"FAIL  allowlist: {e}")
+    if not aerrs:
+        print(f"PASS  allowlist: {len(EXPECTED_ALLOWLIST)} unique names")
+    run_steps = [st for st in wf["jobs"]["check"]["steps"] if "run" in st]
+    steps = {st.get("id", "report"): st for st in run_steps}
     assert list(steps) == ["list", "report"], list(steps)
-    failures = len(errs)
+    failures = len(errs) + len(aerrs)
     with tempfile.TemporaryDirectory() as td:
         tmp = pathlib.Path(td)
         (tmp / "bin").mkdir()
@@ -338,6 +437,7 @@ def main():
             subprocess.run(["rm", "-rf", str(state)], check=True)
             state.mkdir()
             (tmp / "fx.json").write_text(json.dumps(c["fx"]))
+            (tmp / "allowlist.txt").write_text(c["allowlist"])
             env_over = dict(c["env"])
             list_token = env_over.pop("GH_TOKEN_LIST", "org-pat")
             base = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
@@ -345,7 +445,8 @@ def main():
                     "ORG": ORG, "REPO": REPO, "SELF_REPO": REPO, "RUNNER_TEMP": str(state),
                     "REPORT_FILE": str(state / "report.json"), "BODY_FILE": str(state / "body.md"),
                     "BOT_LOGIN": BOT, "DRY_RUN": "false", "GITHUB_STEP_SUMMARY": str(state / "summary.md"),
-                    "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state)}
+                    "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state),
+                    "ALLOWLIST_FILE": str(tmp / "allowlist.txt")}
             base.update(env_over)
             out_all, red_at, outputs = "", None, {}
             for sid in ("list", "report"):
@@ -398,7 +499,7 @@ def main():
             print(f"{'FAIL' if why else 'PASS'}  {c['name']}" + (f"  ({'; '.join(why)})" if why else ""))
             if why:
                 print(out_all[-3000:])
-    total = len(CASES) + 1
+    total = len(CASES) + 2
     print(f"\n{total - failures}/{total} passed")
     return 1 if failures else 0
 

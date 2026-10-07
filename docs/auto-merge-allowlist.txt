@@ -1,0 +1,68 @@
+# GAAA-3961 standing native auto-merge allowlist (Brad approved 2026-10-07).
+#
+# Repos listed here SHOULD have Settings > Pull Requests > Allow auto-merge ON
+# (REST allow_auto_merge / GraphQL autoMergeAllowed). Every other non-archived
+# Automation-Architecture repo MUST keep it OFF.
+#
+# One repository name per line (no owner prefix). Lines starting with # and
+# blank lines are ignored. auto-merge-setting-guard.yml alerts on drift and
+# never PAT-writes settings.
+#
+# After this file merges, DevOps enables the setting on these repos with:
+#   gh api -X PATCH repos/Automation-Architecture/<repo> -F allow_auto_merge=true
+#
+# Native auto-merge is for hygiene / label auto-merge-ok / client-bug after
+# Codex + agency-delivery/gate. Brad veto: secrets, billing, destroy, named
+# production risk. Do not add Autopilot-class GitHub listeners.
+#
+.github
+LKID
+aaa-SOP
+aaa-aios
+aaa-automation-inventory
+aaa-bin
+aaa-client-dashboard
+aaa-discovery
+aaa-discovery-template
+aaa-finance-tracker
+aaa-hooks
+aaa-intelligence
+aaa-internal-dashboard
+aaa-lead-pipeline
+aaa-outreach
+aaa-portfolio
+aaa-pr-bot
+aaa-profit-run-rate
+aaa-rabbit
+aaa-runbooks
+aaa-sentry-instrument
+aaa-ux-review
+aaa-watchtower
+aaa-website
+aios-cdp
+aios-coffee
+aios-hotdata
+aios-mts-native-variant
+aios-signals
+au-group
+client-registry
+collabworld-outreach
+fas-portal
+fidelity-dashboard
+fidelity-dashboard-qa
+fidelity-qa
+freight-auditor
+heygen-video-automation
+ic-linkedin-dashboard
+ic-stripe
+invoice-tracker
+kidneyhood-zendesk-agent
+new-zealand-shores
+opportunity-builder
+proposal-iq
+ptg-campaign-brief-agent
+ptg-content-generator
+rmbc
+roofdata
+skill-shelf
+vehicle-intelligence-engine

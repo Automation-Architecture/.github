@@ -4,49 +4,57 @@ name: Auto-merge setting guard
 # sync it into a repo (one run here covers the whole org). This repository is
 # public, so the run's own minutes are free.
 #
-# Why (Brad approved 2026-10-05): the per-repo doc-auto-merge.yml copies,
-# which carried event-driven handlers that disarmed GitHub's native
-# auto-merge, are being deleted in favour of the central sweeps. That is safe
-# only while the repository setting "Allow auto-merge" (REST allow_auto_merge,
-# GraphQL autoMergeAllowed) is OFF on every repo: with it on, anyone can arm
-# native auto-merge on a PR and GitHub merges it as soon as the ruleset is
-# satisfied, bypassing the Codex verdict, the hold label and the doc merger's
-# checks. It was off on all 107 non-archived repos on 2026-10-05.
+# Why (GAAA-3961, Brad approved 2026-10-07; supersedes 2026-10-05
+# OFF-everywhere): native auto-merge is allowed on the standing allowlist in
+# docs/auto-merge-allowlist.txt (hygiene / auto-merge-ok / client-bug after
+# Codex + agency-delivery/gate). Every other non-archived repo must keep
+# Settings > Pull Requests > Allow auto-merge (REST allow_auto_merge, GraphQL
+# autoMergeAllowed) OFF. A non-allowlisted repo with it ON lets anyone arm
+# native auto-merge and GitHub merges as soon as the ruleset is satisfied.
+# An allowlisted repo with it OFF cannot use the factory path. It was off on
+# all 107 non-archived repos on 2026-10-05; DevOps PATCHes allow_auto_merge
+# on the allowlist after this policy file merges. This guard never writes
+# settings.
 #
 # ── What it does ──────────────────────────────────────────────────────────
 # Once a day it lists EVERY repository of the org through GraphQL
 # (organization.repositories, paginated; the REST /orgs/{org}/repos list
 # missed a repo on 2026-10-05) and reads autoMergeAllowed. A non-archived
-# repo with it on is a finding. Archived repos are read-only, so they are
-# listed in the summary for information and never alert.
+# allowlisted repo with it off, or a non-archived non-allowlisted repo with
+# it on, is a finding. Archived repos are read-only, so they are listed in
+# the summary for information and never alert.
 #
 # If any repo is flagged it opens, or updates, ONE issue in this repository,
-# titled ISSUE_TITLE and labelled ALERT_LABEL (created if missing), listing the
-# repos and why the setting must stay off. The body is rewritten only when the
-# list changes; a closed issue is reopened rather than duplicated. When a later
-# run finds no flagged repo, the open issue gets a closing comment and is
-# closed. Only issues written by github-actions[bot] count: this repository is
-# public, so anyone can open an issue with the same title or label.
+# titled ISSUE_TITLE and labelled ALERT_LABEL (created if missing), listing
+# the drift (allowlisted-off vs unexpected-on). The body is rewritten only
+# when the list changes; a closed issue is reopened rather than duplicated.
+# When a later run finds no flagged repo, the open issue gets a closing
+# comment and is closed. Only issues written by github-actions[bot] count:
+# this repository is public, so anyone can open an issue with the same title
+# or label.
 #
 # The guard only reports. It never changes a repository setting.
 #
 # ── Fails closed ──────────────────────────────────────────────────────────
-# A missing token, a failed or malformed GraphQL page, a GraphQL `errors`
-# field, a null node, a non-boolean autoMergeAllowed or isArchived, a
-# duplicate repo, a page loop that does not end, a listing whose length is not
-# the reported totalCount, a totalCount that differs from the org's REST
-# repository counts (public_repos + total_private_repos, a second independent
-# source), or a listing without this repository makes the run RED. A red run is
-# the alert that the guard itself is broken.
+# A missing or malformed allowlist file, a missing token, a failed or
+# malformed GraphQL page, a GraphQL `errors` field, a null node, a
+# non-boolean autoMergeAllowed or isArchived, a duplicate repo, a page loop
+# that does not end, a listing whose length is not the reported totalCount, a
+# totalCount that differs from the org's REST repository counts
+# (public_repos + total_private_repos, a second independent source), or a
+# listing without this repository makes the run RED. A red run is the alert
+# that the guard itself is broken.
 #
 # ── Credentials ───────────────────────────────────────────────────────────
 # Reading the settings of other private repos needs an org-wide credential.
 # The only one here is AAA_ORG_TOKEN (web3sea, an org owner; classic PAT;
 # 1Password vault aaa-APIs, item aaa-org-token), the same token the org-wide
-# sweeps use. It is used only in the first step, only for GET requests (the
+# sweeps use. It is used only in the list step, only for GET requests (the
 # GraphQL query is a read), and it never meets code from a PR: the job runs
-# only on schedule or a dispatch of main. Every write (the issue, its comments
-# and the label) uses GITHUB_TOKEN, whose only permission is issues: write.
+# only on schedule or a dispatch of main. Checkout uses GITHUB_TOKEN
+# (contents: read, persist-credentials: false) so the allowlist file is the
+# copy on main. Every write (the issue, its comments and the label) uses
+# GITHUB_TOKEN, whose write permission is issues: write.
 #
 # ── Triggers ──────────────────────────────────────────────────────────────
 # Daily at 05:43 UTC, and workflow_dispatch from main only (the job
@@ -54,10 +62,10 @@ name: Auto-merge setting guard
 # `dry_run` lists and reports without touching the issue.
 #
 # Observability: one line per run,
-# `auto-merge-setting-guard: checked N non-archived repos (A archived); flagged K: ...`,
+# `auto-merge-setting-guard: checked N non-archived repos (A archived); allowlist M; flagged K: ...`,
 # the list in the job summary, and the issue. Watch for: no run on a day
 # (schedule dropped), a red run (broken guard), an open issue with label
-# ALERT_LABEL (a repo has native auto-merge back on).
+# ALERT_LABEL (drift from the GAAA-3961 allowlist).
 
 on:
   schedule:
@@ -77,7 +85,7 @@ concurrency:
 
 env:
   ALERT_LABEL: "auto-merge-setting"
-  ISSUE_TITLE: "Native auto-merge is enabled on org repositories"
+  ISSUE_TITLE: "Native auto-merge setting is out of allowlist policy"
   # A hard stop for the page loop (100 repos a page).
   MAX_PAGES: "50"
 
@@ -87,14 +95,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      contents: read
       issues: write
     steps:
+      - name: Check out allowlist
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: List every org repo's auto-merge setting (org PAT, read-only)
         id: list
         env:
           GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
           ORG: ${{ github.repository_owner }}
           SELF_REPO: ${{ github.repository }}
+          ALLOWLIST_FILE: docs/auto-merge-allowlist.txt
           REPORT_FILE: ${{ runner.temp }}/auto-merge-setting-report.json
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
         run: |
@@ -106,6 +121,35 @@ jobs:
           [[ "$SELF_REPO" == "$ORG/"* ]] || { echo "::error::bad repository"; exit 1; }
           [[ "${MAX_PAGES:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::MAX_PAGES must be a positive whole number"; exit 1; }
           case "${DRY_RUN:-false}" in true|false) ;; *) echo "::error::bad dry_run"; exit 1 ;; esac
+
+          ALLOWLIST_FILE="${ALLOWLIST_FILE:-docs/auto-merge-allowlist.txt}"
+          [ -f "$ALLOWLIST_FILE" ] || { echo "::error::allowlist file missing: $ALLOWLIST_FILE (GAAA-3961)"; exit 1; }
+          allow='[]'
+          lineno=0
+          while IFS= read -r raw || [ -n "$raw" ]; do
+            lineno=$((lineno + 1))
+            line="${raw#"${raw%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [ -z "$line" ] && continue
+            [ "${line:0:1}" = "#" ] && continue
+            if [[ "$line" == */* ]]; then
+              owner="${line%%/*}"
+              repo="${line#*/}"
+              if [[ "$repo" == */* ]] || [ -z "$repo" ] || [ -z "$owner" ]; then
+                echo "::error::$ALLOWLIST_FILE:$lineno: expected owner/name or name, got $line"; exit 1
+              fi
+            else
+              owner="$ORG"
+              repo="$line"
+            fi
+            [[ "$owner" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::$ALLOWLIST_FILE:$lineno: bad owner in $line"; exit 1; }
+            [[ "$repo" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::$ALLOWLIST_FILE:$lineno: bad repository name in $line"; exit 1; }
+            n="$owner/$repo"
+            if jq -e --arg n "$n" 'index($n) != null' <<<"$allow" >/dev/null; then
+              echo "::error::$ALLOWLIST_FILE:$lineno: duplicate allowlist entry $n"; exit 1
+            fi
+            allow=$(jq -c --arg n "$n" '. + [$n]' <<<"$allow")
+          done < "$ALLOWLIST_FILE"
 
           # All repositories, archived included: totalCount then matches the
           # REST org counts, which include archived repos.
@@ -169,18 +213,33 @@ jobs:
           jq -e --arg self "$SELF_REPO" 'any(.[]; .name == $self)' <<<"$nodes" > /dev/null \
             || { echo "::error::the listing does not include $SELF_REPO; not trusting it"; exit 1; }
 
-          jq -n --argjson n "$nodes" '{
-              checked: ($n | map(select(.archived | not)) | length),
-              archived: ($n | map(select(.archived)) | length),
-              flagged: ($n | map(select((.archived | not) and .on) | .name) | sort),
-              archived_on: ($n | map(select(.archived and .on) | .name) | sort)
-            }' > "$REPORT_FILE"
-          jq -r '"auto-merge-setting-guard: checked \(.checked) non-archived repos (\(.archived) archived); flagged \(.flagged | length)"
-              + (if (.flagged | length) > 0 then ": " + (.flagged | join(", ")) else "" end)
+          jq -n --argjson n "$nodes" --argjson allow "$allow" '
+              {
+                checked: ($n | map(select(.archived | not)) | length),
+                archived: ($n | map(select(.archived)) | length),
+                allowlist: ($allow | length),
+                allowlisted_off: ($n | map(select((.archived | not) and (.on | not) and (.name as $x | $allow | index($x) != null)) | .name) | sort),
+                unexpected_on: ($n | map(select((.archived | not) and .on and (.name as $x | $allow | index($x) == null)) | .name) | sort),
+                archived_on: ($n | map(select(.archived and .on) | .name) | sort)
+              }
+              | .flagged = ((.allowlisted_off + .unexpected_on) | sort)
+              | .flagged_detail = (
+                  [(.allowlisted_off[] | {name: ., why: "off"}),
+                   (.unexpected_on[] | {name: ., why: "on"})]
+                  | sort_by(.name)
+                )
+            ' > "$REPORT_FILE"
+          jq -r '"auto-merge-setting-guard: checked \(.checked) non-archived repos (\(.archived) archived); allowlist \(.allowlist); flagged \(.flagged | length)"
+              + (if (.flagged | length) > 0 then
+                   " (allowlisted-off \(.allowlisted_off | length), unexpected-on \(.unexpected_on | length)): " + (.flagged | join(", "))
+                 else "" end)
               + (if (.archived_on | length) > 0 then "; archived with it on (ignored): " + (.archived_on | join(", ")) else "" end)' "$REPORT_FILE"
-          jq -r '"### Native auto-merge setting\n\nChecked \(.checked) non-archived repositories (\(.archived) archived repositories skipped).\n\n"
-              + (if (.flagged | length) == 0 then "No repository allows native auto-merge.\n"
-                 else "**Allow auto-merge is ON in:**\n\n" + (.flagged | map("- `\(.)`") | join("\n")) + "\n" end)
+          jq -r '"### Native auto-merge setting (GAAA-3961 allowlist)\n\nChecked \(.checked) non-archived repositories (\(.archived) archived skipped); allowlist \(.allowlist).\n\n"
+              + (if (.flagged | length) == 0 then "Native auto-merge matches the allowlist policy.\n"
+                 else
+                   (if (.allowlisted_off | length) > 0 then "**Allowlisted, setting OFF (should be ON):**\n\n" + (.allowlisted_off | map("- `\(.)`") | join("\n")) + "\n\n" else "" end)
+                   + (if (.unexpected_on | length) > 0 then "**Not allowlisted, setting ON (must be OFF):**\n\n" + (.unexpected_on | map("- `\(.)`") | join("\n")) + "\n" else "" end)
+                 end)
               + (if (.archived_on | length) > 0 then "\nArchived, setting on, ignored (read-only): " + (.archived_on | map("`\(.)`") | join(", ")) + "\n" else "" end)' \
               "$REPORT_FILE" >> "$SUMMARY"
           echo "dry_run=$DRY_RUN" >> "$OUT"
@@ -202,9 +261,15 @@ jobs:
           case "${DRY_RUN:-}" in true|false) ;; *) echo "::error::bad dry_run"; exit 1 ;; esac
           flagged=$(jq -ce '.flagged | if type == "array" and all(.[]; type == "string") then . else error("flagged") end' "$REPORT_FILE") \
             || { echo "::error::bad report"; exit 1; }
+          jq -ce '.flagged_detail | if type == "array" and all(.[]; type == "object" and (.name | type) == "string" and (.why == "on" or .why == "off")) then . else error("flagged_detail") end' "$REPORT_FILE" > /dev/null \
+            || { echo "::error::bad report"; exit 1; }
+          allowlisted_off=$(jq -ce '.allowlisted_off | if type == "array" and all(.[]; type == "string") then . else error("allowlisted_off") end' "$REPORT_FILE") \
+            || { echo "::error::bad report"; exit 1; }
+          unexpected_on=$(jq -ce '.unexpected_on | if type == "array" and all(.[]; type == "string") then . else error("unexpected_on") end' "$REPORT_FILE") \
+            || { echo "::error::bad report"; exit 1; }
           count=$(jq 'length' <<<"$flagged")
-          # The repo list, sorted, is the issue's identity for "changed or not".
-          LIST_MARK="<!-- auto-merge-setting-guard:repos=$(jq -r 'join(",")' <<<"$flagged") -->"
+          # The repo list plus why, sorted, is the issue's identity for "changed or not".
+          LIST_MARK="<!-- auto-merge-setting-guard:repos=$(jq -r '.flagged_detail | map("\(.name):\(.why)") | join(",")' "$REPORT_FILE") -->"
           RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/$REPO/actions/runs/${GITHUB_RUN_ID:-0}"
 
           # The guard issue: ours (bot-authored, labelled, exact title), open
@@ -223,28 +288,40 @@ jobs:
           fi
 
           if [ "$count" -eq 0 ]; then
-            if [ "$state" != open ]; then say "No repository allows native auto-merge; no open guard issue."; exit 0; fi
-            if [ "$DRY_RUN" = true ]; then say "Dry run: would close #$n (no repository allows native auto-merge); nothing written."; exit 0; fi
-            printf 'No non-archived repository allows native auto-merge any more. Closing.\n\nRun: %s\n' "$RUN_URL" > "$BODY_FILE"
+            if [ "$state" != open ]; then say "Native auto-merge matches the allowlist policy; no open guard issue."; exit 0; fi
+            if [ "$DRY_RUN" = true ]; then say "Dry run: would close #$n (native auto-merge matches the allowlist policy); nothing written."; exit 0; fi
+            printf 'Native auto-merge now matches the GAAA-3961 allowlist policy. Closing.\n\nRun: %s\n' "$RUN_URL" > "$BODY_FILE"
             gh api -X POST "repos/$REPO/issues/$n/comments" -F body=@"$BODY_FILE" > /dev/null \
               || { echo "::error::commenting on #$n failed"; exit 1; }
             gh api -X PATCH "repos/$REPO/issues/$n" -f state=closed -f state_reason=completed > /dev/null \
               || { echo "::error::closing #$n failed"; exit 1; }
-            say "No repository allows native auto-merge: closed #$n."
+            say "Native auto-merge matches the allowlist policy: closed #$n."
             exit 0
           fi
 
           {
             echo "$LIST_MARK"
-            echo "The repository setting **Allow auto-merge** (REST \`allow_auto_merge\`, GraphQL \`autoMergeAllowed\`) is ON in $count non-archived repositor$( [ "$count" -eq 1 ] && echo y || echo ies):"
+            echo "The repository setting **Allow auto-merge** (REST \`allow_auto_merge\`, GraphQL \`autoMergeAllowed\`) is out of the GAAA-3961 allowlist policy on $count non-archived repositor$( [ "$count" -eq 1 ] && echo y || echo ies):"
             echo
-            jq -r '.[] | "- [`\(.)`](https://github.com/\(.)/settings)"' <<<"$flagged"
+            if [ "$(jq 'length' <<<"$allowlisted_off")" -gt 0 ]; then
+              echo "**Allowlisted, setting OFF (should be ON):**"
+              echo
+              jq -r '.[] | "- [`\(.)`](https://github.com/\(.)/settings)"' <<<"$allowlisted_off"
+              echo
+            fi
+            if [ "$(jq 'length' <<<"$unexpected_on")" -gt 0 ]; then
+              echo "**Not allowlisted, setting ON (must be OFF):**"
+              echo
+              jq -r '.[] | "- [`\(.)`](https://github.com/\(.)/settings)"' <<<"$unexpected_on"
+              echo
+            fi
+            echo "**Policy (GAAA-3961, supersedes 2026-10-05 OFF-everywhere).** Native auto-merge is allowed only on repos listed in \`docs/auto-merge-allowlist.txt\`, for hygiene / \`auto-merge-ok\` / client-bug after Codex + \`agency-delivery/gate\`. Every other non-archived repo must keep the setting off. Brad veto: secrets / billing / destroy / named production risk. This guard never changes a repository setting."
             echo
-            echo "**Why it must stay off.** Org PRs merge only through the central sweeps, after a completed Codex review on the head, no open P0/P1 finding and green CI. The per-repo doc-auto-merge.yml copies that disarmed native auto-merge are being removed. With this setting on, anyone can arm native auto-merge on a PR and GitHub merges it as soon as the ruleset is satisfied, bypassing the Codex verdict, the hold label and the doc merger's checks."
+            echo "**To fix allowlisted-off:** \`gh api -X PATCH repos/<owner>/<repo> -F allow_auto_merge=true\` (DevOps; do not do this from the guard)."
             echo
-            echo "**To fix:** in each repository, Settings > General > Pull Requests, untick \"Allow auto-merge\" (or \`gh api -X PATCH repos/<owner>/<repo> -F allow_auto_merge=false\`). Check that no open PR has auto-merge armed. This issue closes itself on the first daily run that finds none."
+            echo "**To fix unexpected-on:** Settings > General > Pull Requests, untick \"Allow auto-merge\" (or \`gh api -X PATCH repos/<owner>/<repo> -F allow_auto_merge=false\`). Check that no open PR has auto-merge armed."
             echo
-            echo "Reported by auto-merge-setting-guard.yml (report only; it never changes settings). Last run: $RUN_URL"
+            echo "This issue closes itself on the first daily run that finds no drift. Reported by auto-merge-setting-guard.yml (report only). Last run: $RUN_URL"
           } > "$BODY_FILE"
           names=$(jq -r 'join(", ")' <<<"$flagged")
 
@@ -258,7 +335,7 @@ jobs:
           if ! gh api "repos/$REPO/labels/$ALERT_LABEL" > /dev/null 2> "$RUNNER_TEMP/label.err"; then
             grep -q 'HTTP 404' "$RUNNER_TEMP/label.err" || { cat "$RUNNER_TEMP/label.err" >&2; echo "::error::reading label $ALERT_LABEL failed"; exit 1; }
             gh api -X POST "repos/$REPO/labels" -f name="$ALERT_LABEL" -f color=d93f0b \
-              -f description="An org repo allows native auto-merge (auto-merge-setting-guard.yml)" > /dev/null \
+              -f description="An org repo's native auto-merge setting is out of the GAAA-3961 allowlist (auto-merge-setting-guard.yml)" > /dev/null \
               || { echo "::error::creating label $ALERT_LABEL failed"; exit 1; }
           fi
 

@@ -1,0 +1,113 @@
+name: Org PR stale
+
+# LIVES ONLY IN Automation-Architecture/.github. Not a canonical copy: never
+# sync it into a repo (one run here covers the whole org). This repository is
+# public, so the run's own minutes are free.
+#
+# GAAA-3961 WIP/age SLA for pull requests:
+#   - stale after 7 days of inactivity (actions/stale@v9 days-before-pr-stale)
+#   - close 7 days after the stale mark (days-before-pr-close: 7) = 14 days
+#     of inactivity in total
+# Issues are not touched (days-before-issue-stale/close: -1).
+#
+# Exempt while labeled: do-not-stale, security, client-bug.
+# client-bug is exempt (not a longer window): a client-facing bug may wait
+# on the customer; auto-closing it would drop paid work. Documented in
+# docs/pr-factory-labels.md. Remove the label when the wait is over.
+#
+# Comments say reopen = PM renewed WIP.
+#
+# actions/stale@v9 is single-repo. This job lists every non-archived org repo
+# and runs the action once per repo with GITHUB_REPOSITORY set to that repo
+# and AAA_ORG_TOKEN as repo-token (pull-requests: write across the org).
+# Do not copy this workflow into other repos. Do not add Autopilot-class
+# listeners; this is a scheduled janitor only.
+#
+# Dry run: workflow_dispatch with dry_run=true sets debug-only (no labels,
+# no closes). Manual check:
+#   gh workflow run pr-stale.yml -R Automation-Architecture/.github -r main -f dry_run=true
+#
+# Offline checks: tests/pr-stale/test_pr_stale.py (structure + list script).
+
+on:
+  schedule:
+    - cron: "51 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Debug only; do not label or close PRs"
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: org-pr-stale
+  cancel-in-progress: false
+
+jobs:
+  list:
+    if: github.repository == 'Automation-Architecture/.github' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      repos: ${{ steps.list.outputs.repos }}
+    steps:
+      - id: list
+        env:
+          GH_TOKEN: ${{ secrets.AAA_ORG_TOKEN }}
+          ORG: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::AAA_ORG_TOKEN is not available; cannot list org repositories."; exit 1; }
+          [[ "$ORG" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] || { echo "::error::bad org"; exit 1; }
+          if ! repos=$(gh repo list "$ORG" --no-archived --limit 500 --json nameWithOwner --jq 'map(.nameWithOwner)'); then
+            echo "::error::gh repo list failed; cannot tell which repos to stale. Check AAA_ORG_TOKEN."; exit 1
+          fi
+          n=$(jq -c 'if type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$")) then length else error("repos") end' <<<"$repos") \
+            || { echo "::error::gh repo list did not return a JSON array of owner/name"; exit 1; }
+          [ "$n" -gt 0 ] || { echo "::error::gh repo list returned no repositories; refusing to run stale. Check AAA_ORG_TOKEN."; exit 1; }
+          repos=$(jq -c . <<<"$repos")
+          echo "repos=$repos" >> "$GITHUB_OUTPUT"
+          echo "org-pr-stale: listed $n non-archived repos"
+
+  stale:
+    needs: list
+    if: github.repository == 'Automation-Architecture/.github' && github.ref == 'refs/heads/main' && needs.list.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        repo: ${{ fromJson(needs.list.outputs.repos) }}
+    steps:
+      - name: Stale PRs in ${{ matrix.repo }}
+        uses: actions/stale@v9
+        env:
+          GITHUB_REPOSITORY: ${{ matrix.repo }}
+        with:
+          repo-token: ${{ secrets.AAA_ORG_TOKEN }}
+          days-before-stale: -1
+          days-before-close: -1
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          days-before-pr-stale: 7
+          days-before-pr-close: 7
+          stale-pr-label: stale
+          exempt-pr-labels: "do-not-stale,security,client-bug"
+          operations-per-run: 100
+          ascending: true
+          debug-only: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          stale-pr-message: >
+            This pull request is stale because it has been open 7 days with no
+            activity. It will be closed in 7 more days (14 days of inactivity
+            in total) unless someone comments or adds `do-not-stale`,
+            `security`, or `client-bug`.
+
+            Reopening this PR means PM renewed WIP.
+          close-pr-message: >
+            Closing as stale after 14 days of inactivity.
+
+            Reopen if this is still work in progress — a reopen is PM renewed
+            WIP, not an automatic revive.
