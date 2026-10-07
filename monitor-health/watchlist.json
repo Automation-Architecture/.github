@@ -69,6 +69,14 @@
     },
     {
       "repo": ".github",
+      "workflow": "pr-stale.yml",
+      "window_hours": 27,
+      "min_runs_24h": 0,
+      "owner": "Engineer",
+      "why": "org PR stale/close janitor (GAAA-3961)"
+    },
+    {
+      "repo": ".github",
       "workflow": "monitor-health-canary.yml",
       "window_hours": 4,
       "min_runs_24h": 16,
