@@ -72,6 +72,6 @@ actors (admins included). A PR is mergeable when:
 2. No P0 or P1 finding is open. P2/P3 findings get one round of fixes; leftovers go to a follow-up issue.
 3. CI is green.
 
-Merge pinned to the head: `gh pr merge <n> --squash --match-head-commit <head-sha>`. Never use `--admin`. No human
+Code/workflow PRs merge pinned to the head: `gh pr merge <n> --squash --match-head-commit <head-sha>`. Never use `--admin`. No human
 approval is required. Markdown-only PRs are merged by the central doc sweep in `.github`. Canonical page:
 aaa-runbooks `reference/merge-gate-target-system.md`.
