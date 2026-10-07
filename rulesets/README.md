@@ -19,9 +19,11 @@ all repos: PR required, no force-push, no deletion, no approvals) is not stored 
 
 Moves merge enforcement from the old `auto-merge.yml` workflow (retired
 2026-09-29) into GitHub, which checks these
-rules at the moment of merge. Do not use native auto-merge (`gh pr merge --auto`); merge with a
-normal squash pinned to the verified head, `gh pr merge <n> --squash --match-head-commit <head-sha>`,
-once Codex has reviewed that head, no P0/P1 is open and CI is green.
+rules at the moment of merge. Do not use native auto-merge (`gh pr merge --auto`). Markdown-only PRs
+are left to the canonical document merger. A code/workflow PR merges with a normal squash pinned to the
+verified head, `gh pr merge <n> --squash --match-head-commit <head-sha>`, once Codex has reviewed that
+head, no P0/P1 is open, any P2/P3 findings have had their one fix round (leftovers go to a follow-up
+issue) and CI is green.
 
 - `review/verdict` must pass, from GitHub Actions (`integration_id` 15368). It
   is published by `.github/workflows/review-verdict.yml`.
@@ -36,9 +38,7 @@ once Codex has reviewed that head, no P0/P1 is open and CI is green.
   that. Codex still reviews such a PR; the gap is accepted, not closed.
 - This ruleset lists org admins as bypass actors, but that no longer opens a way round the gate: the org
   ruleset `aaa-agency-delivery-gate` (`24516917`) requires `agency-delivery/gate` on every default branch with
-  no bypass actors. Never use `gh pr merge --admin`; merge with
-  `gh pr merge <n> --squash --match-head-commit <head-sha>` once Codex has reviewed the head, no P0/P1 is
-  open and CI is green.
+  no bypass actors. Never use `gh pr merge --admin`; merge as described at the top of this section.
 
 **Create it only after** `review-verdict.yml` is on `main` in every targeted
 repo and has been seen publishing on real PRs. Team has no dry-run mode: a
