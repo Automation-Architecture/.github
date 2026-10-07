@@ -50,7 +50,7 @@ lists at least one `CODEX_*` code, and the head is older than `max_age_hours`
 SHA, falling back to the PR's creation. GitHub exposes no push time, and the
 gate updates its own run in place, so the gate run's timestamps only show when
 it last evaluated. An aged head with no gate check run at all is reported as
-`gate_check_missing`, which means the gate is not evaluating. Drafts, `rmbc`
+`gate_check_missing`, which means the gate is not evaluating. PRs that the pull API shows as closed (the search index lags), drafts, `rmbc`
 (an approved gate exception) and PRs labelled `hold`, `on-hold`,
 `do-not-merge`, `do not merge` or `blocked` are skipped. The PR list comes from
 the search API (`org:Automation-Architecture is:pr is:open archived:false`)
@@ -70,6 +70,15 @@ with the same completeness checks as `scripts/rollout_monitor.py`.
   closes. Delivery means HTTP 200 with the body `ok`; anything else turns the
   run red after the issue has been written. If the secret is unset, the run
   logs a warning and the issue body says that the issue is the only channel.
+- **Delivery guarantees**: the two channels are independent. If the alert
+  issue cannot be read, Slack still gets this run's findings and the run goes
+  red. A state change is written with `slack_pending: true` and cleared only
+  after Slack answers `ok` (one retry 5 s later). A failed post is re-sent by
+  the next run, and a failed all-clear post leaves the issue open until it is
+  delivered.
+- **Incomplete scans**: when any read fails, problems that were open before
+  and were not seen this run are kept (marked "not re-checked") rather than
+  announced as resolved.
 - **Weekly heartbeat**: on Monday at 13:41 UTC (or on dispatch with
   `heartbeat=true`), one message saying the reconciler is alive and how many
   problems are open. It goes to Slack, or as a comment on a bot issue labelled

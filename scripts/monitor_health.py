@@ -349,9 +349,13 @@ def list_open_prs(read, org):
 def observe_pr(read, org, pr):
     pull = read(f"repos/{org}/{pr['repo']}/pulls/{pr['number']}")
     sha = pull["head"]["sha"]
+    if pull.get("state") != "open":
+        return {"sha": sha, "state": pull.get("state"), "created_at": pull["created_at"],
+                "draft": bool(pull.get("draft")), "check_runs": []}
     pages = read(f"repos/{org}/{pr['repo']}/commits/{sha}/check-runs?per_page=100", paginate=True)
     runs = [r for p in pages for r in p.get("check_runs", [])]
-    return {"sha": sha, "created_at": pull["created_at"], "draft": bool(pull.get("draft")), "check_runs": runs}
+    return {"sha": sha, "state": pull.get("state"), "created_at": pull["created_at"],
+            "draft": bool(pull.get("draft")), "check_runs": runs}
 
 
 def evaluate_pr(cfg, pr, obs, now):
@@ -401,7 +405,8 @@ def check_codex_blockers(read, org, cfg, now):
         except ReadError as exc:
             errors.append(f"{pr['repo']}#{pr['number']}: {exc}")
             continue
-        if obs["draft"]:
+        # The search index lags: a PR closed minutes ago can still be listed.
+        if obs["draft"] or obs["state"] != "open":
             continue
         found += evaluate_pr(cfg, pr, obs, now)
     return found, errors
@@ -456,9 +461,13 @@ def render_findings(findings):
     return "\n".join(lines)
 
 
-def render_issue(findings, now, run_url, slack_configured):
+def render_issue(findings, now, run_url, slack_configured, slack_pending=False):
     keys = sorted(f["key"] for f in findings)
-    state = json.dumps({"keys": keys, "fingerprint": fingerprint(keys)}, separators=(",", ":"))
+    kept = [{k: f.get(k) for k in ("key", "kind", "subject", "message", "owner", "url")} for f in findings]
+    state = json.dumps({"keys": keys, "fingerprint": fingerprint(keys), "findings": kept,
+                        "slack_pending": slack_pending}, separators=(",", ":"))
+    # Keep the marker a valid HTML comment whatever a message contains.
+    state = state.replace(">", "\\u003e").replace("<", "\\u003c")
     note = "" if slack_configured else (
         "\n> Slack is not configured for this reconciler (`SLACK_DEVOPS_WEBHOOK_URL` repo secret in "
         "Automation-Architecture/.github is unset), so this issue is the only alert channel.\n")
@@ -471,14 +480,34 @@ def render_issue(findings, now, run_url, slack_configured):
     return f"Monitor Health: {len(findings)} problem(s)", body
 
 
-def previous_keys(issue):
+def issue_state(issue):
     m = STATE_RE.search(issue.get("body") or "") if issue else None
     if not m:
         return None
     try:
-        return set(json.loads(m.group(1))["keys"])
+        state = json.loads(m.group(1))
+        state["keys"] = set(state["keys"])
+        return state
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def previous_keys(issue):
+    state = issue_state(issue)
+    return state["keys"] if state else None
+
+
+def carry_forward(findings, issue):
+    """While the scan is incomplete (read errors), a problem that was open
+    before and was not seen this run is unknown, not resolved: keep it, so
+    nothing announces a recovery that was never observed."""
+    state = issue_state(issue) or {}
+    seen = {f["key"] for f in findings}
+    carried = []
+    for f in state.get("findings", []):
+        if f.get("key") and f["key"] not in seen:
+            carried.append(dict(f, message=f"{f.get('message', '')} (not re-checked this run: reads failed)"))
+    return findings + carried
 
 
 def plan(findings, open_issue):
@@ -508,11 +537,14 @@ def slack_text(p, findings, issue_url, run_url):
     by_key = {f["key"]: f for f in findings}
     if p["action"] == "close":
         return f"Monitor Health: all clear, {len(p['resolved'])} problem(s) resolved. {issue_url} closed."
-    head = "Monitor Health: new problems" if p["action"] == "create" else "Monitor Health: problems changed"
+    head = {"create": "Monitor Health: new problems", "update": "Monitor Health: problems changed"}.get(
+        p["action"], "Monitor Health: open problems (re-sent; an earlier post failed)")
     lines = [f"{head} ({len(findings)} open). Issue: {issue_url} Run: {run_url}"]
     if p["new"]:
         lines.append("New:")
         lines += [f"- {by_key[k]['subject']}: {by_key[k]['message']}" for k in p["new"]]
+    elif p["action"] == "refresh":
+        lines += [f"- {f['subject']}: {f['message']}" for f in findings]
     if p["resolved"]:
         lines.append("Resolved: " + ", ".join(k.split(":", 1)[1] if ":" in k else k for k in p["resolved"]))
     return truncate("\n".join(lines))
@@ -534,32 +566,80 @@ def ensure_label(read, write, repo, label, color, description):
         write("POST", f"repos/{repo}/labels", {"name": label, "color": color, "description": description})
 
 
-def deliver(findings, *, read_alert, write, post, alert_repo, slack_url, run_url, now, dry_run, log):
-    """Applies the plan to the issue and Slack. Raises AlertError on a failed
-    delivery (after doing everything else it can)."""
-    issue = find_bot_issue(read_alert, alert_repo, LABEL)
+def post_with_retry(post, url, text, attempts=2, sleep=time.sleep):
+    for attempt in range(attempts):
+        try:
+            return post(url, text)
+        except AlertError:
+            if attempt == attempts - 1:
+                raise
+            sleep(5)
+
+
+def deliver(findings, *, read_alert, write, post, alert_repo, slack_url, run_url, now, dry_run, log,
+            incomplete=False, sleep=time.sleep):
+    """Applies the plan to the issue and Slack, each channel independently.
+    Raises AlertError when either channel failed, after trying both.
+
+    Slack state is persisted in the issue: a state change is first written
+    with slack_pending=true and cleared only after Slack answered `ok`, so a
+    failed post is re-sent by the next run instead of being lost."""
+    def patch(number, payload):
+        write("PATCH", f"repos/{alert_repo}/issues/{number}", payload)
+
+    try:
+        issue = find_bot_issue(read_alert, alert_repo, LABEL)
+    except (ReadError, AlertError) as exc:
+        # The issue channel is down. Slack does not depend on it: send what
+        # this run found so the outage is not silent, then fail the run.
+        log(f"alert plan: issue lookup failed ({exc}); Slack only")
+        if slack_url and not dry_run:
+            text = (f"Monitor Health: cannot read its alert issue in {alert_repo} ({exc}). "
+                    f"{len(findings)} problem(s) this run. Run: {run_url}\n"
+                    + "\n".join(f"- {f['subject']}: {f['message']}" for f in findings))
+            post_with_retry(post, slack_url, truncate(text), sleep=sleep)
+        raise AlertError(f"alert issue lookup failed: {exc}") from exc
+
+    if incomplete:
+        findings = carry_forward(findings, issue)
     p = plan(findings, issue)
-    log(f"alert plan: {p['action']} (new {len(p['new'])}, resolved {len(p['resolved'])})")
+    prior = issue_state(issue) or {}
+    resend = bool(slack_url) and p["action"] == "refresh" and prior.get("slack_pending")
+    needs_post = bool(slack_url) and (p["action"] in ("create", "update", "close") or resend)
+    log(f"alert plan: {p['action']} (new {len(p['new'])}, resolved {len(p['resolved'])})"
+        + (" + re-send pending Slack" if resend else ""))
     if p["action"] == "none" or dry_run:
         return p
-    title, body = render_issue(findings, now, run_url, bool(slack_url))
+
+    title, body = render_issue(findings, now, run_url, bool(slack_url), slack_pending=needs_post)
+    if p["action"] == "close":
+        # Post first: if Slack fails the issue stays open (marked pending),
+        # so the next all-clear run tries the close and the post again.
+        try:
+            if needs_post:
+                post_with_retry(post, slack_url, slack_text(p, findings, issue.get("html_url", ""), run_url), sleep=sleep)
+        except AlertError:
+            _, pending_body = render_issue(carry_forward([], issue), now, run_url, True, slack_pending=True)
+            patch(issue["number"], {"body": pending_body})
+            raise
+        write("POST", f"repos/{alert_repo}/issues/{issue['number']}/comments",
+              {"body": f"All clear at {iso(now)}: every watched monitor is healthy. Run: {run_url}"})
+        patch(issue["number"], {"state": "closed", "state_reason": "completed"})
+        return p
+
     if p["action"] == "create":
         ensure_label(read_alert, write, alert_repo, LABEL, "b60205", "Monitor Health reconciler findings (GAAA-3937)")
         issue = write("POST", f"repos/{alert_repo}/issues", {"title": title, "body": body, "labels": [LABEL]})
-    elif p["action"] == "refresh":
-        write("PATCH", f"repos/{alert_repo}/issues/{issue['number']}", {"title": title, "body": body})
-        return p
-    elif p["action"] == "update":
-        write("PATCH", f"repos/{alert_repo}/issues/{issue['number']}", {"title": title, "body": body})
-        write("POST", f"repos/{alert_repo}/issues/{issue['number']}/comments",
-              {"body": f"Problems changed at {iso(now)}.\n\nNew: {', '.join(p['new']) or 'none'}\n\n"
-                       f"Resolved: {', '.join(p['resolved']) or 'none'}\n\nRun: {run_url}"})
-    else:  # close
-        write("POST", f"repos/{alert_repo}/issues/{issue['number']}/comments",
-              {"body": f"All clear at {iso(now)}: every watched monitor is healthy. Run: {run_url}"})
-        write("PATCH", f"repos/{alert_repo}/issues/{issue['number']}", {"state": "closed", "state_reason": "completed"})
-    if slack_url:
-        post(slack_url, slack_text(p, findings, issue.get("html_url", ""), run_url))
+    else:
+        patch(issue["number"], {"title": title, "body": body})
+        if p["action"] == "update":
+            write("POST", f"repos/{alert_repo}/issues/{issue['number']}/comments",
+                  {"body": f"Problems changed at {iso(now)}.\n\nNew: {', '.join(p['new']) or 'none'}\n\n"
+                           f"Resolved: {', '.join(p['resolved']) or 'none'}\n\nRun: {run_url}"})
+    if needs_post:
+        post_with_retry(post, slack_url, slack_text(p, findings, issue.get("html_url", ""), run_url), sleep=sleep)
+        _, body = render_issue(findings, now, run_url, True, slack_pending=False)
+        patch(issue["number"], {"body": body})
     return p
 
 
@@ -627,7 +707,7 @@ def main(argv=None, *, read=None, read_alert=None, write=None, get=http_get, pos
     kw = dict(read_alert=read_alert, write=write, post=post, alert_repo=alert_repo, slack_url=slack_url,
               run_url=run_url, now=now, dry_run=dry_run, log=out)
     try:
-        deliver(findings, **kw)
+        deliver(findings, incomplete=bool(errors), sleep=sleep, **kw)
     except (AlertError, ReadError) as exc:
         out(f"::error::alert delivery failed: {exc}")
         failed = True

@@ -291,7 +291,7 @@ def pr_routes(items, prs, total=None):
     routes = {f"search/issues?q={q}&per_page=100": [{"total_count": len(items) if total is None else total,
                                                     "incomplete_results": False, "items": items}]}
     for (repo, n), (sha, runs, draft) in prs.items():
-        routes[f"repos/{ORG}/{repo}/pulls/{n}"] = {"head": {"sha": sha}, "created_at": ts(100), "draft": draft}
+        routes[f"repos/{ORG}/{repo}/pulls/{n}"] = {"head": {"sha": sha}, "state": "open", "created_at": ts(100), "draft": draft}
         routes[f"repos/{ORG}/{repo}/commits/{sha}/check-runs?per_page=100"] = [{"check_runs": runs}]
     return routes
 
@@ -357,6 +357,11 @@ class CodexBlockers(unittest.TestCase):
     def test_missing_gate_check_can_be_disabled(self):
         cfg = dict(CODEX, alert_missing_gate_check=False)
         self.assertEqual(self.check(pr_routes([item("app", 5)], {("app", 5): ("a" * 40, [ci_run(10)], False)}), cfg), [])
+
+    def test_closed_pr_still_in_search_index_is_skipped(self):
+        routes = pr_routes([item("app", 5)], {("app", 5): ("a" * 40, [ci_run(8), gate_run(9, "failure", MISSING)], False)})
+        routes[f"repos/{ORG}/app/pulls/5"]["state"] = "closed"
+        self.assertEqual(self.check(routes), [])
 
     def test_drafts_excluded_repos_and_hold_labels_skipped(self):
         items = [item("app", 1, draft=True), item("rmbc", 2), item("app", 3, labels=["Hold"])]
@@ -459,6 +464,11 @@ class FakeAlerts:
                      "state": "open"}
             self.issues.append(issue)
             return issue
+        if method == "PATCH" and "/issues/" in endpoint:
+            number = int(endpoint.rsplit("/", 1)[1])
+            for issue in self.issues:
+                if issue["number"] == number:
+                    issue.update(payload)
         return {}
 
     def post(self, url, text):
@@ -488,9 +498,11 @@ class Main(unittest.TestCase):
         rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts,
                                 {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"})
         self.assertEqual(rc, 0)
-        self.assertEqual([w[0] for w in alerts.writes], ["POST"])
+        # create (slack_pending=true), post, then clear the pending flag
+        self.assertEqual([w[0] for w in alerts.writes], ["POST", "PATCH"])
         self.assertEqual(len(alerts.posts), 1)
         self.assertIn("new problems", alerts.posts[0][1])
+        self.assertFalse(mh.issue_state(alerts.issues[0])["slack_pending"])
 
     def test_creates_label_when_missing(self):
         alerts = FakeAlerts(labels=())
@@ -575,6 +587,78 @@ class Main(unittest.TestCase):
         rc, out = self.run_main(routes, alerts, {"TEST_DEAD_SLACK": "true"})
         self.assertEqual(rc, 1)
         self.assertEqual([w[0] for w in alerts.writes][-1], "PATCH")  # issue still refreshed
+
+    def failing_post(self, alerts):
+        def post(url, text):
+            alerts.attempts = getattr(alerts, "attempts", 0) + 1
+            raise mh.AlertError("Slack answered HTTP 500 'x', not 'ok'")
+        return post
+
+    def test_incomplete_scan_does_not_resolve_unseen_problems(self):
+        alerts = FakeAlerts()
+        routes = wf_routes("r", "a.yml", runs=[run(1, 2, "failure")])
+        self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        alerts.posts.clear()
+        broken = wf_routes("r", "a.yml")
+        broken[f"repos/{ORG}/r/actions/workflows/a.yml/runs?event=schedule&per_page=20"] = "__error"
+        rc, _ = self.run_main(broken, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.assertEqual(rc, 1)
+        state = mh.issue_state(alerts.issues[0])
+        self.assertIn("last_run_failed:r/a.yml", state["keys"])  # carried, not resolved
+        self.assertIn("read_error:reconciler", state["keys"])
+        self.assertNotIn("Resolved: r/a.yml", alerts.posts[-1][1])
+        self.assertIn("not re-checked", alerts.issues[0]["body"])
+
+    def test_issue_lookup_failure_still_reaches_slack(self):
+        alerts = FakeAlerts()
+
+        def broken_read(endpoint, paginate=False):
+            raise mh.ReadError("GET issues: HTTP 403")
+        alerts.read = broken_read
+        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(alerts.posts), 1)
+        self.assertIn("cannot read its alert issue", alerts.posts[0][1])
+        self.assertIn("r/a.yml", alerts.posts[0][1])
+
+    def test_failed_slack_is_resent_next_run(self):
+        alerts = FakeAlerts()
+        good_post = alerts.post
+        alerts.post = self.failing_post(alerts)
+        routes = wf_routes("r", "a.yml", runs=[run(1, 2, "failure")])
+        rc, _ = self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.assertEqual(rc, 1)
+        self.assertEqual(alerts.attempts, 2)  # retried once
+        self.assertTrue(mh.issue_state(alerts.issues[0])["slack_pending"])
+        alerts.post = good_post
+        rc, _ = self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(alerts.posts), 1)
+        self.assertIn("re-sent", alerts.posts[0][1])
+        self.assertFalse(mh.issue_state(alerts.issues[0])["slack_pending"])
+        rc, _ = self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.assertEqual(len(alerts.posts), 1)  # nothing more once delivered
+
+    def test_failed_close_post_keeps_issue_open_and_retries(self):
+        alerts = FakeAlerts()
+        self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, {"SLACK_WEBHOOK_URL": "u"})
+        good_post = alerts.post
+        alerts.post = self.failing_post(alerts)
+        healthy = wf_routes("r", "a.yml", runs=[run(2, 1), run(1, 2, "failure")])
+        rc, _ = self.run_main(healthy, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.assertEqual(rc, 1)
+        self.assertEqual(alerts.issues[0]["state"], "open")
+        alerts.post = good_post
+        rc, _ = self.run_main(healthy, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(alerts.issues[0]["state"], "closed")
+        self.assertIn("all clear", alerts.posts[-1][1])
+
+    def test_state_marker_survives_hostile_message(self):
+        f = mh.finding("last_run_failed", "r/a.yml", "boom --> <!-- x")
+        _, body = mh.render_issue([f], NOW, "run", True)
+        self.assertEqual(body.split("monitor-health-state", 1)[1].count("-->"), 1)
+        self.assertEqual(mh.issue_state({"body": body})["findings"][0]["message"], "boom --> <!-- x")
 
     def test_heartbeat_to_slack(self):
         alerts = FakeAlerts()
