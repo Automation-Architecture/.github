@@ -1,0 +1,32 @@
+name: Org PR stale tests
+
+# Offline suite for pr-stale.yml: YAML structure (windows, exempt labels,
+# main-only, no actions/stale retarget) and the janitor script against a stub `gh`.
+# Live dry-run (no labels/closes):
+#   gh workflow run pr-stale.yml -R Automation-Architecture/.github -r main -f dry_run=true
+on:
+  pull_request:
+    paths:
+      - .github/workflows/pr-stale.yml
+      - .github/workflows/pr-stale-tests.yml
+      - tests/pr-stale/**
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/pr-stale.yml
+      - .github/workflows/pr-stale-tests.yml
+      - tests/pr-stale/**
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: uv run --python 3.12 --with 'PyYAML>=6,<7' python tests/pr-stale/test_pr_stale.py

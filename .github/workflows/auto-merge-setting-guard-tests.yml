@@ -10,12 +10,14 @@ on:
       - .github/workflows/auto-merge-setting-guard.yml
       - .github/workflows/auto-merge-setting-guard-tests.yml
       - tests/auto-merge-setting-guard/**
+      - docs/auto-merge-allowlist.txt
   push:
     branches: [main]
     paths:
       - .github/workflows/auto-merge-setting-guard.yml
       - .github/workflows/auto-merge-setting-guard-tests.yml
       - tests/auto-merge-setting-guard/**
+      - docs/auto-merge-allowlist.txt
 
 permissions:
   contents: read
