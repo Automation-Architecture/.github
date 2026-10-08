@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   gitleaks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
     steps:
       - uses: actions/checkout@v4
         with:
