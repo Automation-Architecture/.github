@@ -220,7 +220,7 @@ jobs:
       github.event_name == 'issue_comment' &&
       github.event.issue.pull_request &&
       github.event.comment.user.login == 'chatgpt-codex-connector[bot]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
     permissions:
       actions: write
       pull-requests: read
@@ -258,7 +258,7 @@ jobs:
     if: >
       github.event_name == 'push' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
     permissions:
       actions: write
       pull-requests: read
@@ -294,7 +294,7 @@ jobs:
       (github.event_name != 'pull_request_review' ||
        (github.event.pull_request.head.repo.full_name == github.repository &&
         github.event.pull_request.user.login != 'dependabot[bot]'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
     steps:
       # No checkout: this job reads the GitHub API only. Keep it that way;
       # under pull_request_target a checkout of the PR head would run

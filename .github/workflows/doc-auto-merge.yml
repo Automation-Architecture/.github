@@ -274,7 +274,7 @@ jobs:
           && github.event.check_run.app.slug != 'github-actions'
           && contains(fromJSON('["success","neutral","skipped"]'), github.event.check_run.conclusion)))
       && (github.event_name != 'status' || github.event.state == 'success')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
     timeout-minutes: 30
     steps:
       # No checkout. Keep it that way (see the header).

@@ -92,7 +92,7 @@ env:
 jobs:
   check:
     if: github.repository == 'Automation-Architecture/.github' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
     timeout-minutes: 10
     permissions:
       contents: read

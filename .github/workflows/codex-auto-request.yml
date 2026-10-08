@@ -125,7 +125,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.action != 'edited' || github.event.changes.base != null) &&
       (github.event.action != 'labeled' || github.event.label.name == 'no-auto-merge')
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
     timeout-minutes: 10
     steps:
       - name: Decide
