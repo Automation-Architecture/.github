@@ -114,10 +114,12 @@ def http_get(url, timeout=20):
 
 
 def slack_poster(token, timeout=20):
-    """Posts as the AAA Alerts bot (chat.postMessage). Delivery = `ok: true`."""
-    def post(channel, text):
-        data = json.dumps({"channel": channel, "text": text}).encode()
-        req = urllib.request.Request("https://slack.com/api/chat.postMessage", data=data, headers={
+    """Posts as the AAA Alerts bot (chat.postMessage). Delivery = `ok: true`.
+    The bot has chat:write, not chat:write.public: on `not_in_channel` it joins
+    the (public) channel with channels:join and posts once more."""
+    def api(method, payload):
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(f"https://slack.com/api/{method}", data=data, headers={
             "Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
@@ -125,14 +127,24 @@ def slack_poster(token, timeout=20):
         except urllib.error.HTTPError as exc:
             status, body = exc.code, exc.read().decode("utf-8", "replace")
         except (urllib.error.URLError, OSError) as exc:
-            raise AlertError(f"Slack post failed: {type(exc).__name__}") from exc
+            raise AlertError(f"Slack {method} failed: {type(exc).__name__}") from exc
         try:
             answer = json.loads(body)
         except ValueError:
             answer = {}
+        return status, answer if isinstance(answer, dict) else {}, body
+
+    def check(method, status, answer, body):
         if status != 200 or answer.get("ok") is not True:
             # The error code only: the token is a secret and is never printed.
-            raise AlertError(f"Slack answered HTTP {status} {str(answer.get('error', body[:40]))!r}, not ok")
+            raise AlertError(f"Slack {method} answered HTTP {status} {str(answer.get('error', body[:40]))!r}, not ok")
+
+    def post(channel, text):
+        status, answer, body = api("chat.postMessage", {"channel": channel, "text": text})
+        if status == 200 and answer.get("error") == "not_in_channel":
+            check("conversations.join", *api("conversations.join", {"channel": channel}))
+            status, answer, body = api("chat.postMessage", {"channel": channel, "text": text})
+        check("chat.postMessage", status, answer, body)
     return post
 
 
@@ -184,15 +196,22 @@ class LinearTracker:
         # Only issues this key created carry state; the oldest open one wins.
         return self._issue(min(nodes, key=lambda n: n.get("createdAt", ""))) if nodes else None
 
+    @staticmethod
+    def _ok(data, field):
+        result = data.get(field) if isinstance(data, dict) else None
+        if not isinstance(result, dict) or result.get("success") is not True:
+            raise AlertError(f"Linear {field} did not succeed")
+        return result
+
     def _label_id(self, label):
         data = self.call("query($team:String!,$name:String!){team(id:$team){labels(filter:{name:{eq:$name}}){nodes{id}}}}",
                          {"team": self.team_id, "name": label})
         nodes = ((data.get("team") or {}).get("labels") or {}).get("nodes") or []
         if nodes:
             return nodes[0]["id"]
-        made = self.call("mutation($i:IssueLabelCreateInput!){issueLabelCreate(input:$i){issueLabel{id}}}",
+        made = self.call("mutation($i:IssueLabelCreateInput!){issueLabelCreate(input:$i){success issueLabel{id}}}",
                          {"i": {"name": label, "teamId": self.team_id, "color": "#b60205"}})
-        return made["issueLabelCreate"]["issueLabel"]["id"]
+        return self._ok(made, "issueLabelCreate")["issueLabel"]["id"]
 
     def create(self, title, body, label):
         fields = {"teamId": self.team_id, "title": title, "description": body, "labelIds": [self._label_id(label)]}
@@ -200,19 +219,19 @@ class LinearTracker:
             fields["projectId"] = self.project_id
         if self.assignee_id:
             fields["assigneeId"] = self.assignee_id
-        data = self.call("mutation($i:IssueCreateInput!){issueCreate(input:$i){issue{" + ISSUE_FIELDS + "}}}", {"i": fields})
-        return self._issue(data["issueCreate"]["issue"])
+        data = self.call("mutation($i:IssueCreateInput!){issueCreate(input:$i){success issue{" + ISSUE_FIELDS + "}}}", {"i": fields})
+        return self._issue(self._ok(data, "issueCreate")["issue"])
 
     def update(self, issue, title=None, body=None):
         fields = {k: v for k, v in (("title", title), ("description", body)) if v is not None}
-        self.call("mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}",
-                  {"id": issue["id"], "i": fields})
+        self._ok(self.call("mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}",
+                           {"id": issue["id"], "i": fields}), "issueUpdate")
         if body is not None:
             issue["body"] = body
 
     def comment(self, issue, body):
-        self.call("mutation($i:CommentCreateInput!){commentCreate(input:$i){success}}",
-                  {"i": {"issueId": issue["id"], "body": body}})
+        self._ok(self.call("mutation($i:CommentCreateInput!){commentCreate(input:$i){success}}",
+                           {"i": {"issueId": issue["id"], "body": body}}), "commentCreate")
 
     def close(self, issue):
         data = self.call("query($team:String!){team(id:$team){states{nodes{id type position}}}}", {"team": self.team_id})
@@ -220,8 +239,8 @@ class LinearTracker:
                       key=lambda s: s.get("position", 0))
         if not done:
             raise AlertError("Linear team has no completed state")
-        self.call("mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}",
-                  {"id": issue["id"], "i": {"stateId": done[0]["id"]}})
+        self._ok(self.call("mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}",
+                           {"id": issue["id"], "i": {"stateId": done[0]["id"]}}), "issueUpdate")
 
 
 class MissingTracker:

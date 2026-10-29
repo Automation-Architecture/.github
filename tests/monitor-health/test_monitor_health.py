@@ -709,8 +709,8 @@ class Main(unittest.TestCase):
 class FakeLinear:
     """Records GraphQL calls and answers them from canned data."""
 
-    def __init__(self, issues=(), labels=(), states=None):
-        self.issues, self.labels = list(issues), list(labels)
+    def __init__(self, issues=(), labels=(), states=None, unsuccessful=()):
+        self.issues, self.labels, self.unsuccessful = list(issues), list(labels), set(unsuccessful)
         self.states = states if states is not None else [
             {"id": "s-done", "type": "completed", "position": 3}, {"id": "s-todo", "type": "unstarted", "position": 1},
             {"id": "s-old", "type": "completed", "position": 9}]
@@ -723,12 +723,16 @@ class FakeLinear:
         if "labels(filter" in query:
             return {"team": {"labels": {"nodes": [{"id": l} for l in self.labels]}}}
         if "issueLabelCreate" in query:
-            return {"issueLabelCreate": {"issueLabel": {"id": "new-label"}}}
+            return {"issueLabelCreate": {"success": True, "issueLabel": {"id": "new-label"}}}
         if "issueCreate" in query:
-            return {"issueCreate": {"issue": {"id": "x1", "identifier": "OPS-1", "url": "u", "description": variables["i"]["description"]}}}
+            return {"issueCreate": {"success": "issueCreate" not in self.unsuccessful, "issue": {
+                "id": "x1", "identifier": "OPS-1", "url": "u", "description": variables["i"]["description"]}}}
         if "states" in query:
             return {"team": {"states": {"nodes": self.states}}}
-        return {"ok": True}
+        for field in ("issueUpdate", "commentCreate"):
+            if field in query:
+                return {field: {"success": field not in self.unsuccessful}}
+        raise AssertionError(query)
 
 
 class LinearTrackerTests(unittest.TestCase):
@@ -774,6 +778,20 @@ class LinearTrackerTests(unittest.TestCase):
         with self.assertRaises(mh.AlertError):
             mh.LinearTracker(call, "team-1").close({"id": "x1"})
 
+    def test_unsuccessful_mutations_are_alert_errors(self):
+        for field, act in (("issueCreate", lambda t: t.create("T", "B", "monitor-health")),
+                           ("issueUpdate", lambda t: t.update({"id": "x1", "body": "old"}, body="new")),
+                           ("commentCreate", lambda t: t.comment({"id": "x1"}, "c")),
+                           ("issueUpdate", lambda t: t.close({"id": "x1"}))):
+            with self.subTest(field=field), self.assertRaises(mh.AlertError):
+                act(mh.LinearTracker(FakeLinear(labels=["l"], unsuccessful=[field]), "team-1"))
+
+    def test_failed_update_leaves_the_local_body(self):
+        issue = {"id": "x1", "body": "old"}
+        with self.assertRaises(mh.AlertError):
+            mh.LinearTracker(FakeLinear(unsuccessful=["issueUpdate"]), "team-1").update(issue, body="new")
+        self.assertEqual(issue["body"], "old")
+
     def test_update_keeps_the_local_body_in_step(self):
         issue = {"id": "x1", "body": "old"}
         mh.LinearTracker(FakeLinear(), "team-1").update(issue, body="new")
@@ -811,6 +829,37 @@ class SlackPost(unittest.TestCase):
         self.with_urlopen(self.fake(200, '{"ok":true}', seen), lambda: mh.slack_poster("xoxb-1")("C123", "hi"))
         self.assertEqual(json.loads(seen[0].data), {"channel": "C123", "text": "hi"})
         self.assertEqual(seen[0].get_header("Authorization"), "Bearer xoxb-1")
+
+    def scripted(self, answers, seen):
+        answers = iter(answers)
+
+        class Resp:
+            def __init__(s, body):
+                s.status, s.body = 200, body
+            def read(s):
+                return s.body.encode()
+            def __enter__(s):
+                return s
+            def __exit__(s, *a):
+                return False
+
+        def urlopen(req, timeout):
+            seen.append(req.full_url.rsplit("/", 1)[1])
+            return Resp(next(answers))
+        return urlopen
+
+    def test_not_in_channel_joins_then_posts(self):
+        seen = []
+        fake = self.scripted(['{"ok":false,"error":"not_in_channel"}', '{"ok":true}', '{"ok":true}'], seen)
+        self.with_urlopen(fake, lambda: mh.slack_poster("xoxb-1")("C123", "hi"))
+        self.assertEqual(seen, ["chat.postMessage", "conversations.join", "chat.postMessage"])
+
+    def test_failed_join_is_alert_error(self):
+        seen = []
+        fake = self.scripted(['{"ok":false,"error":"not_in_channel"}', '{"ok":false,"error":"is_archived"}'], seen)
+        with self.assertRaises(mh.AlertError) as cm:
+            self.with_urlopen(fake, lambda: mh.slack_poster("xoxb-1")("C123", "hi"))
+        self.assertIn("is_archived", str(cm.exception))
 
     def test_not_ok_raises_without_token(self):
         def go():
