@@ -13,13 +13,12 @@ Step 1 of the plan (build the reconciler) is `docs/monitor-health.md`.
 - `monitor-health.yml` and `monitor-health-canary.yml` are merged, active, and
   have had at least one scheduled run each. Both are also active in
   `gh workflow list -R Automation-Architecture/.github --all`.
-- Record the baseline. Note the open `monitor-health` issue (number and the
-  findings it lists) so you can tell the test's finding apart from standing
-  ones.
+- Record the baseline. Note the open `monitor-health` Linear issue (project
+  aaa-devops; its identifier and the findings it lists) so you can tell the
+  test's finding apart from standing ones.
 
 ```bash
 R=Automation-Architecture/.github
-gh issue list -R $R --label monitor-health --state open --json number,title,url
 gh run list -R $R -w monitor-health.yml -L 3 --json databaseId,event,conclusion,createdAt
 ```
 
@@ -28,9 +27,9 @@ gh run list -R $R -w monitor-health.yml -L 3 --json databaseId,event,conclusion,
   `gh workflow run monitor-health.yml -R $R`. Only **scheduled** runs of
   watched workflows count. A dispatched run of a watched workflow is ignored
   by design.
-- Each step passes when **both** happen: the finding appears in the issue (a
-  comment listing it under "New"), and a #dev-ops message arrives if
-  `SLACK_DEVOPS_WEBHOOK_URL` is set in `.github`. Read the destination; the
+- Each step passes when **both** happen: the finding appears in the Linear
+  issue (a comment listing it under "New"), and a #dev-ops message from the
+  AAA Alerts bot arrives if `SLACK_ALERTS_BOT_TOKEN` is set in `.github`. Read the destination; the
   run log alone does not prove delivery.
 
 ## Step 2: completed-but-failed (canary)
@@ -54,7 +53,7 @@ within one reconciler run of the failed canary run (at most about 1.5 h).
 **Revert:**
 `gh variable delete MONITOR_HEALTH_CANARY_FAIL -R $R`. The next scheduled
 canary run succeeds, and the reconciler run after it lists the finding as
-resolved. The issue closes if nothing else is open.
+resolved. The Linear issue moves to Done if nothing else is open.
 
 ## Step 3: monitor not running
 
@@ -116,10 +115,10 @@ the first run after 6 h.
 gh workflow run monitor-health.yml -R $R -f test_dead_slack=true
 ```
 
-The run posts to a syntactically valid but nonexistent webhook. **Expect:**
+The run posts to a channel that does not exist (`C0000000000`). **Expect:**
 
-- the run is **red**, with `::error::alert delivery failed: Slack answered HTTP 4xx ...`;
-- the `monitor-health` issue was still written or refreshed in the same run.
+- the run is **red**, with `::error::alert delivery failed: Slack answered HTTP 200 'channel_not_found', not ok`;
+- the `monitor-health` Linear issue was still written or refreshed in the same run.
   It is the fallback channel.
 - the Dashboard Watchdog's next run (15:00 UTC) reports
   `monitor-health.yml: last scheduled run ... concluded failure` only if a
@@ -130,10 +129,9 @@ The run posts to a syntactically valid but nonexistent webhook. **Expect:**
 **Revert:**
 Nothing to revert. The real secret is untouched.
 
-To prove a revoked real webhook turns runs red, the closer equivalent, Brad
-can point `SLACK_DEVOPS_WEBHOOK_URL` in `.github` at a webhook he deletes in
-the Slack app settings. Restore the real value afterwards and marker-verify
-it.
+To prove a revoked real token turns runs red, the closer equivalent: set
+`SLACK_ALERTS_BOT_TOKEN` in `.github` to a revoked token, dispatch, then set
+it back from 1Password and dispatch with `heartbeat=true`.
 
 ## Step 6: heartbeat path (safe, today)
 
@@ -159,11 +157,11 @@ gh workflow run monitor-health.yml -R $R -f heartbeat=true
 
 **Expect** "Monitor Health weekly heartbeat: alive, watching N scheduled
 workflows ..." in #dev-ops, or as a comment on the `monitor-health-heartbeat`
-issue while Slack is unset.
+Linear issue while Slack is unset.
 
 ## Record the result
 
 Add a row per step to the GAAA-967 audit's evidence matrix ("Forced-failure
-test"): the time, the run ID that detected it, the issue comment URL, and
+test"): the time, the run ID that detected it, the Linear comment link, and
 whether Slack received the message. Note anything that did not alert within
 its window as a finding on GAAA-3937.

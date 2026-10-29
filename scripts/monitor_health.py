@@ -11,9 +11,10 @@ For each workflow in the watch list (monitor-health/watchlist.json) it asserts:
   3. the newest completed scheduled run concluded `success`
   4. scheduled runs created in the last 24h >= `min_runs_24h` (when > 0)
 
-Findings go to one rolling GitHub issue (label `monitor-health`) in ALERT_REPO
-and, when SLACK_WEBHOOK_URL is set, to Slack (#dev-ops) whenever the set of
-findings changes. A weekly heartbeat says the reconciler is alive.
+Findings go to one rolling Linear issue (label `monitor-health`; team, project
+and assignee from the watch list) and, when SLACK_BOT_TOKEN is set, to Slack
+(#dev-ops, posted by the AAA Alerts bot) whenever the set of findings changes.
+A weekly heartbeat says the reconciler is alive.
 
 Exit status: 0 when the reconciler did its job (whether or not it found
 problems; those are reported through the alert channels), 1 when it could not
@@ -41,11 +42,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "monitor-health" / "watchlist.json"
 LABEL = "monitor-health"
 HEARTBEAT_LABEL = "monitor-health-heartbeat"
-BOT_LOGIN = "github-actions[bot]"
-STATE_RE = re.compile(r"<!-- monitor-health-state (\{.*?\}) -->", re.S)
+STATE_RE = re.compile(r"<!-- monitor-health-state ([0-9a-f]+) -->")
 BLOCKER_RE = re.compile(r"^- `([A-Z0-9_]+)`", re.M)
-DEAD_SLACK_URL = "https://hooks.slack.com/services/T00000000/B00000000/monitor-health-dead-channel-test"
+DEAD_SLACK_CHANNEL = "C0000000000"  # forced-failure test: a channel that does not exist
 SLACK_TEXT_LIMIT = 2900
+LINEAR_URL = "https://api.linear.app/graphql"
 
 
 class ReadError(Exception):
@@ -100,23 +101,6 @@ def gh_reader(token, attempts=4, sleep=time.sleep):
     return read
 
 
-def gh_writer(token):
-    """Write adapter for the alert repository (issues, labels, comments)."""
-    def write(method, endpoint, payload=None):
-        args = ["gh", "api", "--method", method, endpoint, "--input", "-"]
-        env = dict(os.environ, GH_TOKEN=token)
-        try:
-            r = subprocess.run(args, input=json.dumps(payload or {}), capture_output=True,
-                               text=True, timeout=90, env=env)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise AlertError(f"{method} {endpoint}: {type(exc).__name__}") from exc
-        if r.returncode:
-            status = re.search(r"HTTP \d{3}", r.stderr)
-            raise AlertError(f"{method} {endpoint}: {status.group(0) if status else 'gh exited ' + str(r.returncode)}")
-        return json.loads(r.stdout) if r.stdout.strip() else {}
-    return write
-
-
 def http_get(url, timeout=20):
     """Returns (status, body). Network failures raise ReadError."""
     req = urllib.request.Request(url, headers={"User-Agent": "monitor-health"})
@@ -129,21 +113,150 @@ def http_get(url, timeout=20):
         raise ReadError(f"GET {url}: {type(exc).__name__}") from exc
 
 
-def slack_post(url, text, timeout=20):
-    """Posts to an incoming webhook. Delivery = HTTP 200 with body `ok`."""
-    data = json.dumps({"text": text}).encode()
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read().decode("utf-8", "replace").strip()
-            status = r.status
-    except urllib.error.HTTPError as exc:
-        status, body = exc.code, exc.read().decode("utf-8", "replace").strip()
-    except (urllib.error.URLError, OSError) as exc:
-        raise AlertError(f"Slack post failed: {type(exc).__name__}") from exc
-    if status != 200 or body != "ok":
-        # Body only: the webhook URL itself is a secret and is never printed.
-        raise AlertError(f"Slack answered HTTP {status} {body[:60]!r}, not 'ok'")
+def slack_poster(token, timeout=20):
+    """Posts as the AAA Alerts bot (chat.postMessage). Delivery = `ok: true`.
+    The bot has chat:write, not chat:write.public: on `not_in_channel` it joins
+    the (public) channel with channels:join and posts once more."""
+    def api(method, payload):
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(f"https://slack.com/api/{method}", data=data, headers={
+            "Content-Type": "application/json; charset=utf-8", "Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                status, body = r.status, r.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            status, body = exc.code, exc.read().decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError) as exc:
+            raise AlertError(f"Slack {method} failed: {type(exc).__name__}") from exc
+        try:
+            answer = json.loads(body)
+        except ValueError:
+            answer = {}
+        return status, answer if isinstance(answer, dict) else {}, body
+
+    def check(method, status, answer, body):
+        if status != 200 or answer.get("ok") is not True:
+            # The error code only: the token is a secret and is never printed.
+            raise AlertError(f"Slack {method} answered HTTP {status} {str(answer.get('error', body[:40]))!r}, not ok")
+
+    def post(channel, text):
+        status, answer, body = api("chat.postMessage", {"channel": channel, "text": text})
+        if status == 200 and answer.get("error") == "not_in_channel":
+            check("conversations.join", *api("conversations.join", {"channel": channel}))
+            status, answer, body = api("chat.postMessage", {"channel": channel, "text": text})
+        check("chat.postMessage", status, answer, body)
+    return post
+
+
+def linear_caller(api_key, timeout=30):
+    """GraphQL adapter for Linear. Any failure raises AlertError."""
+    def call(query, variables=None):
+        data = json.dumps({"query": query, "variables": variables or {}}).encode()
+        req = urllib.request.Request(LINEAR_URL, data=data, headers={
+            "Content-Type": "application/json", "Authorization": api_key, "User-Agent": "monitor-health"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                answer = json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            raise AlertError(f"Linear answered HTTP {exc.code}") from exc
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise AlertError(f"Linear request failed: {type(exc).__name__}") from exc
+        if answer.get("errors"):
+            raise AlertError("Linear: " + "; ".join(str(e.get("message", ""))[:80] for e in answer["errors"]))
+        return answer.get("data") or {}
+    return call
+
+
+ISSUE_FIELDS = "id identifier url description createdAt"
+
+
+class LinearTracker:
+    """The alert issue channel: one rolling Linear issue per label, created
+    by the API key's user. Issues are dicts with id, identifier, url and body
+    (the description), so plan() and issue_state() read them like before."""
+
+    def __init__(self, call, team_id, project_id=None, assignee_id=None):
+        self.call, self.team_id, self.project_id, self.assignee_id = call, team_id, project_id, assignee_id
+
+    @staticmethod
+    def _issue(node):
+        return {"id": node["id"], "identifier": node.get("identifier"), "url": node.get("url", ""),
+                "body": node.get("description") or "", "created": node.get("createdAt", "")}
+
+    def find_open(self, label):
+        try:
+            data = self.call(
+                "query($team:ID!,$label:String!){issues(first:50,filter:{team:{id:{eq:$team}},"
+                "labels:{name:{eq:$label}},state:{type:{nin:[\"completed\",\"canceled\",\"duplicate\"]}},"
+                "creator:{isMe:{eq:true}}}){nodes{" + ISSUE_FIELDS + "}}}",
+                {"team": self.team_id, "label": label})
+            nodes = data["issues"]["nodes"]
+        except (AlertError, KeyError, TypeError) as exc:
+            raise ReadError(f"Linear issue lookup: {exc}") from exc
+        # Only issues this key created carry state; the oldest open one wins.
+        return self._issue(min(nodes, key=lambda n: n.get("createdAt", ""))) if nodes else None
+
+    @staticmethod
+    def _ok(data, field):
+        result = data.get(field) if isinstance(data, dict) else None
+        if not isinstance(result, dict) or result.get("success") is not True:
+            raise AlertError(f"Linear {field} did not succeed")
+        return result
+
+    def _label_id(self, label):
+        data = self.call("query($team:String!,$name:String!){team(id:$team){labels(filter:{name:{eq:$name}}){nodes{id}}}}",
+                         {"team": self.team_id, "name": label})
+        nodes = ((data.get("team") or {}).get("labels") or {}).get("nodes") or []
+        if nodes:
+            return nodes[0]["id"]
+        made = self.call("mutation($i:IssueLabelCreateInput!){issueLabelCreate(input:$i){success issueLabel{id}}}",
+                         {"i": {"name": label, "teamId": self.team_id, "color": "#b60205"}})
+        return self._ok(made, "issueLabelCreate")["issueLabel"]["id"]
+
+    def create(self, title, body, label):
+        fields = {"teamId": self.team_id, "title": title, "description": body, "labelIds": [self._label_id(label)]}
+        if self.project_id:
+            fields["projectId"] = self.project_id
+        if self.assignee_id:
+            fields["assigneeId"] = self.assignee_id
+        data = self.call("mutation($i:IssueCreateInput!){issueCreate(input:$i){success issue{" + ISSUE_FIELDS + "}}}", {"i": fields})
+        return self._issue(self._ok(data, "issueCreate")["issue"])
+
+    def update(self, issue, title=None, body=None):
+        fields = {k: v for k, v in (("title", title), ("description", body)) if v is not None}
+        self._ok(self.call("mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}",
+                           {"id": issue["id"], "i": fields}), "issueUpdate")
+        if body is not None:
+            issue["body"] = body
+
+    def comment(self, issue, body):
+        self._ok(self.call("mutation($i:CommentCreateInput!){commentCreate(input:$i){success}}",
+                           {"i": {"issueId": issue["id"], "body": body}}), "commentCreate")
+
+    def close(self, issue):
+        data = self.call("query($team:String!){team(id:$team){states{nodes{id type position}}}}", {"team": self.team_id})
+        done = sorted((s for s in data["team"]["states"]["nodes"] if s["type"] == "completed"),
+                      key=lambda s: s.get("position", 0))
+        if not done:
+            raise AlertError("Linear team has no completed state")
+        self._ok(self.call("mutation($id:String!,$i:IssueUpdateInput!){issueUpdate(id:$id,input:$i){success}}",
+                           {"id": issue["id"], "i": {"stateId": done[0]["id"]}}), "issueUpdate")
+
+
+class MissingTracker:
+    """Stands in when LINEAR_API_KEY or the watch list's `linear` block is
+    missing: every call fails, so the run goes red and Slack still hears."""
+
+    def __init__(self, why):
+        self.why = why
+
+    def find_open(self, label):
+        raise ReadError(self.why)
+
+    def create(self, *a, **k):
+        raise AlertError(self.why)
+
+    update = comment = close = create
 
 
 # --------------------------------------------------------------------------
@@ -466,15 +579,16 @@ def render_issue(findings, now, run_url, slack_configured, slack_pending=False):
     kept = [{k: f.get(k) for k in ("key", "kind", "subject", "message", "owner", "url")} for f in findings]
     state = json.dumps({"keys": keys, "fingerprint": fingerprint(keys), "findings": kept,
                         "slack_pending": slack_pending}, separators=(",", ":"))
-    # Keep the marker a valid HTML comment whatever a message contains.
-    state = state.replace(">", "\\u003e").replace("<", "\\u003c")
+    # Hex, so Linear's Markdown escaping can't touch it and no message can end
+    # the comment early.
+    state = state.encode().hex()
     note = "" if slack_configured else (
-        "\n> Slack is not configured for this reconciler (`SLACK_DEVOPS_WEBHOOK_URL` repo secret in "
+        "\n> Slack is not configured for this reconciler (`SLACK_ALERTS_BOT_TOKEN` repo secret in "
         "Automation-Architecture/.github is unset), so this issue is the only alert channel.\n")
     body = (f"Monitor Health found {len(findings)} problem(s) at {iso(now)}.\n{note}\n"
             f"{render_findings(findings)}\n\n"
             f"Reconciler run: {run_url}\n"
-            "What each check means and how to act: docs/monitor-health.md. "
+            "What each check means and how to act: docs/monitor-health.md in Automation-Architecture/.github. "
             "This issue updates when the set of problems changes and closes itself when all clear.\n\n"
             f"<!-- monitor-health-state {state} -->\n")
     return f"Monitor Health: {len(findings)} problem(s)", body
@@ -485,7 +599,7 @@ def issue_state(issue):
     if not m:
         return None
     try:
-        state = json.loads(m.group(1))
+        state = json.loads(bytes.fromhex(m.group(1)).decode())
         state["keys"] = set(state["keys"])
         return state
     except (ValueError, KeyError, TypeError):
@@ -550,120 +664,99 @@ def slack_text(p, findings, issue_url, run_url):
     return truncate("\n".join(lines))
 
 
-def find_bot_issue(read, repo, label):
-    issues = read(f"repos/{repo}/issues?labels={label}&state=open&per_page=100", paginate=True)
-    found = [i for page in issues for i in page
-             if not i.get("pull_request") and (i.get("user") or {}).get("login") == BOT_LOGIN]
-    # .github is public: anyone can open an issue with this label, so only
-    # bot-authored issues carry state.
-    return min(found, key=lambda i: i["number"]) if found else None
-
-
-def ensure_label(read, write, repo, label, color, description):
-    try:
-        read(f"repos/{repo}/labels/{quote(label, safe='')}")
-    except NotFound:
-        write("POST", f"repos/{repo}/labels", {"name": label, "color": color, "description": description})
-
-
-def post_with_retry(post, url, text, attempts=2, sleep=time.sleep):
+def post_with_retry(post, channel, text, attempts=2, sleep=time.sleep):
     for attempt in range(attempts):
         try:
-            return post(url, text)
+            return post(channel, text)
         except AlertError:
             if attempt == attempts - 1:
                 raise
             sleep(5)
 
 
-def deliver(findings, *, read_alert, write, post, alert_repo, slack_url, run_url, now, dry_run, log,
+def deliver(findings, *, tracker, post, slack_channel, run_url, now, dry_run, log,
             incomplete=False, sleep=time.sleep):
-    """Applies the plan to the issue and Slack, each channel independently.
-    Raises AlertError when either channel failed, after trying both.
+    """Applies the plan to the Linear issue and Slack, each channel
+    independently. Raises AlertError when either channel failed, after trying
+    both.
 
     Slack state is persisted in the issue: a state change is first written
-    with slack_pending=true and cleared only after Slack answered `ok`, so a
+    with slack_pending=true and cleared only after Slack answered ok, so a
     failed post is re-sent by the next run instead of being lost."""
-    def patch(number, payload):
-        write("PATCH", f"repos/{alert_repo}/issues/{number}", payload)
-
     try:
-        issue = find_bot_issue(read_alert, alert_repo, LABEL)
+        issue = tracker.find_open(LABEL)
     except (ReadError, AlertError) as exc:
         # The issue channel is down. Slack does not depend on it: send what
         # this run found so the outage is not silent, then fail the run.
         log(f"alert plan: issue lookup failed ({exc}); Slack only")
-        if slack_url and not dry_run:
-            text = (f"Monitor Health: cannot read its alert issue in {alert_repo} ({exc}). "
+        if slack_channel and not dry_run:
+            text = (f"Monitor Health: cannot read its Linear alert issue ({exc}). "
                     f"{len(findings)} problem(s) this run. Run: {run_url}\n"
                     + "\n".join(f"- {f['subject']}: {f['message']}" for f in findings))
-            post_with_retry(post, slack_url, truncate(text), sleep=sleep)
+            post_with_retry(post, slack_channel, truncate(text), sleep=sleep)
         raise AlertError(f"alert issue lookup failed: {exc}") from exc
 
     if incomplete:
         findings = carry_forward(findings, issue)
     p = plan(findings, issue)
     prior = issue_state(issue) or {}
-    resend = bool(slack_url) and p["action"] == "refresh" and prior.get("slack_pending")
-    needs_post = bool(slack_url) and (p["action"] in ("create", "update", "close") or resend)
+    resend = bool(slack_channel) and p["action"] == "refresh" and prior.get("slack_pending")
+    needs_post = bool(slack_channel) and (p["action"] in ("create", "update", "close") or resend)
     log(f"alert plan: {p['action']} (new {len(p['new'])}, resolved {len(p['resolved'])})"
         + (" + re-send pending Slack" if resend else ""))
     if p["action"] == "none" or dry_run:
         return p
 
-    title, body = render_issue(findings, now, run_url, bool(slack_url), slack_pending=needs_post)
+    title, body = render_issue(findings, now, run_url, bool(slack_channel), slack_pending=needs_post)
     if p["action"] == "close":
         # Post first: if Slack fails the issue stays open (marked pending),
         # so the next all-clear run tries the close and the post again.
         try:
             if needs_post:
-                post_with_retry(post, slack_url, slack_text(p, findings, issue.get("html_url", ""), run_url), sleep=sleep)
+                post_with_retry(post, slack_channel, slack_text(p, findings, issue.get("url", ""), run_url), sleep=sleep)
         except AlertError:
             _, pending_body = render_issue(carry_forward([], issue), now, run_url, True, slack_pending=True)
-            patch(issue["number"], {"body": pending_body})
+            tracker.update(issue, body=pending_body)
             raise
-        write("POST", f"repos/{alert_repo}/issues/{issue['number']}/comments",
-              {"body": f"All clear at {iso(now)}: every watched monitor is healthy. Run: {run_url}"})
-        patch(issue["number"], {"state": "closed", "state_reason": "completed"})
+        tracker.comment(issue, f"All clear at {iso(now)}: every watched monitor is healthy. Run: {run_url}")
+        tracker.close(issue)
         return p
 
     issue_error = None
     try:
         if p["action"] == "create":
-            ensure_label(read_alert, write, alert_repo, LABEL, "b60205", "Monitor Health reconciler findings (GAAA-3937)")
-            issue = write("POST", f"repos/{alert_repo}/issues", {"title": title, "body": body, "labels": [LABEL]})
+            issue = tracker.create(title, body, LABEL)
         else:
-            patch(issue["number"], {"title": title, "body": body})
+            tracker.update(issue, title=title, body=body)
             if p["action"] == "update":
-                write("POST", f"repos/{alert_repo}/issues/{issue['number']}/comments",
-                      {"body": f"Problems changed at {iso(now)}.\n\nNew: {', '.join(p['new']) or 'none'}\n\n"
-                               f"Resolved: {', '.join(p['resolved']) or 'none'}\n\nRun: {run_url}"})
+                tracker.comment(issue, f"Problems changed at {iso(now)}.\n\nNew: {', '.join(p['new']) or 'none'}\n\n"
+                                       f"Resolved: {', '.join(p['resolved']) or 'none'}\n\nRun: {run_url}")
     except (AlertError, ReadError) as exc:
         issue_error = exc
     if issue_error is not None:
         # The issue write failed: Slack does not depend on it, so send the
         # full findings there (no pending state can be recorded), then fail.
         log(f"issue write failed ({issue_error}); sending findings to Slack")
-        if slack_url:
-            text = (f"Monitor Health: could not write its alert issue in {alert_repo} ({issue_error}). "
+        if slack_channel:
+            text = (f"Monitor Health: could not write its Linear alert issue ({issue_error}). "
                     f"{len(findings)} problem(s) this run. Run: {run_url}\n"
                     + "\n".join(f"- {f['subject']}: {f['message']}" for f in findings))
-            post_with_retry(post, slack_url, truncate(text), sleep=sleep)
+            post_with_retry(post, slack_channel, truncate(text), sleep=sleep)
         raise AlertError(f"alert issue write failed: {issue_error}") from issue_error
     if needs_post:
-        post_with_retry(post, slack_url, slack_text(p, findings, issue.get("html_url", ""), run_url), sleep=sleep)
+        post_with_retry(post, slack_channel, slack_text(p, findings, issue.get("url", ""), run_url), sleep=sleep)
         _, body = render_issue(findings, now, run_url, True, slack_pending=False)
-        patch(issue["number"], {"body": body})
+        tracker.update(issue, body=body)
     return p
 
 
-def heartbeat(config, findings, *, read_alert, write, post, alert_repo, slack_url, run_url, now, dry_run, log):
+def heartbeat(config, findings, *, tracker, post, slack_channel, run_url, now, dry_run, log):
     watched = len(config["workflows"])
     try:
-        issue = find_bot_issue(read_alert, alert_repo, LABEL)
+        issue = tracker.find_open(LABEL)
     except ReadError:
         issue = None  # the link is optional; never let it block the heartbeat
-    status = (f"{len(findings)} open problem(s): {issue['html_url']}" if findings and issue
+    status = (f"{len(findings)} open problem(s): {issue['url']}" if findings and issue
               else f"{len(findings)} open problem(s)")
     text = (f"Monitor Health weekly heartbeat: alive, watching {watched} scheduled workflows, the gate's /health "
             f"and aged CODEX_* PR blockers. {status}. If this stops arriving on Mondays, the reconciler is down. "
@@ -671,20 +764,29 @@ def heartbeat(config, findings, *, read_alert, write, post, alert_repo, slack_ur
     log("heartbeat: " + text)
     if dry_run:
         return
-    if slack_url:
-        post(slack_url, text)
+    if slack_channel:
+        post(slack_channel, text)
         return
-    hb = find_bot_issue(read_alert, alert_repo, HEARTBEAT_LABEL)
+    hb = tracker.find_open(HEARTBEAT_LABEL)
     if not hb:
-        ensure_label(read_alert, write, alert_repo, HEARTBEAT_LABEL, "0e8a16", "Monitor Health weekly heartbeat (GAAA-3937)")
-        hb = write("POST", f"repos/{alert_repo}/issues",
-                   {"title": "Monitor Health heartbeat", "labels": [HEARTBEAT_LABEL],
-                    "body": "Weekly heartbeat comments from the Monitor Health reconciler while Slack is not configured. "
-                            "Subscribe to this issue: a Monday without a comment means the reconciler is down."})
-    write("POST", f"repos/{alert_repo}/issues/{hb['number']}/comments", {"body": text})
+        hb = tracker.create("Monitor Health heartbeat",
+                            "Weekly heartbeat comments from the Monitor Health reconciler while Slack is not "
+                            "configured. Subscribe to this issue: a Monday without a comment means the reconciler "
+                            "is down.", HEARTBEAT_LABEL)
+    tracker.comment(hb, text)
 
 
-def main(argv=None, *, read=None, read_alert=None, write=None, get=http_get, post=slack_post,
+def make_tracker(config, env):
+    key = env.get("LINEAR_API_KEY", "")
+    linear = config.get("linear") or {}
+    if not key:
+        return MissingTracker("LINEAR_API_KEY is not set: the reconciler cannot write its Linear issue")
+    if not linear.get("team_id"):
+        return MissingTracker("the watch list has no linear.team_id")
+    return LinearTracker(linear_caller(key), linear["team_id"], linear.get("project_id"), linear.get("assignee_id"))
+
+
+def main(argv=None, *, read=None, tracker=None, get=http_get, post=None,
          now=None, sleep=time.sleep, env=None, out=print):
     env = os.environ if env is None else env
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
@@ -694,19 +796,22 @@ def main(argv=None, *, read=None, read_alert=None, write=None, get=http_get, pos
     now = now or dt.datetime.now(dt.timezone.utc)
     flag = lambda name: env.get(name, "").lower() == "true"
     dry_run, want_heartbeat = flag("DRY_RUN"), flag("HEARTBEAT")
-    alert_repo = env.get("ALERT_REPO") or f"{config['org']}/.github"
     run_url = env.get("RUN_URL", "(local run)")
-    slack_url = DEAD_SLACK_URL if flag("TEST_DEAD_SLACK") else env.get("SLACK_WEBHOOK_URL", "")
+    slack_token = env.get("SLACK_BOT_TOKEN", "")
+    if flag("TEST_DEAD_SLACK"):
+        slack_channel = DEAD_SLACK_CHANNEL
+    else:
+        slack_channel = config.get("slack_channel", "") if slack_token else ""
     codex_age = env.get("CODEX_MAX_AGE_HOURS", "").strip()
     if read is None:
         if not env.get("GH_TOKEN"):
             out("::error::GH_TOKEN (AAA_ORG_TOKEN) is not set: the reconciler cannot read the org")
             return 1
         read = gh_reader(env["GH_TOKEN"])
-    if read_alert is None:
-        read_alert = gh_reader(env.get("ALERT_TOKEN") or env["GH_TOKEN"])
-    if write is None:
-        write = gh_writer(env.get("ALERT_TOKEN") or env["GH_TOKEN"])
+    if tracker is None:
+        tracker = make_tracker(config, env)
+    if post is None:
+        post = slack_poster(slack_token)
 
     findings, errors = reconcile(config, read, get, now, sleep=sleep,
                                  codex_max_age=float(codex_age) if codex_age else None)
@@ -717,22 +822,22 @@ def main(argv=None, *, read=None, read_alert=None, write=None, get=http_get, pos
         with open(summary, "a") as fh:
             fh.write(f"## Monitor Health\n\n{len(findings)} finding(s), {len(errors)} read error(s)\n\n"
                      f"{render_findings(findings) or 'All watched monitors healthy.'}\n")
-    if not slack_url:
-        out("::warning::SLACK_DEVOPS_WEBHOOK_URL is not set in this repository: alerts go to the issue only")
+    if not slack_channel:
+        out("::warning::SLACK_ALERTS_BOT_TOKEN is not set in this repository: alerts go to the Linear issue only")
 
     failed = False
-    kw = dict(read_alert=read_alert, write=write, post=post, alert_repo=alert_repo, slack_url=slack_url,
-              run_url=run_url, now=now, dry_run=dry_run, log=out)
+    kw = dict(tracker=tracker, post=post, slack_channel=slack_channel, run_url=run_url, now=now,
+              dry_run=dry_run, log=out)
     try:
         deliver(findings, incomplete=bool(errors), sleep=sleep, **kw)
     except (AlertError, ReadError) as exc:
         out(f"::error::alert delivery failed: {exc}")
         failed = True
     if flag("TEST_DEAD_SLACK") and not dry_run:
-        # Forced-failure test: always attempt one post to the dead webhook,
+        # Forced-failure test: always attempt one post to the dead channel,
         # even when the findings are unchanged and deliver() posted nothing.
         try:
-            post(slack_url, f"Monitor Health forced-failure test (dead channel). Run: {run_url}")
+            post(slack_channel, f"Monitor Health forced-failure test (dead channel). Run: {run_url}")
         except AlertError as exc:
             out(f"::error::alert delivery failed: {exc}")
             failed = True

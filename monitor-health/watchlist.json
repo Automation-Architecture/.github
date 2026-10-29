@@ -10,6 +10,14 @@
     "See docs/monitor-health.md before changing a number."
   ],
   "org": "Automation-Architecture",
+  "linear": {
+    "_comment": "The rolling alert issue: team Devops Grok Agents, project aaa-devops, assignee Engineer (Brad's rule: every Linear issue goes to Engineer).",
+    "team_id": "a4e63241-ed49-4424-9c46-12991ca63545",
+    "project_id": "ddc086f5-7825-442d-8a04-9bdf82adbef6",
+    "assignee_id": "1130ee5f-c1e7-415b-a165-8f3bc3fff7e6"
+  },
+  "slack_channel": "C09DNFPLSJ1",
+  "_slack_channel": "#dev-ops. The AAA Alerts bot (slack/aaa-alerts) must be a member; it joins public channels with channels:join.",
   "workflows": [
     {
       "repo": ".github",

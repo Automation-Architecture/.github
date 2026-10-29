@@ -1,7 +1,7 @@
 """Offline tests for scripts/monitor_health.py (GAAA-3937).
 
-Fake GitHub reads keyed by endpoint, a fixed clock, fake Slack and issue
-writes. No token, no network.
+Fake GitHub reads keyed by endpoint, a fixed clock, a fake Linear tracker
+and fake Slack. No token, no network.
 
     python3 -m unittest discover -s tests/monitor-health -v
 """
@@ -400,8 +400,7 @@ class Planning(unittest.TestCase):
 
     def issue(self, findings):
         _, body = mh.render_issue(findings, NOW, "run", True)
-        return {"number": 7, "body": body, "html_url": "https://github.com/acme/.github/issues/7",
-                "user": {"login": mh.BOT_LOGIN}}
+        return {"id": "i7", "url": "https://linear.app/acme/issue/OPS-7", "body": body}
 
     def test_create_when_problems_and_no_issue(self):
         p = mh.plan([self.F1], None)
@@ -422,14 +421,14 @@ class Planning(unittest.TestCase):
         self.assertEqual((p["action"], p["resolved"]), ("close", [self.F1["key"]]))
 
     def test_issue_without_state_marker_is_updated(self):
-        p = mh.plan([self.F1], {"number": 1, "body": "edited by someone"})
+        p = mh.plan([self.F1], {"id": "i1", "body": "edited by someone"})
         self.assertEqual(p["action"], "update")
 
     def test_issue_body_mentions_missing_slack(self):
         _, body = mh.render_issue([self.F1], NOW, "run", False)
-        self.assertIn("SLACK_DEVOPS_WEBHOOK_URL", body)
+        self.assertIn("SLACK_ALERTS_BOT_TOKEN", body)
         _, body = mh.render_issue([self.F1], NOW, "run", True)
-        self.assertNotIn("SLACK_DEVOPS_WEBHOOK_URL", body)
+        self.assertNotIn("SLACK_ALERTS_BOT_TOKEN", body)
 
     def test_slack_text_truncates(self):
         many = [mh.finding("last_run_failed", f"r/{i}.yml", "x" * 200) for i in range(40)]
@@ -438,53 +437,67 @@ class Planning(unittest.TestCase):
         self.assertIn("truncated", text)
 
 
+
 class FakeAlerts:
-    def __init__(self, issues=(), labels=("monitor-health",)):
+    """A fake Linear tracker (the alert issue channel) plus fake Slack."""
+
+    def __init__(self, issues=()):
         self.issues = list(issues)
-        self.labels = set(labels)
-        self.writes = []
+        self.ops = []
         self.posts = []
+        self.fail = {}
 
-    def read(self, endpoint, paginate=False):
-        if "/labels/" in endpoint:
-            name = mh.urllib.parse.unquote(endpoint.rsplit("/", 1)[1])
-            if name not in self.labels:
-                raise mh.NotFound("404")
-            return {"name": name}
-        if "/issues?" in endpoint:
-            label = endpoint.split("labels=", 1)[1].split("&", 1)[0]
-            return [[i for i in self.issues if label in i.get("labels", []) and i.get("state") == "open"]]
-        raise AssertionError(endpoint)
+    def _check(self, op):
+        if op in self.fail:
+            raise self.fail[op]
 
-    def write(self, method, endpoint, payload=None):
-        self.writes.append((method, endpoint, payload))
-        if method == "POST" and endpoint.endswith("/issues"):
-            issue = {"number": 100 + len(self.issues), "html_url": "https://github.com/acme/.github/issues/new",
-                     "user": {"login": mh.BOT_LOGIN}, "body": payload["body"], "labels": payload["labels"],
-                     "state": "open"}
-            self.issues.append(issue)
-            return issue
-        if method == "PATCH" and "/issues/" in endpoint:
-            number = int(endpoint.rsplit("/", 1)[1])
-            for issue in self.issues:
-                if issue["number"] == number:
-                    issue.update(payload)
-        return {}
+    def find_open(self, label):
+        self._check("find")
+        found = [i for i in self.issues if i["label"] == label and i["state"] == "open"]
+        return min(found, key=lambda i: i["n"]) if found else None
 
-    def post(self, url, text):
-        self.posts.append((url, text))
+    def create(self, title, body, label):
+        self._check("create")
+        n = len(self.issues) + 1
+        issue = {"id": f"i{n}", "n": n, "url": f"https://linear.app/acme/issue/OPS-{n}", "title": title,
+                 "body": body, "label": label, "state": "open"}
+        self.issues.append(issue)
+        self.ops.append(("create", label))
+        return issue
+
+    def update(self, issue, title=None, body=None):
+        self._check("update")
+        self.ops.append(("update", issue["id"]))
+        if title is not None:
+            issue["title"] = title
+        if body is not None:
+            issue["body"] = body
+
+    def comment(self, issue, body):
+        self._check("comment")
+        self.ops.append(("comment", issue["id"], body))
+
+    def close(self, issue):
+        self._check("close")
+        self.ops.append(("close", issue["id"]))
+        issue["state"] = "closed"
+
+    def post(self, channel, text):
+        self.posts.append((channel, text))
 
 
-CONFIG = {"org": ORG, "workflows": [entry("r", "a.yml")]}
+CONFIG = {"org": ORG, "workflows": [entry("r", "a.yml")], "slack_channel": "C123",
+          "linear": {"team_id": "team-1", "project_id": "proj-1", "assignee_id": "user-1"}}
+SLACK = {"SLACK_BOT_TOKEN": "xoxb-test"}
 
 
 class Main(unittest.TestCase):
-    def run_main(self, routes, alerts, env=None, get=None):
+    def run_main(self, routes, alerts, env=None, get=None, tracker=True):
         out = []
-        env = dict({"ALERT_REPO": "acme/.github", "RUN_URL": "https://run"}, **(env or {}))
+        env = dict({"RUN_URL": "https://run"}, **(env or {}))
         cfg = pathlib.Path(self.tmp) / "w.json"
         cfg.write_text(json.dumps(CONFIG))
-        rc = mh.main(["--config", str(cfg)], read=FakeRead(routes), read_alert=alerts.read, write=alerts.write,
+        rc = mh.main(["--config", str(cfg)], read=FakeRead(routes), tracker=alerts if tracker else None,
                      post=alerts.post, get=get or (lambda u: (200, "{}")), now=NOW, sleep=no_sleep, env=env,
                      out=out.append)
         return rc, out
@@ -495,113 +508,103 @@ class Main(unittest.TestCase):
 
     def test_problem_creates_issue_and_posts_slack(self):
         alerts = FakeAlerts()
-        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts,
-                                {"SLACK_WEBHOOK_URL": "https://hooks.slack.com/x"})
+        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, SLACK)
         self.assertEqual(rc, 0)
         # create (slack_pending=true), post, then clear the pending flag
-        self.assertEqual([w[0] for w in alerts.writes], ["POST", "PATCH"])
+        self.assertEqual([o[0] for o in alerts.ops], ["create", "update"])
+        self.assertEqual(alerts.ops[0], ("create", "monitor-health"))
         self.assertEqual(len(alerts.posts), 1)
+        self.assertEqual(alerts.posts[0][0], "C123")
         self.assertIn("new problems", alerts.posts[0][1])
+        self.assertIn("https://linear.app/acme/issue/OPS-1", alerts.posts[0][1])
         self.assertFalse(mh.issue_state(alerts.issues[0])["slack_pending"])
-
-    def test_creates_label_when_missing(self):
-        alerts = FakeAlerts(labels=())
-        self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts)
-        self.assertTrue(alerts.writes[0][1].endswith("/labels"))
 
     def test_no_slack_warns_but_succeeds(self):
         alerts = FakeAlerts()
         rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts)
         self.assertEqual(rc, 0)
         self.assertEqual(alerts.posts, [])
-        self.assertTrue(any("SLACK_DEVOPS_WEBHOOK_URL is not set" in o for o in out))
+        self.assertTrue(any("SLACK_ALERTS_BOT_TOKEN is not set" in o for o in out))
+        self.assertIn("SLACK_ALERTS_BOT_TOKEN", alerts.issues[0]["body"])
 
     def test_same_problems_next_hour_is_quiet(self):
         alerts = FakeAlerts()
         routes = wf_routes("r", "a.yml", runs=[run(1, 2, "failure")])
-        self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
-        alerts.writes.clear(); alerts.posts.clear()
-        rc, _ = self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.run_main(routes, alerts, SLACK)
+        alerts.ops.clear(); alerts.posts.clear()
+        rc, _ = self.run_main(routes, alerts, SLACK)
         self.assertEqual(rc, 0)
         self.assertEqual(alerts.posts, [])
-        self.assertEqual([w[0] for w in alerts.writes], ["PATCH"])
+        self.assertEqual([o[0] for o in alerts.ops], ["update"])
 
     def test_recovery_closes_issue(self):
         alerts = FakeAlerts()
         self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts)
-        alerts.writes.clear()
-        rc, _ = self.run_main(wf_routes("r", "a.yml", runs=[run(2, 1), run(1, 2, "failure")]), alerts,
-                              {"SLACK_WEBHOOK_URL": "u"})
+        alerts.ops.clear()
+        rc, _ = self.run_main(wf_routes("r", "a.yml", runs=[run(2, 1), run(1, 2, "failure")]), alerts, SLACK)
         self.assertEqual(rc, 0)
-        self.assertEqual(alerts.writes[-1][2], {"state": "closed", "state_reason": "completed"})
+        self.assertEqual(alerts.ops[-1], ("close", "i1"))
+        self.assertEqual(alerts.ops[-2][0], "comment")
         self.assertIn("all clear", alerts.posts[-1][1])
-
-    def test_issue_by_non_bot_is_ignored(self):
-        _, body = mh.render_issue([mh.finding("last_run_failed", "r/a.yml", "x")], NOW, "run", True)
-        spoof = {"number": 1, "body": body, "labels": ["monitor-health"], "state": "open", "user": {"login": "mallory"}}
-        alerts = FakeAlerts(issues=[spoof])
-        self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts)
-        self.assertTrue(alerts.writes[0][1].endswith("/issues"))  # a new bot issue, not the spoof
 
     def test_dry_run_writes_nothing(self):
         alerts = FakeAlerts()
         rc, _ = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts,
-                              {"DRY_RUN": "true", "HEARTBEAT": "true", "SLACK_WEBHOOK_URL": "u"})
-        self.assertEqual((rc, alerts.writes, alerts.posts), (0, [], []))
+                              dict(SLACK, DRY_RUN="true", HEARTBEAT="true"))
+        self.assertEqual((rc, alerts.ops, alerts.posts), (0, [], []))
 
     def test_read_error_is_reported_and_fails_run(self):
         alerts = FakeAlerts()
         routes = wf_routes("r", "a.yml")
         routes[f"repos/{ORG}/r/actions/workflows/a.yml/runs?event=schedule&per_page=20"] = "__error"
-        rc, out = self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        rc, out = self.run_main(routes, alerts, SLACK)
         self.assertEqual(rc, 1)
-        self.assertIn("read_error", alerts.writes[0][2]["body"])
+        self.assertIn("read_error:reconciler", mh.issue_state(alerts.issues[0])["keys"])
         self.assertEqual(len(alerts.posts), 1)
         self.assertTrue(any(o.startswith("::error::read failed") for o in out))
 
     def test_dead_slack_fails_run_after_issue(self):
         alerts = FakeAlerts()
 
-        def post(url, text):
-            raise mh.AlertError("Slack answered HTTP 404 'no_service', not 'ok'")
+        def post(channel, text):
+            raise mh.AlertError("Slack answered HTTP 200 'channel_not_found', not ok")
         alerts.post = post
-        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, {"SLACK_WEBHOOK_URL": "u"})
+        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, SLACK)
         self.assertEqual(rc, 1)
         self.assertEqual(len(alerts.issues), 1)
         self.assertTrue(any("alert delivery failed" in o for o in out))
 
-    def test_test_dead_slack_uses_dead_url(self):
+    def test_test_dead_slack_uses_dead_channel(self):
         alerts = FakeAlerts()
-        self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts,
-                      {"TEST_DEAD_SLACK": "true", "SLACK_WEBHOOK_URL": "real"})
-        self.assertEqual(alerts.posts[0][0], mh.DEAD_SLACK_URL)
+        self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, dict(SLACK, TEST_DEAD_SLACK="true"))
+        self.assertEqual(alerts.posts[0][0], mh.DEAD_SLACK_CHANNEL)
 
     def test_test_dead_slack_fails_even_with_unchanged_findings(self):
         alerts = FakeAlerts()
         routes = wf_routes("r", "a.yml", runs=[run(1, 2, "failure")])
         self.run_main(routes, alerts)
 
-        def post(url, text):
-            raise mh.AlertError("Slack answered HTTP 404 'no_service', not 'ok'")
+        def post(channel, text):
+            raise mh.AlertError("Slack answered HTTP 200 'channel_not_found', not ok")
         alerts.post = post
         rc, out = self.run_main(routes, alerts, {"TEST_DEAD_SLACK": "true"})
         self.assertEqual(rc, 1)
-        self.assertEqual([w[0] for w in alerts.writes][-1], "PATCH")  # issue still refreshed
+        self.assertEqual(alerts.ops[-1][0], "update")  # issue still refreshed
 
     def failing_post(self, alerts):
-        def post(url, text):
+        def post(channel, text):
             alerts.attempts = getattr(alerts, "attempts", 0) + 1
-            raise mh.AlertError("Slack answered HTTP 500 'x', not 'ok'")
+            raise mh.AlertError("Slack answered HTTP 500 'x', not ok")
         return post
 
     def test_incomplete_scan_does_not_resolve_unseen_problems(self):
         alerts = FakeAlerts()
         routes = wf_routes("r", "a.yml", runs=[run(1, 2, "failure")])
-        self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.run_main(routes, alerts, SLACK)
         alerts.posts.clear()
         broken = wf_routes("r", "a.yml")
         broken[f"repos/{ORG}/r/actions/workflows/a.yml/runs?event=schedule&per_page=20"] = "__error"
-        rc, _ = self.run_main(broken, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        rc, _ = self.run_main(broken, alerts, SLACK)
         self.assertEqual(rc, 1)
         state = mh.issue_state(alerts.issues[0])
         self.assertIn("last_run_failed:r/a.yml", state["keys"])  # carried, not resolved
@@ -611,60 +614,58 @@ class Main(unittest.TestCase):
 
     def test_issue_lookup_failure_still_reaches_slack(self):
         alerts = FakeAlerts()
-
-        def broken_read(endpoint, paginate=False):
-            raise mh.ReadError("GET issues: HTTP 403")
-        alerts.read = broken_read
-        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, {"SLACK_WEBHOOK_URL": "u"})
+        alerts.fail["find"] = mh.ReadError("Linear issue lookup: Linear answered HTTP 401")
+        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, SLACK)
         self.assertEqual(rc, 1)
         self.assertEqual(len(alerts.posts), 1)
-        self.assertIn("cannot read its alert issue", alerts.posts[0][1])
+        self.assertIn("cannot read its Linear alert issue", alerts.posts[0][1])
         self.assertIn("r/a.yml", alerts.posts[0][1])
 
     def test_issue_write_failure_still_reaches_slack(self):
         alerts = FakeAlerts()
-        orig_write = alerts.write
-
-        def write(method, endpoint, payload=None):
-            if endpoint.endswith("/issues"):
-                raise mh.AlertError("POST issues: HTTP 403")
-            return orig_write(method, endpoint, payload)
-        alerts.write = write
-        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, {"SLACK_WEBHOOK_URL": "u"})
+        alerts.fail["create"] = mh.AlertError("Linear answered HTTP 400")
+        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, SLACK)
         self.assertEqual(rc, 1)
         self.assertEqual(len(alerts.posts), 1)
-        self.assertIn("could not write its alert issue", alerts.posts[0][1])
+        self.assertIn("could not write its Linear alert issue", alerts.posts[0][1])
         self.assertIn("r/a.yml", alerts.posts[0][1])
+
+    def test_missing_linear_key_fails_run_and_reaches_slack(self):
+        alerts = FakeAlerts()
+        rc, out = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, SLACK, tracker=False)
+        self.assertEqual(rc, 1)
+        self.assertIn("LINEAR_API_KEY is not set", alerts.posts[0][1])
+        self.assertTrue(any("alert delivery failed" in o for o in out))
 
     def test_failed_slack_is_resent_next_run(self):
         alerts = FakeAlerts()
         good_post = alerts.post
         alerts.post = self.failing_post(alerts)
         routes = wf_routes("r", "a.yml", runs=[run(1, 2, "failure")])
-        rc, _ = self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        rc, _ = self.run_main(routes, alerts, SLACK)
         self.assertEqual(rc, 1)
         self.assertEqual(alerts.attempts, 2)  # retried once
         self.assertTrue(mh.issue_state(alerts.issues[0])["slack_pending"])
         alerts.post = good_post
-        rc, _ = self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        rc, _ = self.run_main(routes, alerts, SLACK)
         self.assertEqual(rc, 0)
         self.assertEqual(len(alerts.posts), 1)
         self.assertIn("re-sent", alerts.posts[0][1])
         self.assertFalse(mh.issue_state(alerts.issues[0])["slack_pending"])
-        rc, _ = self.run_main(routes, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        rc, _ = self.run_main(routes, alerts, SLACK)
         self.assertEqual(len(alerts.posts), 1)  # nothing more once delivered
 
     def test_failed_close_post_keeps_issue_open_and_retries(self):
         alerts = FakeAlerts()
-        self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, {"SLACK_WEBHOOK_URL": "u"})
+        self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2, "failure")]), alerts, SLACK)
         good_post = alerts.post
         alerts.post = self.failing_post(alerts)
         healthy = wf_routes("r", "a.yml", runs=[run(2, 1), run(1, 2, "failure")])
-        rc, _ = self.run_main(healthy, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        rc, _ = self.run_main(healthy, alerts, SLACK)
         self.assertEqual(rc, 1)
         self.assertEqual(alerts.issues[0]["state"], "open")
         alerts.post = good_post
-        rc, _ = self.run_main(healthy, alerts, {"SLACK_WEBHOOK_URL": "u"})
+        rc, _ = self.run_main(healthy, alerts, SLACK)
         self.assertEqual(rc, 0)
         self.assertEqual(alerts.issues[0]["state"], "closed")
         self.assertIn("all clear", alerts.posts[-1][1])
@@ -675,29 +676,130 @@ class Main(unittest.TestCase):
         self.assertEqual(body.split("monitor-health-state", 1)[1].count("-->"), 1)
         self.assertEqual(mh.issue_state({"body": body})["findings"][0]["message"], "boom --> <!-- x")
 
+    def test_state_marker_survives_linear_markdown_escaping(self):
+        # Linear stores descriptions as Markdown and escapes [ ] _ * in them:
+        # a JSON marker came back as {"keys":\["a"\]} when tested on 2026-10-29.
+        f = mh.finding("last_run_failed", "r/a_b.yml", "[x] *y* _z_")
+        _, body = mh.render_issue([f], NOW, "run", True)
+        escaped = body
+        for ch in "[]_*":
+            escaped = escaped.replace(ch, "\\" + ch)
+        self.assertEqual(mh.issue_state({"body": escaped})["findings"][0]["message"], "[x] *y* _z_")
+
     def test_heartbeat_to_slack(self):
         alerts = FakeAlerts()
-        rc, _ = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2)]), alerts,
-                              {"HEARTBEAT": "true", "SLACK_WEBHOOK_URL": "u"})
+        rc, _ = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2)]), alerts, dict(SLACK, HEARTBEAT="true"))
         self.assertEqual(rc, 0)
         self.assertEqual(len(alerts.posts), 1)
         self.assertIn("weekly heartbeat", alerts.posts[0][1])
 
     def test_heartbeat_falls_back_to_issue_comment(self):
-        alerts = FakeAlerts(labels=())
+        alerts = FakeAlerts()
         rc, _ = self.run_main(wf_routes("r", "a.yml", runs=[run(1, 2)]), alerts, {"HEARTBEAT": "true"})
         self.assertEqual(rc, 0)
-        self.assertEqual(alerts.writes[-1][0], "POST")
-        self.assertTrue(alerts.writes[-1][1].endswith("/comments"))
-        self.assertIn("weekly heartbeat", alerts.writes[-1][2]["body"])
+        self.assertEqual(alerts.ops[0], ("create", mh.HEARTBEAT_LABEL))
+        self.assertEqual(alerts.ops[-1][0], "comment")
+        self.assertIn("weekly heartbeat", alerts.ops[-1][2])
 
     def test_missing_token_fails(self):
         rc = mh.main(["--config", str(ROOT / "monitor-health" / "watchlist.json")], env={}, out=lambda s: None)
         self.assertEqual(rc, 1)
 
 
+class FakeLinear:
+    """Records GraphQL calls and answers them from canned data."""
+
+    def __init__(self, issues=(), labels=(), states=None, unsuccessful=()):
+        self.issues, self.labels, self.unsuccessful = list(issues), list(labels), set(unsuccessful)
+        self.states = states if states is not None else [
+            {"id": "s-done", "type": "completed", "position": 3}, {"id": "s-todo", "type": "unstarted", "position": 1},
+            {"id": "s-old", "type": "completed", "position": 9}]
+        self.calls = []
+
+    def __call__(self, query, variables=None):
+        self.calls.append((query, variables or {}))
+        if query.startswith("query($team:ID!,$label:String!){issues"):
+            return {"issues": {"nodes": self.issues}}
+        if "labels(filter" in query:
+            return {"team": {"labels": {"nodes": [{"id": l} for l in self.labels]}}}
+        if "issueLabelCreate" in query:
+            return {"issueLabelCreate": {"success": True, "issueLabel": {"id": "new-label"}}}
+        if "issueCreate" in query:
+            return {"issueCreate": {"success": "issueCreate" not in self.unsuccessful, "issue": {
+                "id": "x1", "identifier": "OPS-1", "url": "u", "description": variables["i"]["description"]}}}
+        if "states" in query:
+            return {"team": {"states": {"nodes": self.states}}}
+        for field in ("issueUpdate", "commentCreate"):
+            if field in query:
+                return {field: {"success": field not in self.unsuccessful}}
+        raise AssertionError(query)
+
+
+class LinearTrackerTests(unittest.TestCase):
+    def test_lookup_filters_team_label_open_state_and_own_issues(self):
+        call = FakeLinear(issues=[{"id": "b", "createdAt": "2026-10-02", "description": "two"},
+                                  {"id": "a", "createdAt": "2026-10-01", "description": "one"}])
+        issue = mh.LinearTracker(call, "team-1").find_open("monitor-health")
+        q, v = call.calls[0]
+        self.assertIn("creator:{isMe:{eq:true}}", q)  # only issues this key created carry state
+        self.assertIn('nin:[\"completed\",\"canceled\",\"duplicate\"]', q)
+        self.assertEqual(v, {"team": "team-1", "label": "monitor-health"})
+        self.assertEqual((issue["id"], issue["body"]), ("a", "one"))  # the oldest open issue wins
+
+    def test_lookup_failure_is_read_error(self):
+        def call(q, v=None):
+            raise mh.AlertError("Linear answered HTTP 401")
+        with self.assertRaises(mh.ReadError):
+            mh.LinearTracker(call, "team-1").find_open("monitor-health")
+
+    def test_create_sets_team_project_assignee_and_label(self):
+        call = FakeLinear(labels=["lbl-1"])
+        issue = mh.LinearTracker(call, "team-1", "proj-1", "user-1").create("T", "B", "monitor-health")
+        fields = next(v["i"] for q, v in call.calls if "issueCreate" in q)
+        self.assertEqual(fields, {"teamId": "team-1", "title": "T", "description": "B", "labelIds": ["lbl-1"],
+                                  "projectId": "proj-1", "assigneeId": "user-1"})
+        self.assertEqual(issue["body"], "B")
+
+    def test_create_makes_the_label_when_missing(self):
+        call = FakeLinear()
+        mh.LinearTracker(call, "team-1").create("T", "B", "monitor-health")
+        self.assertTrue(any("issueLabelCreate" in q for q, _ in call.calls))
+        fields = next(v["i"] for q, v in call.calls if "issueCreate" in q)
+        self.assertEqual(fields["labelIds"], ["new-label"])
+
+    def test_close_moves_to_the_first_completed_state(self):
+        call = FakeLinear()
+        mh.LinearTracker(call, "team-1").close({"id": "x1"})
+        q, v = call.calls[-1]
+        self.assertEqual(v, {"id": "x1", "i": {"stateId": "s-done"}})
+
+    def test_close_without_completed_state_is_alert_error(self):
+        call = FakeLinear(states=[{"id": "s", "type": "started", "position": 1}])
+        with self.assertRaises(mh.AlertError):
+            mh.LinearTracker(call, "team-1").close({"id": "x1"})
+
+    def test_unsuccessful_mutations_are_alert_errors(self):
+        for field, act in (("issueCreate", lambda t: t.create("T", "B", "monitor-health")),
+                           ("issueUpdate", lambda t: t.update({"id": "x1", "body": "old"}, body="new")),
+                           ("commentCreate", lambda t: t.comment({"id": "x1"}, "c")),
+                           ("issueUpdate", lambda t: t.close({"id": "x1"}))):
+            with self.subTest(field=field), self.assertRaises(mh.AlertError):
+                act(mh.LinearTracker(FakeLinear(labels=["l"], unsuccessful=[field]), "team-1"))
+
+    def test_failed_update_leaves_the_local_body(self):
+        issue = {"id": "x1", "body": "old"}
+        with self.assertRaises(mh.AlertError):
+            mh.LinearTracker(FakeLinear(unsuccessful=["issueUpdate"]), "team-1").update(issue, body="new")
+        self.assertEqual(issue["body"], "old")
+
+    def test_update_keeps_the_local_body_in_step(self):
+        issue = {"id": "x1", "body": "old"}
+        mh.LinearTracker(FakeLinear(), "team-1").update(issue, body="new")
+        self.assertEqual(issue["body"], "new")
+
+
 class SlackPost(unittest.TestCase):
-    def fake(self, status, body):
+    def fake(self, status, body, seen=None):
         class Resp:
             def __init__(s):
                 s.status = status
@@ -707,25 +809,66 @@ class SlackPost(unittest.TestCase):
                 return s
             def __exit__(s, *a):
                 return False
-        return lambda req, timeout: Resp()
+
+        def urlopen(req, timeout):
+            if seen is not None:
+                seen.append(req)
+            return Resp()
+        return urlopen
+
+    def with_urlopen(self, fake, fn):
+        orig = mh.urllib.request.urlopen
+        mh.urllib.request.urlopen = fake
+        try:
+            return fn()
+        finally:
+            mh.urllib.request.urlopen = orig
 
     def test_ok(self):
-        orig = mh.urllib.request.urlopen
-        mh.urllib.request.urlopen = self.fake(200, "ok")
-        try:
-            mh.slack_post("https://hooks.slack.com/x", "hi")
-        finally:
-            mh.urllib.request.urlopen = orig
+        seen = []
+        self.with_urlopen(self.fake(200, '{"ok":true}', seen), lambda: mh.slack_poster("xoxb-1")("C123", "hi"))
+        self.assertEqual(json.loads(seen[0].data), {"channel": "C123", "text": "hi"})
+        self.assertEqual(seen[0].get_header("Authorization"), "Bearer xoxb-1")
 
-    def test_not_ok_raises_without_url(self):
-        orig = mh.urllib.request.urlopen
-        mh.urllib.request.urlopen = self.fake(200, "invalid_payload")
-        try:
-            with self.assertRaises(mh.AlertError) as cm:
-                mh.slack_post("https://hooks.slack.com/services/SECRET", "hi")
-            self.assertNotIn("SECRET", str(cm.exception))
-        finally:
-            mh.urllib.request.urlopen = orig
+    def scripted(self, answers, seen):
+        answers = iter(answers)
+
+        class Resp:
+            def __init__(s, body):
+                s.status, s.body = 200, body
+            def read(s):
+                return s.body.encode()
+            def __enter__(s):
+                return s
+            def __exit__(s, *a):
+                return False
+
+        def urlopen(req, timeout):
+            seen.append(req.full_url.rsplit("/", 1)[1])
+            return Resp(next(answers))
+        return urlopen
+
+    def test_not_in_channel_joins_then_posts(self):
+        seen = []
+        fake = self.scripted(['{"ok":false,"error":"not_in_channel"}', '{"ok":true}', '{"ok":true}'], seen)
+        self.with_urlopen(fake, lambda: mh.slack_poster("xoxb-1")("C123", "hi"))
+        self.assertEqual(seen, ["chat.postMessage", "conversations.join", "chat.postMessage"])
+
+    def test_failed_join_is_alert_error(self):
+        seen = []
+        fake = self.scripted(['{"ok":false,"error":"not_in_channel"}', '{"ok":false,"error":"is_archived"}'], seen)
+        with self.assertRaises(mh.AlertError) as cm:
+            self.with_urlopen(fake, lambda: mh.slack_poster("xoxb-1")("C123", "hi"))
+        self.assertIn("is_archived", str(cm.exception))
+
+    def test_not_ok_raises_without_token(self):
+        def go():
+            mh.slack_poster("xoxb-SECRET")("C123", "hi")
+        with self.assertRaises(mh.AlertError) as cm:
+            self.with_urlopen(self.fake(200, '{"ok":false,"error":"channel_not_found"}'), go)
+        self.assertIn("channel_not_found", str(cm.exception))
+        self.assertNotIn("SECRET", str(cm.exception))
+
 
 
 class GhReader(unittest.TestCase):
@@ -791,6 +934,11 @@ class WatchList(unittest.TestCase):
         self.assertIn((".github", "doc-auto-merge-sweep.yml"), seen)
         self.assertIn(("aaa-client-dashboard", "sync-linear-data.yml"), seen)
         self.assertNotIn((".github", "monitor-health.yml"), seen)  # cross-watched by the dashboard watchdog
+
+    def test_alert_channels_configured(self):
+        cfg = json.loads((ROOT / "monitor-health" / "watchlist.json").read_text())
+        self.assertTrue(cfg["linear"]["team_id"] and cfg["linear"]["assignee_id"])
+        self.assertRegex(cfg["slack_channel"], r"^C[A-Z0-9]{8,}$")  # a channel ID: chat.postMessage needs no lookup
 
     def test_local_workflows_in_watchlist_exist(self):
         cfg = json.loads((ROOT / "monitor-health" / "watchlist.json").read_text())

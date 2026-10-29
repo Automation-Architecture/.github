@@ -1,0 +1,6 @@
+{
+  "hooks": {
+    "get-manifest": "sh -c 'cat manifest.json' get-manifest",
+    "deploy": "sh store-token.sh"
+  }
+}
