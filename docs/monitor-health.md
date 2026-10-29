@@ -58,22 +58,28 @@ with the same completeness checks as `scripts/rollout_monitor.py`.
 
 ## Alerts
 
-- **Issue** in this repository, label `monitor-health`: one rolling,
-  bot-authored issue. It is created when problems appear. When the set of
-  problems changes, the issue gets a comment listing new and resolved items.
-  When the set is unchanged, only the body is refreshed (no comment, no
-  Slack). The issue is closed with a comment when all is clear. Its state is
-  kept in a hidden marker in the body. Only issues authored by
-  `github-actions[bot]` are trusted, because this repository is public.
-- **Slack** (#dev-ops) through the `SLACK_DEVOPS_WEBHOOK_URL` repository secret
-  of this repository. Posts are sent when the issue is created, changes or
-  closes. Delivery means HTTP 200 with the body `ok`; anything else turns the
-  run red after the issue has been written. If the secret is unset, the run
-  logs a warning and the issue body says that the issue is the only channel.
-- **Delivery guarantees**: the two channels are independent. If the alert
-  issue cannot be read, Slack still gets this run's findings and the run goes
+- **Linear issue** (Brad, 2026-10-29: Linear, never GitHub issues): one
+  rolling issue labelled `monitor-health` in team Devops Grok Agents, project
+  aaa-devops, assigned to Engineer (`linear` in the watch list). It is created
+  when problems appear. When the set of problems changes, the issue gets a
+  comment listing new and resolved items. When the set is unchanged, only the
+  description is refreshed (no comment, no Slack). It moves to Done with a
+  comment when all is clear. Its state is kept in a hidden marker at the end
+  of the description, hex-encoded because Linear escapes Markdown characters
+  in descriptions. Only open issues created by the `LINEAR_API_KEY` user are
+  read. The key is the `LINEAR_API_KEY` repository secret of this repository
+  (1Password `aaa-APIs` / `Linear`); the label is created on first use.
+- **Slack** (#dev-ops, channel `C09DNFPLSJ1`, `slack_channel` in the watch
+  list), posted by the **AAA Alerts** bot (`slack/aaa-alerts`) through
+  `chat.postMessage` with the `SLACK_ALERTS_BOT_TOKEN` repository secret
+  (1Password `aaa-APIs` / `Slack Bot - AAA Alerts`). Posts are sent when the
+  issue is created, changes or closes. Delivery means `ok: true`; anything
+  else turns the run red after the issue has been written. If the secret is
+  unset, the run logs a warning and the issue says it is the only channel.
+- **Delivery guarantees**: the two channels are independent. If the Linear
+  issue cannot be read (including a missing `LINEAR_API_KEY`), Slack still gets this run's findings and the run goes
   red. A state change is written with `slack_pending: true` and cleared only
-  after Slack answers `ok` (one retry 5 s later). A failed post is re-sent by
+  after Slack answers `ok: true` (one retry 5 s later). A failed post is re-sent by
   the next run, and a failed all-clear post leaves the issue open until it is
   delivered.
 - **Incomplete scans**: when any read fails, problems that were open before
@@ -81,8 +87,8 @@ with the same completeness checks as `scripts/rollout_monitor.py`.
   announced as resolved.
 - **Weekly heartbeat**: on Monday at 13:41 UTC (or on dispatch with
   `heartbeat=true`), one message saying the reconciler is alive and how many
-  problems are open. It goes to Slack, or as a comment on a bot issue labelled
-  `monitor-health-heartbeat` while Slack is unset.
+  problems are open. It goes to Slack, or as a comment on a Linear issue
+  labelled `monitor-health-heartbeat` while Slack is unset.
 - **Run colour**: findings keep the run green. Every GitHub read is retried
   up to 4 times (2, 4, 8 s) on a 5xx or timeout. On 2026-10-07 the check-runs
   endpoint answered HTTP 500 for 11 PRs for a few minutes. A read that still
@@ -90,9 +96,9 @@ with the same completeness checks as `scripts/rollout_monitor.py`.
   of 5xx changes the alert once), the alerts are still attempted, and then the run
   exits 1. A failed alert delivery also exits 1. Nothing is swallowed.
 
-Public-repo note: issue bodies name private repositories and workflow files,
-as the org secret scan's issue already does here. They carry no titles, logs
-or secret material. Private-repo run links in them return 404 to outsiders.
+The findings now live in Linear (private), not in an issue in this public
+repository. Run summaries and logs here still name private repositories and
+workflow files, with no titles, logs or secret material.
 
 ## Who watches the watcher
 
@@ -142,8 +148,8 @@ gh workflow list -R $R --all | grep -i 'monitor health'          # both active
 gh workflow run monitor-health.yml -R $R -f dry_run=true          # report only
 gh run list -R $R -w monitor-health.yml -L 1 --json databaseId,status,conclusion
 gh run view <id> -R $R --log | grep -E 'Monitor Health at|alert plan|::'
-gh workflow run monitor-health.yml -R $R                          # real run: opens the issue
-gh issue list -R $R --label monitor-health
+gh workflow run monitor-health.yml -R $R                          # real run: opens the Linear issue
+# then find it in Linear: label monitor-health, project aaa-devops
 ```
 
 Expected on 2026-10-07's state: 5 findings (`daily-pr-audit` and
@@ -152,14 +158,12 @@ which was done on 2026-10-07; `au-group` `smoke-e2e` and `fas-portal`
 `signin-e2e` red, `dashboard-watchdog` disabled until it is re-enabled).
 Each is a real problem.
 
-Slack (agent work, Brad 2026-10-29): the agent pipes the #dev-ops webhook
-from 1Password straight into
-`gh secret set SLACK_DEVOPS_WEBHOOK_URL -R Automation-Architecture/.github`,
-never echoing it. It is the same webhook `aaa-client-dashboard` uses, but it
-has no 1Password item yet: until Brad creates or locates one and stores it
-there, this step waits on that item. Marker-verify it as in aaa-runbooks
-`integrations/slack-incoming-webhooks.md`, then dispatch with
-`heartbeat=true` and read #dev-ops.
+Slack: the AAA Alerts bot's token is set from 1Password by the agent
+(`op read 'op://aaa-APIs/Slack Bot - AAA Alerts/credential'` piped into
+`gh secret set SLACK_ALERTS_BOT_TOKEN -R Automation-Architecture/.github`,
+never echoed). A new channel needs no human step: the bot joins a public
+channel with `conversations.join`. Prove delivery by dispatching with
+`heartbeat=true` and reading #dev-ops.
 
 Rollback: `gh workflow disable monitor-health.yml -R Automation-Architecture/.github`
 (and `monitor-health-canary.yml`). That is reversible with `enable`, and
