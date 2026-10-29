@@ -5,12 +5,16 @@ No human approving review is required. Code/workflow changes need completed
 Codex review on the current head, no open P0/P1 finding (unbadged counts as P1),
 and successful CI (`agency-delivery/gate`). P2/P3 receive one fix round, then a
 follow-up for anything left.
-Do not invite or wait for Greptile. Preserve another person's draft/merge hold.
+Greptile is optional: invite it with `@greptileai review` when a review is
+wanted; no gate waits on it. Preserve another person's draft/merge hold.
 Use normal squash merge pinned to the verified head; never admin bypass.
 Native auto-merge is allowed on [allowlisted](docs/auto-merge-allowlist.txt)
 active repos for hygiene, label `auto-merge-ok`, and client-bug fast-track after
-that Codex+gate bar (GAAA-3961). Brad veto still applies for secrets, billing,
-destroy, and named production risk. Do not add Autopilot-class GitHub listeners.
+that Codex+gate bar (GAAA-3961). PRs that touch secrets handling, billing,
+destructive operations or a named production risk never auto-merge, even with
+`auto-merge-ok`: Brad says "merge". (Setting secret values from 1Password is
+separate and needs no ask; see the org secrets rule.) Do not add
+Autopilot-class GitHub listeners.
 Markdown-only PRs use the canonical document merger.
 
 Multi-repo fanouts are [change-sets](docs/multi-repo-change-sets.md): prefer a
