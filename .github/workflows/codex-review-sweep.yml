@@ -29,8 +29,10 @@ name: Codex review sweep
 #     NOT narrowed to repos whose rulesets enforce the gate or review/verdict:
 #     the policy applies org-wide (AGENTS.md), and the PRs this exists for
 #     (au-group's Dependabot PRs) are in a repo with no required checks;
-#   - it is not Markdown-only (doc-auto-merge.yml's definition), unless held
-#     by the `no-auto-merge` label (or its labels are unreadable);
+#   - Markdown-only PRs are nudged like code (GAAA-4448, Brad 2026-10-29):
+#     doc-auto-merge-sweep.yml merges a documentation PR only after Codex has
+#     reviewed its head, and codex-auto-request.yml (the event path) still
+#     skips them, so this is what asks Codex about a doc PR's later pushes;
 #   - (b) Codex's summary comment has no row of ANY status for the head and
 #     Codex has no review object on the head;
 #   - (c) no PERSON commented `@codex review` since the head was committed
@@ -92,11 +94,6 @@ jobs:
           GATE_APP_ID: "5021608"
           MAX_POSTS: "10"
           MIN_AGE_SECONDS: "900"
-          # doc-auto-merge.yml's definition of a Markdown-only PR.
-          DOC_ONLY_PATTERN: '\.(md|markdown)\z'
-          MAX_DOC_FILES: "300"
-          # review-verdict.yml's hold label: a held Markdown-only PR needs Codex.
-          HOLD_LABEL: "no-auto-merge"
           USAGE_LIMIT_PATTERN: "usage limits?"
         run: |
           set -euo pipefail
@@ -114,7 +111,7 @@ jobs:
           # cannot be read (every call is checked: errexit does not apply in
           # a function called from a condition).
           check_pr() {
-            local repo=$1 n=$2 pr st draft head hrepo changed files kind held since sepoch comments reviews x retarget rows_since
+            local repo=$1 n=$2 pr st draft head hrepo since sepoch comments reviews x retarget rows_since
             pr=$(gh api "repos/$repo/pulls/$n") || return 2
             IFS='|' read -r st draft head hrepo < <(jq -r '[.state, (.draft | tostring), (.head.sha // ""), (.head.repo.full_name // "")] | join("|")' <<<"$pr") || return 2
             [ "$st" = open ] || { echo "skip: not open"; return 0; }
@@ -147,21 +144,6 @@ jobs:
             if [ -n "$retarget" ]; then
               rows_since="$retarget"
               [[ "$retarget" < "$since" ]] || since="$retarget"
-            fi
-
-            # Markdown-only (doc-auto-merge.yml's definition), unless held.
-            changed=$(jq -r '.changed_files // empty' <<<"$pr") || return 2
-            if [[ "$changed" =~ ^[0-9]+$ ]] && [ "$changed" -ge 1 ] && [ "$changed" -lt "${MAX_DOC_FILES:-300}" ]; then
-              files=$(gh api --paginate "repos/$repo/pulls/$n/files?per_page=100" | jq -s 'add // []') || return 2
-              kind=$(jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" '
-                    if type == "array" and length == $n
-                       and all(.[]; (.filename | type) == "string" and .filename != "")
-                       and ([.[] | .filename, (.previous_filename // empty)] | all(type == "string" and test($pat)))
-                    then "doc" else "code" end' <<<"$files") || return 2
-              held=$(jq -r --arg l "${HOLD_LABEL:-no-auto-merge}" '
-                    if (.labels | type) != "array" then "yes"
-                    elif any(.labels[]; .name == $l) then "yes" else "no" end' <<<"$pr") || return 2
-              if [ "$kind" = doc ] && [ "$held" = no ]; then echo "skip: Markdown-only"; return 0; fi
             fi
 
             comments=$(gh api --paginate "repos/$repo/issues/$n/comments?per_page=100" \
