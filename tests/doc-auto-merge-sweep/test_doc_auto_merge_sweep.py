@@ -63,7 +63,9 @@ def resolve_times(text):
 # --paginate; {"__rate_limited": n, "value": v} fails the first n calls with a
 # rate-limit error. After a PUT to <repo>/pulls/<n>/merge, "<key>@merged"
 # wins over "<key>" for that PR. fx["__merge_fails"] lists merge keys GitHub
-# refuses. --jq output matches gh: strings raw, other JSON compact.
+# refuses. A POST to <repo>/issues/<n>/comments (the missing-review alert) is
+# recorded; fx["__comment_fails"] lists the keys GitHub refuses. Anything that
+# mentions @codex fails. --jq output matches gh: strings raw, other JSON compact.
 STUB = r'''#!/usr/bin/env python3
 import json, os, subprocess, sys
 fx = json.load(open(os.environ["FIXTURES"]))
@@ -100,6 +102,12 @@ if method == "PUT" and key.endswith("/merge"):
         sys.stderr.write("HTTP 405: merge refused\n"); sys.exit(1)
     open(merged_flag, "w").close()
     sys.stdout.write(json.dumps({"merged": True})); sys.exit(0)
+if method == "POST" and key.endswith("/comments") and parts[2] == "issues" and "@codex" not in json.dumps(fields):
+    with open(os.path.join(state_dir, "comments"), "a") as f:
+        f.write(json.dumps({"key": key, **fields}) + "\n")
+    if key in fx.get("__comment_fails", []):
+        sys.stderr.write("HTTP 403: comment refused\n"); sys.exit(1)
+    sys.stdout.write("{}"); sys.exit(0)
 if method != "GET" or "@codex" in json.dumps(fields):
     sys.exit("stub gh: unexpected %s %s" % (method, key))
 if prkey and os.path.exists(merged_flag) and key + "@merged" in fx:
@@ -137,12 +145,25 @@ if jq:
 sys.stdout.write(data)
 '''
 
+# Stub curl: the Slack webhook. Records the URL and the JSON payload read from
+# stdin; fx["__slack_fails"] makes it fail like `curl --fail` on a 4xx/5xx.
+CURL = r'''#!/usr/bin/env python3
+import json, os, sys
+fx = json.load(open(os.environ["FIXTURES"]))
+payload = sys.stdin.read()
+with open(os.path.join(os.environ["STATE_DIR"], "slack"), "a") as f:
+    f.write(json.dumps({"url": sys.argv[-1], "payload": json.loads(payload)}) + "\n")
+if fx.get("__slack_fails"):
+    sys.stderr.write("curl: (22) The requested URL returned error: 404\n"); sys.exit(22)
+sys.stdout.write("ok")
+'''
+
 
 def pr(n, repo=REPO, head=HEAD, files=1, draft=False, labels=(), head_repo=None, merged=False, state="open",
-       mergeable=True, base_sha=LAGGING, updated=None):
+       mergeable=True, base_sha=LAGGING, updated=None, created=None):
     return {"number": n, "state": state, "merged": merged, "draft": draft, "changed_files": files,
             "mergeable": mergeable, "merge_commit_sha": MERGE_SHA if merged else None,
-            "updated_at": updated or ago(120), "node_id": f"PR_{repo}_{n}",
+            "updated_at": updated or ago(120), "created_at": created or ago(120), "node_id": f"PR_{repo}_{n}",
             "labels": [{"name": l} for l in labels],
             "head": {"sha": head, "ref": "docs/x", "repo": {"full_name": head_repo or repo}},
             "base": {"ref": "main", "sha": base_sha}}
@@ -295,12 +316,16 @@ def one(runs=(), required=(), repo_kw=None, **kw):
 CASES = []
 
 
-def case(name, fx, merged=(), exit_ok=True, env=None, says=None, not_says=None, merge_calls=None):
+def case(name, fx, merged=(), exit_ok=True, env=None, says=None, not_says=None, merge_calls=None, slack=0,
+         comments=None):
     """merged: the exact set of "repo#n" that must have a merge call.
     exit_ok: the run must exit 0 (True) or non-zero (False).
     says / not_says: substrings of stdout.
-    merge_calls: exact number of merge calls (defaults to len(merged))."""
-    CASES.append((name, fx, set(merged), exit_ok, env or {}, says, not_says, merge_calls))
+    merge_calls: exact number of merge calls (defaults to len(merged)).
+    slack / comments: exact number of Slack posts and alert comments
+    (comments defaults to slack): no case alerts unless it says so."""
+    CASES.append((name, fx, set(merged), exit_ok, env or {}, says, not_says, merge_calls, slack,
+                  slack if comments is None else comments))
 
 
 W7 = f"{REPO}#7"
@@ -424,39 +449,74 @@ case("tip unreadable in pass 1: pending, no merge",
      one(runs=[gate("success", 5, 7)], required=REQ_GATE, repo_kw={"tip_value": "__error"}),
      says="could not read the tip")
 
-# ── Codex (Brad, 2026-10-05: doc merges wait briefly for Codex) ──────────────
+# ── Codex (GAAA-4448, Brad 2026-10-29: never merged without a review of the head) ──
 def cx(**codex):
     return one(codex=codex)
 
 
+def alert_comment(head=HEAD, cid=950):
+    """The sweep's own alert comment for `head` (it posts as the org token's user)."""
+    return {"id": cid, "user": {"login": "web3sea", "type": "User"}, "performed_via_github_app": None,
+            "body": f"<!-- doc-auto-merge-sweep:no-codex-review --> <!-- head: {head} -->\n\nNo Codex review ...",
+            "created_at": ago(20), "updated_at": ago(20)}
+
+
+ALERTED = "a person was alerted"
 P1_198 = dict(comments=[summary(HEAD)], reviews=[review(50)], inline=[finding(1, 50), finding(2, 50)],
               threads=[thread("P1"), thread("P1")])
 case("Codex completed on the head, clean: merges", cx(), merged={W7}, says="summary row Completed")
-case("Codex still running on the head: waits (even long past the timeout)",
-     cx(comments=[summary(HEAD, "running")]), says="still running", merge_calls=0)
-case("nothing from Codex, timeout reached: merges", cx(comments=[]), merged={W7}, says="Codex posted nothing")
-case("nothing from Codex, timeout reached: logged as a merge without review", cx(comments=[]), merged={W7},
-     says="::notice::")
-case("nothing from Codex, timeout not reached: waits",
-     world(cx(comments=[], head_date=ago(5)), {f"{REPO}/pulls/7": pr(7, updated=ago(5))}),
-     says="5 of 15 min", merge_calls=0)
-case("timeout uses the LATER of updated_at and the head commit date (updated_at recent): waits",
-     world(cx(comments=[], head_date=ago(300)), {f"{REPO}/pulls/7": pr(7, updated=ago(3))}), says="of 15 min")
-case("timeout uses the LATER of updated_at and the head commit date (commit date recent): waits",
-     world(cx(comments=[], head_date=ago(3))), says="of 15 min")
-case("head commit date unreadable and nothing from Codex: waits, never merges",
-     world(cx(comments=[]), {f"{REPO}/git/commits/{HEAD}": "__error"}), says="cannot be estimated")
-case("DOC_CODEX_WAIT_MINUTES=60 with 120 min elapsed: merges", cx(comments=[]), merged={W7},
-     env={"DOC_CODEX_WAIT_MINUTES": "60"})
-case("DOC_CODEX_WAIT_MINUTES=180 with 120 min elapsed: waits", cx(comments=[]), says="of 180 min",
-     env={"DOC_CODEX_WAIT_MINUTES": "180"})
-case("DOC_CODEX_WAIT_MINUTES=0: red, nothing merged", cx(comments=[]), env={"DOC_CODEX_WAIT_MINUTES": "0"},
-     exit_ok=False)
-case("DOC_CODEX_WAIT_MINUTES junk: red, nothing merged", cx(), env={"DOC_CODEX_WAIT_MINUTES": "15m"},
-     exit_ok=False)
+case("Codex still running on the head, 10 min: waits",
+     world(cx(comments=[summary(HEAD, "running")], head_date=ago(10)), {f"{REPO}/pulls/7": pr(7, created=ago(10))}),
+     says="still running", merge_calls=0)
+case("Codex still running on the head past 60 min: never merged, a person is alerted",
+     cx(comments=[summary(HEAD, "running")]), says="still running", merge_calls=0, slack=1)
+case("nothing from Codex after 120 min: never merged (the old 15-minute merge is gone)", cx(comments=[]),
+     says="Codex posted nothing", merge_calls=0, slack=1)
+case("nothing from Codex after 120 min: alerted once, counted, a warning, not red", cx(comments=[]),
+     says="alerted 1", merge_calls=0, slack=1)
+case("nothing from Codex, 5 min: waits, no alert yet",
+     world(cx(comments=[], head_date=ago(5)), {f"{REPO}/pulls/7": pr(7, created=ago(5))}),
+     says="5 min since the head was pushed, a person is alerted at 60 min", merge_calls=0)
+case("nothing from Codex, 59 min: no alert yet",
+     world(cx(comments=[], head_date=ago(59)), {f"{REPO}/pulls/7": pr(7, created=ago(59))}),
+     says="alerted at 60 min", merge_calls=0)
+case("nothing from Codex, 61 min: alerted",
+     world(cx(comments=[], head_date=ago(61)), {f"{REPO}/pulls/7": pr(7, created=ago(61))}), merge_calls=0, slack=1)
+case("alert time uses the LATER of created_at and the head commit date (PR created recently): waits",
+     world(cx(comments=[], head_date=ago(300)), {f"{REPO}/pulls/7": pr(7, created=ago(3))}), says="alerted at 60 min")
+case("alert time uses the LATER of created_at and the head commit date (commit recent): waits",
+     world(cx(comments=[], head_date=ago(3))), says="alerted at 60 min")
+case("a recent comment (updated_at) does not postpone the alert",
+     world(cx(comments=[]), {f"{REPO}/pulls/7": pr(7, updated=ago(1))}), merge_calls=0, slack=1)
+case("head commit date unreadable: created_at alone dates the push, alerted",
+     world(cx(comments=[]), {f"{REPO}/git/commits/{HEAD}": "__error"}), merge_calls=0, slack=1)
+case("head commit date and created_at both unreadable: waits, no alert, never merged",
+     world(cx(comments=[]), {f"{REPO}/git/commits/{HEAD}": "__error", f"{REPO}/pulls/7": {**pr(7), "created_at": None}}),
+     says="cannot be estimated", merge_calls=0)
+case("head already alerted (the sweep's comment for this head): waits, no second alert",
+     cx(comments=[alert_comment()]), says=ALERTED, merge_calls=0)
+case("an alert for an OLDER head does not count: the new head is alerted",
+     cx(comments=[alert_comment(OLD_HEAD)]), merge_calls=0, slack=1)
+case("a review that arrives after the alert still merges",
+     cx(comments=[alert_comment(), summary(HEAD)]), merged={W7})
+case("dry run: would alert, posts nothing", cx(comments=[]), env={"ENABLED": ""}, says="would alert a person",
+     not_says="would squash")
+case("no Slack webhook: that PR errors, run red, no comment, never merged", cx(comments=[]),
+     env={"SLACK_WEBHOOK_URL": ""}, exit_ok=False, says="no Slack webhook", merge_calls=0)
+case("Slack post fails: run red, no comment (the next sweep retries), never merged",
+     world(cx(comments=[]), {"__slack_fails": True}), exit_ok=False, says="Slack alert failed", merge_calls=0,
+     slack=1, comments=0)
+case("Slack posted, comment refused: run red, never merged",
+     world(cx(comments=[]), {"__comment_fails": [f"{REPO}/issues/7/comments"]}), exit_ok=False,
+     says="PR comment failed", merge_calls=0, slack=1)
+case("CI not green and no Codex for 120 min: no alert (CI comes first)",
+     one(runs=[run_("unittest", status="in_progress")], codex={"comments": []}), says="still running", merge_calls=0)
+case("ALERT_AFTER_MINUTES=0: red, nothing merged", cx(comments=[]), env={"ALERT_AFTER_MINUTES": "0"},
+     exit_ok=False, merge_calls=0)
+case("ALERT_AFTER_MINUTES junk: red, nothing merged", cx(), env={"ALERT_AFTER_MINUTES": "60m"}, exit_ok=False)
 case("aaa-runbooks#198: Completed with two open P1 findings on the head: never merged, not red",
      cx(**P1_198), says="left for a person", not_says="would squash")
-case("open P1 on the head is never merged, even long after the timeout",
+case("open P1 on the head is never merged and never alerted, even long after the push",
      cx(comments=[], reviews=[review(50)], inline=[finding(1, 50)], threads=[thread("P1")]),
      says="open P0/P1 finding(s)", merge_calls=0)
 case("open P0 thread blocks", cx(threads=[thread("P0")]), says="P0 on docs/a.md")
@@ -468,7 +528,7 @@ P2_HEAD = dict(reviews=[review(50)], inline=[finding(1, 50, "P2"), finding(2, 50
 case("P2/P3 findings open on the head: held, never merged, not red",
      cx(**P2_HEAD), says="held for the P2/P3 fix round", merge_calls=0)
 case("P2/P3 held is a warning annotation and counted as codex-blocked", cx(**P2_HEAD), says="codex-blocked 1")
-case("P2/P3 held even long after the timeout with nothing else from Codex",
+case("P2/P3 held, not alerted, even long after the push with nothing else from Codex",
      cx(comments=[], **P2_HEAD), says="open P2/P3 Codex finding(s)", merge_calls=0)
 case("P2/P3 left on an earlier commit, still applying after a push: held",
      cx(reviews=[review(40, commit=OLD_HEAD)], inline=[finding(1, 40, "P2", commit=OLD_HEAD)], threads=[thread("P2")]),
@@ -492,35 +552,36 @@ case("P1-looking thread by someone else: merges", cx(threads=[thread("P1", autho
 case("findings on an older head (outdated thread) do not block: merges",
      cx(reviews=[review(40, commit=OLD_HEAD)], inline=[finding(1, 40, commit=OLD_HEAD)],
         threads=[thread("P1", outdated=True)]), merged={W7})
-case("findings on an older head, nothing from Codex for this head: timeout merges",
+case("findings on an older head, nothing from Codex for this head: never merged, alerted",
      cx(comments=[summary(OLD_HEAD)], reviews=[review(40, commit=OLD_HEAD)], inline=[finding(1, 40, commit=OLD_HEAD)],
-        threads=[thread("P1", outdated=True)]), merged={W7}, says="Codex posted nothing")
+        threads=[thread("P1", outdated=True)]), says="Codex posted nothing", merge_calls=0, slack=1)
 case("a P1 from an older head that still applies (not outdated) blocks",
      cx(reviews=[review(40, commit=OLD_HEAD)], inline=[finding(1, 40, commit=OLD_HEAD)], threads=[thread("P1")]),
      says="left for a person")
-case("older head Completed, this head nothing yet, timeout not reached: waits",
-     world(cx(comments=[summary(OLD_HEAD)], head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, updated=ago(4))}),
-     says="of 15 min")
-case("usage-limit notice + timeout reached: merges, logged as unavailable",
-     world(cx(comments=[notice(at=ago(30))], head_date=ago(40)), {f"{REPO}/pulls/7": pr(7, updated=ago(30))}),
-     merged={W7}, says="Codex unavailable")
-case("usage-limit notice, timeout not reached: waits",
-     world(cx(comments=[notice(at=ago(5))], head_date=ago(6)), {f"{REPO}/pulls/7": pr(7, updated=ago(5))}),
+case("older head Completed, this head nothing yet, 4 min: waits",
+     world(cx(comments=[summary(OLD_HEAD)], head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, created=ago(4))}),
+     says="alerted at 60 min", merge_calls=0)
+case("usage-limit notice, 90 min: never merged, alerted as unavailable",
+     world(cx(comments=[notice(at=ago(30))], head_date=ago(90)), {f"{REPO}/pulls/7": pr(7, created=ago(90))}),
+     says="Codex unavailable", merge_calls=0, slack=1)
+case("usage-limit notice, 6 min: waits",
+     world(cx(comments=[notice(at=ago(5))], head_date=ago(6)), {f"{REPO}/pulls/7": pr(7, created=ago(6))}),
      says="Codex unavailable", merge_calls=0)
-case("create-an-environment notice (issue comment) + timeout: merges",
+case("create-an-environment notice (issue comment), 120 min: never merged, alerted",
      cx(comments=[notice("To use Codex here, [create an environment for this repo](https://x).")]),
-     merged={W7}, says="Codex unavailable")
-case("create-an-environment reply as an empty review on the head + timeout: merges",
+     says="Codex unavailable", merge_calls=0, slack=1)
+case("create-an-environment reply as an empty review on the head, 120 min: never merged, alerted",
      cx(comments=[], reviews=[review(60, body="")],
         inline=[finding(5, 60, sev=None, reply_to=4, body="To use Codex here, create an environment for this repo.")]),
-     merged={W7}, says="Codex unavailable")
-case("Running row, then a later usage-limit notice: unavailable, timeout merges",
-     cx(comments=[summary(HEAD, "running", at=ago(60, micro=True)), notice(at=ago(50))]), merged={W7},
-     says="Codex unavailable")
-case("usage-limit notice, then a later Running row (retry): waits",
-     cx(comments=[notice(at=ago(60)), summary(HEAD, "running", at=ago(50, micro=True))]), says="still running")
+     says="Codex unavailable", merge_calls=0, slack=1)
+case("Running row, then a later usage-limit notice: unavailable, never merged, alerted",
+     cx(comments=[summary(HEAD, "running", at=ago(60, micro=True)), notice(at=ago(50))]),
+     says="Codex unavailable", merge_calls=0, slack=1)
+case("usage-limit notice, then a later Running row (retry), 120 min: still running, alerted",
+     cx(comments=[notice(at=ago(60)), summary(HEAD, "running", at=ago(50, micro=True))]), says="still running",
+     merge_calls=0, slack=1)
 case("notice from before the head commit does not count as unavailable",
-     cx(comments=[notice(at=ago(200))]), merged={W7}, says="Codex posted nothing")
+     cx(comments=[notice(at=ago(200))]), says="Codex posted nothing", merge_calls=0, slack=1)
 case("pass 1 clean, P1 lands during the settle: not merged",
      world(cx(), {f"graphql/PR_{REPO}_7/null": {"__seq": [threads_fx(REPO, 7)[f"graphql/PR_{REPO}_7/null"],
                                                             threads_fx(REPO, 7, [thread("P1")])[f"graphql/PR_{REPO}_7/null"]]}}),
@@ -533,22 +594,22 @@ case("Codex review body flagging P1: blocks",
 case("Codex review object on the head, no summary: clean, merges",
      cx(comments=[], reviews=[review(50)], inline=[finding(1, 50, "P3")], threads=[thread("P3", resolved=True)]),
      merged={W7}, says="review object on the head")
-case("older clean comment naming the head is not evidence (editable): waits for the timeout",
-     world(cx(comments=[{**notice(), "body": "Codex Review: Didn't find any major issues. Nice.\n\n**Reviewed commit:** `034be02bb3`"}]),
-           {f"{REPO}/pulls/7": pr(7, updated=ago(2))}),
-     says="Codex posted nothing", merge_calls=0)
-case("unknown status in the head row: waits", cx(comments=[summary(HEAD, "❌ **Failed**")]), says="still running")
+case("older clean comment naming the head is not evidence (editable): never merged, alerted",
+     cx(comments=[{**notice(), "body": "Codex Review: Didn't find any major issues. Nice.\n\n**Reviewed commit:** `034be02bb3`"}]),
+     says="Codex posted nothing", merge_calls=0, slack=1)
+case("unknown status in the head row, 120 min: not merged, alerted", cx(comments=[summary(HEAD, "❌ **Failed**")]),
+     says="still running", merge_calls=0, slack=1)
 case("unreadable summary row: waits", cx(comments=[{**summary(HEAD), "body": summary(HEAD)["body"].replace("`034be02`", "034be02")}]),
      says="cannot be read")
-case("summary comment not from the Codex App does not count: timeout path",
+case("summary comment not from the Codex App does not count: waits as no review",
      world(cx(comments=[{**summary(HEAD), "performed_via_github_app": None}], head_date=ago(4)),
-           {f"{REPO}/pulls/7": pr(7, updated=ago(4))}), says="Codex posted nothing", merge_calls=0)
-case("summary edited by a writer (forged Completed row): ignored, waits for the timeout",
-     world(cx(head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, updated=ago(4)), "graphql/IC_900/null": editors(last="mallory")}),
+           {f"{REPO}/pulls/7": pr(7, created=ago(4))}), says="Codex posted nothing", merge_calls=0)
+case("summary edited by a writer (forged Completed row): ignored, waits as no review",
+     world(cx(head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, created=ago(4)), "graphql/IC_900/null": editors(last="mallory")}),
      says="last edited by someone other than Codex", merge_calls=0)
 case("summary whose newest edit is by a writer: ignored",
-     world(cx(head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, updated=ago(4)),
-                                  "graphql/IC_900/null": editors(newest="mallory")}), says="of 15 min", merge_calls=0)
+     world(cx(head_date=ago(4)), {f"{REPO}/pulls/7": pr(7, created=ago(4)),
+                                  "graphql/IC_900/null": editors(newest="mallory")}), says="alerted at 60 min", merge_calls=0)
 case("summary never edited (Codex wrote it Completed): counts", world(cx(), {"graphql/IC_900/null": editors(edited=False)}),
      merged={W7})
 case("summary editor unreadable: waits", world(cx(), {"graphql/IC_900/null": "__error"}),
@@ -622,8 +683,9 @@ case("CI turns red in the final snapshot: not merged",
 case("hold label added before the final snapshot: not merged",
      world(one(), {f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7, labels=("no-auto-merge",))]}}), says="held by")
 case("head pushed between the passes: waits for the next sweep",
-     world(one(), pr_fx(7, head=NEW_HEAD), {f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7, head=NEW_HEAD)]}}),
-     says="head moved")
+     world(one(), pr_fx(7, head=NEW_HEAD, codex={"comments": [summary(HEAD)]}),
+           {f"{REPO}/pulls/7": {"__seq": [pr(7), pr(7, head=NEW_HEAD)]}}),
+     says="head moved", merge_calls=0)
 
 # ── Many PRs ───────────────────────────────────────────────────────────────
 case("two repos, both green: both merge",
@@ -718,7 +780,10 @@ def static_checks():
                 venv = st["env"]
     for k in ("CODEX_BOT", "CODEX_APP", "REVIEW_SKIP_PATTERN"):
         assert str(env[k]) == str(venv[k]), f"{k} must match review-verdict.yml"
-    assert env["DOC_CODEX_WAIT_MINUTES"] == "${{ vars.DOC_CODEX_WAIT_MINUTES || '15' }}", "default wait 15 min"
+    assert "DOC_CODEX_WAIT_MINUTES" not in WORKFLOW.read_text().split("\non:", 1)[1], \
+        "no unreviewed merge after a wait (GAAA-4448): the timeout variable is gone"
+    assert str(env["ALERT_AFTER_MINUTES"]) == "60", "a person is alerted after 60 minutes without a review"
+    assert env["SLACK_WEBHOOK_URL"] == "${{ secrets.SLACK_MONITORING_WEBHOOK_URL }}", "the #aaa-monitoring webhook"
     assert "@codex" not in step["run"], "the sweep never asks Codex for a review (codex-review-sweep does)"
     return env
 
@@ -733,14 +798,16 @@ def main():
         (tmp / "bin").mkdir()
         (tmp / "bin/gh").write_text(STUB)
         (tmp / "bin/gh").chmod(0o755)
-        for name, fx, want_merged, exit_ok, env_over, says, not_says, want_calls in CASES:
+        (tmp / "bin/curl").write_text(CURL)
+        (tmp / "bin/curl").chmod(0o755)
+        for name, fx, want_merged, exit_ok, env_over, says, not_says, want_calls, want_slack, want_comments in CASES:
             state = tmp / "state"
             subprocess.run(["rm", "-rf", str(state)], check=True)
             state.mkdir()
             (tmp / "fx.json").write_text(resolve_times(json.dumps(fx)))
             env = {"PATH": f"{tmp / 'bin'}:{os.environ['PATH']}", "HOME": os.environ.get("HOME", "/tmp"),
                    **env_static, "ORG": ORG, "GH_TOKEN": "org-token", "ENABLED": "true", "DRY_RUN_INPUT": "false",
-                   "SETTLE_SECONDS": "0", "BACKOFF_SECONDS": "0", "DOC_CODEX_WAIT_MINUTES": "15",
+                   "SETTLE_SECONDS": "0", "BACKOFF_SECONDS": "0", "SLACK_WEBHOOK_URL": "https://hooks.slack.test/T/B/x",
                    "FIXTURES": str(tmp / "fx.json"), "STATE_DIR": str(state), **env_over}
             out = subprocess.run(["bash", str(tmp / "script.sh")], env=env, capture_output=True, text=True,
                                  timeout=120)
@@ -758,12 +825,25 @@ def main():
                 v = fx.get(key)
                 if isinstance(v, dict) and "number" in v:
                     ok = ok and c.get("sha") == v["head"]["sha"]
+            # Alerts: exactly as many as the case says. Slack names the PR and
+            # head; the comment carries the marker and the full head SHA.
+            sl, cm = state / "slack", state / "comments"
+            posts = [json.loads(x) for x in sl.read_text().splitlines()] if sl.exists() else []
+            notes = [json.loads(x) for x in cm.read_text().splitlines()] if cm.exists() else []
+            ok = ok and len(posts) == want_slack and len(notes) == want_comments
+            for x in posts:
+                ok = ok and x["url"] == env["SLACK_WEBHOOK_URL"] and set(x["payload"]) == {"text"} \
+                    and f"{REPO}#7" in x["payload"]["text"] and HEAD[:7] in x["payload"]["text"]
+            for x in notes:
+                ok = ok and x["key"] == f"{REPO}/issues/7/comments" \
+                    and x["body"].startswith(f"<!-- doc-auto-merge-sweep:no-codex-review --> <!-- head: {HEAD} -->")
             if says is not None:
                 ok = ok and says in out.stdout + out.stderr
             if not_says is not None:
                 ok = ok and not_says not in out.stdout + out.stderr
             failures += not ok
-            print(f"{'PASS' if ok else 'FAIL'}  {name}  (merged {sorted(got)}, exit {out.returncode})")
+            print(f"{'PASS' if ok else 'FAIL'}  {name}  (merged {sorted(got)}, exit {out.returncode}, "
+                  f"slack {len(posts)}, comments {len(notes)})")
             if os.environ.get("VERBOSE"):
                 print("      " + (out.stdout.strip().splitlines() or [""])[-1])
             if not ok:

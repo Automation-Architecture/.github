@@ -5,9 +5,10 @@ name: Doc auto-merge sweep
 #
 # Central replacement for the per-repo doc-auto-merge.yml (Brad, 2026-10-04:
 # centralize). Merges documentation-only pull requests across the org once CI
-# is green and Codex has had a brief chance to look (Brad, 2026-10-05; see
-# "Codex" below). No approving review is required (Brad, 2026-09-28). Code
-# PRs are never touched.
+# is green and Codex has reviewed the current head with nothing open (Brad,
+# 2026-10-29, GAAA-4448: a doc is never merged unreviewed; see "Codex" below).
+# No approving review is required (Brad, 2026-09-28). Code PRs are never
+# touched.
 #
 # ── Why central ────────────────────────────────────────────────────────────
 # The per-repo copy (~89 private repos) fires on the completion of 24
@@ -70,12 +71,14 @@ name: Doc auto-merge sweep
 # reviewer checks in IGNORED_CHECKS (no review is required).
 # Pending, missing, unreadable and non-success never merge.
 #
-# ── Codex: wait briefly, never merge over an open P0/P1 ───────────────────
+# ── Codex: never merge without a review of the head ───────────────────────
 # Why: aaa-runbooks#198 (Markdown-only) auto-merged at 17:55:51Z on
 # 2026-10-01, 55 s before Codex posted two P1 findings (fixed in #199). The
 # gate exempts Markdown-only PRs from Codex, and the 60 s settle is no wait.
-# So a CI-green documentation-only PR merges only when ONE of these holds,
-# judged in pass 1 AND again in the final snapshot after the settle:
+# Until 2026-10-29 a PR Codex stayed silent on merged after 15 minutes; Brad
+# ruled that "completely not acceptable" (GAAA-4448). So a CI-green
+# documentation-only PR merges only when this holds, judged in pass 1 AND
+# again in the final snapshot after the settle:
 #   (a) Codex finished on the current head: a row of Codex's live summary
 #       comment (by CODEX_BOT via the CODEX_APP App, opening with
 #       `<!-- codex-pull-request-review-summary -->`, and last edited by the
@@ -88,24 +91,33 @@ name: Doc auto-merge sweep
 #       notice-only reviews are not reviews). Codex posts its review before
 #       it marks the row Completed (#198: 17:56:46Z, 17:56:49Z). Codex's
 #       older "Didn't find any major issues" comment is NOT evidence: a
-#       writer can edit it (Codex P2 on #84); such a PR reaches (b);
-#   (b) DOC_CODEX_WAIT_MINUTES (repository variable, default 15, whole
-#       minutes >= 1, anything else is a red run) have passed since the head
-#       was pushed, and Codex has posted nothing for the head, or its latest
-#       reply since the head commit is a usage-limit / set-up / skipped
-#       notice (REVIEW_SKIP_PATTERN, review-verdict's; "Codex unavailable",
-#       logged as a ::notice:: annotation like every merge under (b)).
-#       GitHub exposes NO push time for an ordinary push (no pushedDate, and
-#       the timeline records only force-pushes), so "pushed" is the LATER of
-#       the PR's updated_at and the head commit's committer date. A push
-#       updates the PR, so updated_at is never earlier than the push, and
-#       neither is the later of the two (the commit date is a second floor:
-#       a commit cannot be pushed before it is made). Later PR activity (a
-#       comment, a label, Codex's own notice) only moves it later: it fails
-#       toward waiting. Either value unreadable: waits.
-# Codex Running on the head (or any status but Completed, or a summary row
-# that does not parse) waits without a timeout, unless a notice came after
-# the Running row: a stuck review shows up as a PR that keeps waiting.
+#       writer can edit it (Codex P2 on #84).
+# Anything else waits, with no timeout: Codex has posted nothing for the head,
+# its latest reply since the head commit is a usage-limit / set-up / skipped
+# notice (REVIEW_SKIP_PATTERN, review-verdict's; "Codex unavailable"), or its
+# review is Running (or any status but Completed). A silent head is asked for
+# a review once by codex-review-sweep.yml (15+ minutes after the head commit,
+# within its 30-minute schedule); that sweep does not ask while Codex's latest
+# reply is a usage-limit notice.
+# ── A person is alerted when the wait gets long ───────────────────────────
+# Once ALERT_AFTER_MINUTES (60) have passed since the head was pushed and a
+# CI-green documentation-only PR still has no Codex review of its head, the
+# sweep alerts ONCE per head: it posts to Slack #aaa-monitoring
+# (SLACK_WEBHOOK_URL, the SLACK_MONITORING_WEBHOOK_URL secret; 1Password
+# aaa-APIs, "Slack Webhook - aaa-monitoring") and then leaves a PR comment
+# carrying ALERT_MARKER and the head SHA, so later sweeps see the head was
+# alerted ("waiting, a person was alerted"). The PR is never merged in that
+# state. No webhook, or a failed post, is an error for that PR (the run is
+# red) and no comment is left, so the next sweep tries again. A dry run posts
+# nothing. Residual, accepted: a writer who forges the marker comment only
+# silences the alert for that head; nothing merges because of it.
+# GitHub exposes NO push time for an ordinary push (no pushedDate, and the
+# timeline records only force-pushes), so "pushed" is the LATER of the head
+# commit's committer date (a commit cannot be pushed before it is made) and
+# the PR's created_at. Not updated_at: every comment, including the review
+# nudge, moves it and would keep postponing the alert. An old commit pushed
+# late can therefore alert early; that is noise, never a merge. Both
+# unreadable: no alert yet, the PR keeps waiting.
 # Whatever (a) or (b) says, an open P0/P1 Codex finding on the current head
 # NEVER merges: the PR is logged (`codex-blocked`, a ::warning:: annotation)
 # and left for a person (the #198 case). Open means, as in review-verdict.yml:
@@ -122,10 +134,10 @@ name: Doc auto-merge sweep
 # push makes the threads outdated, or a person resolves them (having fixed
 # them or filed the follow-up). Any read
 # that fails is a wait, never a merge. The sweep never asks Codex for a
-# review (`@codex review`): codex-review-sweep.yml owns nudges, and it and
-# codex-auto-request.yml skip Markdown-only PRs, so Codex looks at a
-# documentation PR only when it is opened or marked ready; a later push
-# reaches (b). Residual, accepted: a summary row is matched by its 7-hex
+# review (`@codex review`) itself: codex-review-sweep.yml owns nudges, and
+# nudges Markdown-only PRs like code since GAAA-4448 (codex-auto-request.yml,
+# the per-push event path, still skips them, so a doc push waits for the
+# scheduled nudge). Residual, accepted: a summary row is matched by its 7-hex
 # prefix only (a second commit of the PR with the same prefix would be
 # confused with the head); a review of the head made before a retarget
 # still counts; a finding Codex posts inside the final re-read-then-merge
@@ -192,7 +204,9 @@ name: Doc auto-merge sweep
 # a branch's copy with the PAT). There is NO pull_request trigger, no
 # checkout, and no PR content (title, body, branch name, file names) is ever
 # executed or interpolated into a command; it is only data inside jq. Repo
-# names, PR numbers and SHAs are validated before use.
+# names, PR numbers and SHAs are validated before use. The Slack alert and
+# the alert comment carry only those validated values and fixed text; the
+# webhook URL is masked in the log.
 #
 # ── Rate limits ───────────────────────────────────────────────────────────
 # One search page per 100 open PRs, then about 2 REST calls per code PR and
@@ -218,9 +232,9 @@ name: Doc auto-merge sweep
 #
 # Observability: one line per PR (`doc-auto-merge-sweep: <repo>#<n>: ...`),
 # a job summary table, and a final line
-# `doc-auto-merge-sweep: scanned N, ... codex-blocked B, merged M, errors E, api requests R, core quota used U`.
-# A Codex-blocked PR is a ::warning:: annotation, a merge without a Codex
-# review (rule b) a ::notice:: one; neither makes the run red.
+# `doc-auto-merge-sweep: scanned N, ... codex-blocked B, alerted A, merged M, errors E, api requests R, core quota used U`.
+# A Codex-blocked PR and an alert for a missing review are ::warning::
+# annotations; neither makes the run red.
 # An error, a failed or incomplete search, or a missing token is a red run; a
 # pending PR is not.
 
@@ -280,9 +294,14 @@ jobs:
           CODEX_BOT: "chatgpt-codex-connector[bot]"
           CODEX_APP: "chatgpt-codex-connector"
           REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit|reached your codex usage limits?|to use codex here"
-          # Minutes after the (latest possible) push before a PR that Codex
-          # has not reviewed, or cannot, may merge. Optional repo variable.
-          DOC_CODEX_WAIT_MINUTES: ${{ vars.DOC_CODEX_WAIT_MINUTES || '15' }}
+          # Minutes after the push before a CI-green doc PR with no Codex
+          # review of its head is reported to a person (once per head). It
+          # never merges without one (GAAA-4448).
+          ALERT_AFTER_MINUTES: "60"
+          ALERT_MARKER: "<!-- doc-auto-merge-sweep:no-codex-review -->"
+          # Slack #aaa-monitoring incoming webhook (1Password aaa-APIs,
+          # "Slack Webhook - aaa-monitoring").
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_MONITORING_WEBHOOK_URL }}
           MAX_MERGES: "10"
           SETTLE_SECONDS: "60"
           RUN_BUDGET_SECONDS: "420"
@@ -302,10 +321,11 @@ jobs:
           IGNORED_CHECKS="${IGNORED_CHECKS:-}"
           GATE_CHECK="${GATE_CHECK:-agency-delivery/gate}"
           [[ "${GATE_APP_ID:-}" =~ ^[1-9][0-9]*$ ]] || { echo "::error::bad GATE_APP_ID '${GATE_APP_ID:-}'"; exit 1; }
-          # The Codex wait: a whole number of minutes, at least 1. Anything else
-          # is a red run (never a silent zero wait).
-          [[ "${DOC_CODEX_WAIT_MINUTES:-}" =~ ^[1-9][0-9]{0,4}$ ]] || { echo "::error::bad DOC_CODEX_WAIT_MINUTES '${DOC_CODEX_WAIT_MINUTES:-}' (whole minutes, at least 1)"; exit 1; }
-          for v in CODEX_BOT CODEX_APP REVIEW_SKIP_PATTERN; do
+          # The alert delay: a whole number of minutes, at least 1. Anything
+          # else is a red run.
+          [[ "${ALERT_AFTER_MINUTES:-}" =~ ^[1-9][0-9]{0,4}$ ]] || { echo "::error::bad ALERT_AFTER_MINUTES '${ALERT_AFTER_MINUTES:-}' (whole minutes, at least 1)"; exit 1; }
+          [ -z "${SLACK_WEBHOOK_URL:-}" ] || echo "::add-mask::${SLACK_WEBHOOK_URL}"
+          for v in CODEX_BOT CODEX_APP REVIEW_SKIP_PATTERN ALERT_MARKER; do
             [ -n "${!v// /}" ] || { echo "::error::$v is empty"; exit 1; }
           done
           # The kill switch, failing closed: anything but exactly "true" plus
@@ -349,12 +369,12 @@ jobs:
           # ── One PR ─────────────────────────────────────────────────────
           # eval_pr <repo> <n> <check|merge> <expected head or ""> <result file>
           # Always run in a subshell. Writes ONE line to the result file:
-          #   skip|wait|notgreen|blocked|ready <head>|would-merge|merged|refused|error <why>
+          #   skip|wait|notgreen|blocked|alerted|ready <head>|would-merge|merged|refused|error <why>
           # and exits 0, or 1 for an error (the run ends red).
           eval_pr() {
             REPO=$1; PR_NUMBER=$2; MODE=$3; EXPECT_HEAD=$4; RESULT=$5
             HEAD=""; BASE_REF=""; BASE_TIP=""; VERCEL_REQUIRED=""; VERCEL_FOR=""; FILE_COUNT=""
-            PR_UPDATED=""; PR_NODE=""; CODEX_NOTE=""
+            PR_CREATED=""; PR_NODE=""; CODEX_NOTE=""
             finish() { local k=$1; shift; echo "$k $*" > "$RESULT"; say "$REPO#$PR_NUMBER: $*"; exit 0; }
             fail() { echo "error $*" > "$RESULT"; echo "::error::$REPO#$PR_NUMBER: $*"; exit 1; }
 
@@ -403,14 +423,16 @@ jobs:
               # decides at merge time); false is a conflict, which no sweep fixes.
               [ "$(echo "$pr" | jq -r '.mergeable | tostring')" != "false" ] || finish wait "documentation-only, but GitHub reports a merge conflict."
               FILE_COUNT="$changed"
-              PR_UPDATED=$(echo "$pr" | jq -r '.updated_at // empty')
+              PR_CREATED=$(echo "$pr" | jq -r '.created_at // empty')
               PR_NODE=$(echo "$pr" | jq -r '.node_id // empty')
             }
 
             # Codex on the current head (see "Codex" in the header). Prints ONE
-            # line: clean:<why> | timeout:<why> | blocked:<why> | wait:<why>.
-            # clean and timeout may merge; blocked never does (a person must);
-            # wait is the next sweep. Anything unreadable is wait, never a merge.
+            # line: clean:<why> | blocked:<why> | held:<why> | alert:<why> |
+            # wait:<why>. Only clean may merge; blocked and held never do (a
+            # person must); alert is a head with no review for
+            # ALERT_AFTER_MINUTES that no one was told about yet; wait is the
+            # next sweep. Anything unreadable is wait, never a merge.
             codex_state() {
               local comments reviews inline hdate now after="" page=0 page_json found blocking="[]" minor="[]" verified="[]" node meta ok
               local -a after_arg
@@ -487,13 +509,13 @@ jobs:
                 fi
               done
               # The head commit date: the earliest the head can have been pushed.
-              # Unreadable leaves it empty, which only matters for the timeout.
+              # Unreadable leaves it empty, which only matters for the alert.
               hdate=$(api "repos/$REPO/git/commits/$HEAD" --jq '.committer.date // empty' || true)
               now=$(date -u +%s)
               jq -rn --argjson comments "$comments" --argjson reviews "$reviews" --argjson inline "$inline" \
                   --argjson threads "$blocking" --argjson minor "$minor" --argjson verified "$verified" --arg head "$HEAD" --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
-                  --arg skip "$REVIEW_SKIP_PATTERN" --arg updated "${PR_UPDATED:-}" --arg hdate "${hdate:-}" \
-                  --argjson now "$now" --argjson wait "$DOC_CODEX_WAIT_MINUTES" '
+                  --arg skip "$REVIEW_SKIP_PATTERN" --arg created "${PR_CREATED:-}" --arg hdate "${hdate:-}" \
+                  --argjson now "$now" --argjson alert "$ALERT_AFTER_MINUTES" --arg marker "$ALERT_MARKER" '
                 def ts: if type == "string" and test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}")
                         then (sub("\\.[0-9]+"; "") | sub("\\+00:00\\z"; "Z") | try fromdateiso8601 catch null)
                         else null end;
@@ -538,35 +560,63 @@ jobs:
                     ($hr[] | select(carries_no_findings and (((.body // "") | test($skip; "i")) or any(._comments[]; (.body // "") | test($skip; "i")))) | .submitted_at)]
                    | map(ts) | map(select(. != null and ($hd == null or . >= $hd)))) as $notices
                 | ($notices | max) as $lastnotice
-                | ([$hd, ($updated | ts)] | if any(.[]; . == null) then null else max end) as $anchor
+                # The push, at the earliest: the later of the head commit date
+                # and the PR creation (see "A person is alerted" in the header).
+                | ([$hd, ($created | ts)] | map(select(. != null)) | max) as $anchor
                 | (if $anchor == null then null else (($now - $anchor) / 60 | floor) end) as $mins
-                | def timeout($why):
-                    if $anchor == null then "wait:\($why); the push time cannot be estimated (updated_at \($updated), head commit date \($hdate)), so not merging"
-                    elif $mins >= $wait then "timeout:\($why); \($mins) min since the head was pushed (at the latest) >= \($wait) min"
-                    else "wait:\($why); \($mins) of \($wait) min since the head was pushed (at the latest), so waiting for Codex" end;
+                # This head was already reported (by an alert comment of this sweep).
+                | any($comments[]; (.body // "") | contains($marker) and contains("head: " + $head)) as $alerted
+                | def noreview($why):
+                    if $anchor == null then "wait:\($why); the push time cannot be estimated (created_at \($created), head commit date \($hdate)), so no alert yet; never merged without a Codex review"
+                    elif $mins < $alert then "wait:\($why); \($mins) min since the head was pushed, a person is alerted at \($alert) min; never merged without a Codex review"
+                    elif $alerted then "wait:\($why); \($mins) min since the head was pushed, and a person was alerted; never merged without a Codex review"
+                    else "alert:\($why); \($mins) min since the head was pushed (alert at \($alert) min)" end;
                   if ($block | length) > 0 then "blocked:\($block | length) open: " + ($block | unique | join("; "))
                   elif ($minor | length) > 0 then
                     "held:\($minor | length) open P2/P3 Codex finding(s) on \($head[0:7]): " + ($minor | unique | join("; "))
                   elif $unreadable > 0 then "wait:a row of the Codex review summary cannot be read, so whether Codex finished cannot be told"
                   elif ($running | length) > 0
                        and ($lastnotice == null or any($running[]; .at == null or .at >= $lastnotice)) then
-                    "wait:Codex review still running (or not Completed) on \($head[0:7]) (\($running | map(.status | sub("<[^>]*>"; ""; "g") | sub("\\s+\\z"; "")) | unique | join(", ")))"
+                    noreview("Codex review still running (or not Completed) on \($head[0:7]) (\($running | map(.status | sub("<[^>]*>"; ""; "g") | sub("\\s+\\z"; "")) | unique | join(", ")))")
                   elif ($running | length) == 0 and ((($hrows | length) > 0) or ($real | length) > 0) then
                     "clean:Codex finished on \($head[0:7]) (\(if ($hrows | length) > 0 then "summary row Completed" else "review object on the head" end)) with no open P0/P1 finding"
-                  elif $lastnotice != null then timeout("Codex unavailable (its latest reply since the head is a usage-limit or set-up notice)")
-                  else timeout("Codex posted nothing for \($head[0:7])") end' \
+                  elif $lastnotice != null then noreview("Codex unavailable (its latest reply since the head is a usage-limit or set-up notice)")
+                  else noreview("Codex posted nothing for \($head[0:7])") end' \
                 || echo "wait:could not evaluate Codex activity"
             }
 
-            # Applies codex_state to a CI-green PR. Returns only for clean or
-            # timeout (CODEX_NOTE says which); otherwise records the decision.
+            # Reports a CI-green doc PR with no Codex review of its head: Slack
+            # first, then the marker comment, so a failed post is retried by
+            # the next sweep. A dry run posts nothing. Any failure is an error.
+            alert_no_review() {
+              local url="https://github.com/$REPO/pull/$PR_NUMBER" text body
+              echo "::warning::$REPO#$PR_NUMBER: no Codex review of ${HEAD:0:7} yet; never auto-merged without one: ${CODEX_NOTE}"
+              if [ "$DRY" = "yes" ]; then
+                finish wait "documentation-only (${FILE_COUNT} files), CI green at ${HEAD:0:7}; dry run: would alert a person (${CODEX_NOTE})."
+              fi
+              [ -n "${SLACK_WEBHOOK_URL:-}" ] || fail "no Codex review of ${HEAD:0:7} after ${ALERT_AFTER_MINUTES} min, but no Slack webhook is set (secret SLACK_MONITORING_WEBHOOK_URL), so no one can be alerted"
+              text="Doc PR ${REPO}#${PR_NUMBER} has had no Codex review of its head ${HEAD:0:7} for ${ALERT_AFTER_MINUTES}+ minutes, so the doc auto-merge sweep will not merge it. Ask Codex to review it, or merge it by hand after a review: ${url}"
+              jq -cn --arg t "$text" '{text: $t}' \
+                | curl -sS --fail --max-time 20 -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL" >/dev/null \
+                || fail "no Codex review of ${HEAD:0:7}, and the Slack alert failed; no comment left, the next sweep tries again"
+              body=$(printf '%s <!-- head: %s -->\n\nNo Codex review of the current head (`%s`) after %s minutes, so the doc auto-merge sweep will not merge this PR. Documentation PRs merge only after Codex has reviewed the head with nothing open (GAAA-4448). Ask Codex to review it; the sweep merges it once the review is clean. #aaa-monitoring was told.' \
+                "$ALERT_MARKER" "$HEAD" "${HEAD:0:7}" "$ALERT_AFTER_MINUTES")
+              api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null \
+                || fail "Slack was alerted about ${HEAD:0:7}, but the PR comment failed; the next sweep alerts again"
+              echo "alerted $REPO#$PR_NUMBER: no Codex review of ${HEAD:0:7}; ${CODEX_NOTE}." > "$RESULT"
+              say "$REPO#$PR_NUMBER: no Codex review of ${HEAD:0:7}; a person was alerted (Slack and a PR comment); not merged."
+              exit 0
+            }
+
+            # Applies codex_state to a CI-green PR. Returns only for clean;
+            # otherwise records the decision (and alerts when it is time).
             codex_gate() {
               local cs
               cs=$(codex_state)
               CODEX_NOTE="${cs#*:}"
               case "$cs" in
                 clean:*) ;;
-                timeout:*) echo "::notice::$REPO#$PR_NUMBER: merging without a Codex review: ${CODEX_NOTE}." ;;
+                alert:*) alert_no_review ;;
                 blocked:*)
                   echo "::warning::$REPO#$PR_NUMBER: open Codex P0/P1 finding(s) on the current head; never auto-merged, left for a person: ${CODEX_NOTE}"
                   finish blocked "documentation-only and CI green, but Codex has open P0/P1 finding(s) on ${HEAD:0:7}; left for a person: ${CODEX_NOTE}." ;;
@@ -843,7 +893,7 @@ jobs:
           } >> "$SUMMARY"
           record() { printf '| %s | %s | %s |\n' "$1" "$2" "$(printf '%s' "$3" | tr '|\n' '/ ' | cut -c1-300)" >> "$SUMMARY"; }
 
-          scanned=0; docs=0; ready=0; waiting=0; notgreen=0; blocked=0; merged=0; would=0; refused=0; errors=0; deferred=0
+          scanned=0; docs=0; ready=0; waiting=0; notgreen=0; blocked=0; alerted=0; merged=0; would=0; refused=0; errors=0; deferred=0
           declare -a READY=()
           i=0
           while read -r url n; do
@@ -870,6 +920,7 @@ jobs:
               wait) waiting=$((waiting + 1)); [[ "$line" == *documentation-only* ]] && docs=$((docs + 1)) ;;
               notgreen) notgreen=$((notgreen + 1)); docs=$((docs + 1)) ;;
               blocked) blocked=$((blocked + 1)); docs=$((docs + 1)) ;;
+              alerted) alerted=$((alerted + 1)); docs=$((docs + 1)) ;;
               error) errors=$((errors + 1)) ;;
             esac
             record "$repo#$n" 1 "${line:-error}"
@@ -899,6 +950,7 @@ jobs:
                 would-merge) would=$((would + 1)) ;;
                 refused) refused=$((refused + 1)) ;;
                 blocked) blocked=$((blocked + 1)) ;;
+                alerted) alerted=$((alerted + 1)) ;;
                 error) errors=$((errors + 1)) ;;
               esac
               record "$repo#$n" 2 "${line:-error}"
@@ -911,7 +963,7 @@ jobs:
             used=$((rate_start - rate_end))
           fi
           requests=$(wc -l < "$CALLS" | tr -d ' ')
-          final="scanned $scanned, documentation-only $docs, green $ready, waiting $waiting, not green $notgreen, codex-blocked $blocked, $([ "$DRY" = yes ] && echo "would merge $would" || echo "merged $merged"), refused $refused, deferred $deferred, errors $errors, api requests $requests, core quota used $used (left ${rate_end:-?})"
+          final="scanned $scanned, documentation-only $docs, green $ready, waiting $waiting, not green $notgreen, codex-blocked $blocked, alerted $alerted, $([ "$DRY" = yes ] && echo "would merge $would" || echo "merged $merged"), refused $refused, deferred $deferred, errors $errors, api requests $requests, core quota used $used (left ${rate_end:-?})"
           say "$final"
           { echo; echo "$final"; } >> "$SUMMARY"
           [ "$errors" -eq 0 ] || exit 1

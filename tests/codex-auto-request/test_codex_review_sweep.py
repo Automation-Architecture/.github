@@ -167,6 +167,12 @@ case("Markdown-only with unreadable labels: nudged",
      (lambda fx: (fx[f"repos/{ORG}/widget/pulls/7"].update(labels=None), fx)[1])(one(files=("README.md",))),
      ["widget#7"])
 case("300+ changed files is beyond the doc bound: nudged", one(files=("README.md",), changed=300), ["widget#7"])
+# GAAA-4448: the doc merge needs a Codex review of the head, so docs are nudged like code.
+case("Markdown-only: nudged (GAAA-4448)", one(files=("README.md", "docs/a.markdown")), ["widget#7"])
+case("Markdown rename from Markdown: nudged", one(files=("a.md",), renamed={"b.md": "old/b.md"}), ["widget#7"])
+case("Markdown with an unrelated label: nudged", one(files=("README.md",), labels=("documentation",)), ["widget#7"])
+case("Markdown-only, Codex already Completed the head: skipped (once per head)",
+     one(files=("README.md",), comments=[summary("✅ **Completed**", A)]), [])
 
 # --- skips ---------------------------------------------------------------------------
 for st in ("✅ **Completed**", "🔄 **Running**", "⏳ **Queued**", "⚠️ **Failed**"):
@@ -185,9 +191,6 @@ case("no agency-delivery/gate check on the head: skipped", one(gate=0), [])
 case("draft (search index lag): skipped", one(draft=True), [])
 case("closed (search index lag): skipped", one(state="closed"), [])
 case("fork PR: skipped", one(fork=True), [])
-case("Markdown-only: skipped", one(files=("README.md", "docs/a.markdown")), [])
-case("Markdown rename from Markdown: skipped", one(files=("a.md",), renamed={"b.md": "old/b.md"}), [])
-case("Markdown with an unrelated label: skipped", one(files=("README.md",), labels=("documentation",)), [])
 
 case("gate-named check from another producer (not the delivery App): skipped", one(gate_app=15368), [])
 
@@ -278,9 +281,9 @@ def check_shape(wf):
     ev = yaml.safe_load(EVENT_WORKFLOW.read_text())["jobs"]["codex-auto-request"]["steps"][0]["env"]
     dam = yaml.safe_load(DOC_AUTO_MERGE.read_text())["jobs"]["doc-auto-merge"]["steps"][0]["env"]
     rv = yaml.safe_load(REVIEW_VERDICT.read_text())["jobs"]["publish"]["steps"][0]["env"]
-    assert env["DOC_ONLY_PATTERN"] == ev["DOC_ONLY_PATTERN"] == dam["DOC_ONLY_PATTERN"]
-    assert env["MAX_DOC_FILES"] == ev["MAX_DOC_FILES"] == dam["MAX_FILES"]
-    assert env["HOLD_LABEL"] == ev["HOLD_LABEL"] == rv["HOLD_LABEL"]
+    assert ev["DOC_ONLY_PATTERN"] == dam["DOC_ONLY_PATTERN"] and ev["HOLD_LABEL"] == rv["HOLD_LABEL"]
+    assert "DOC_ONLY_PATTERN" not in env and "Markdown-only" not in find["run"], \
+        "GAAA-4448: Markdown-only PRs are nudged like code (the doc merge needs a review of the head)"
     assert env["CODEX_BOT"] == ev["CODEX_BOT"]
     ev_run = yaml.safe_load(EVENT_WORKFLOW.read_text())["jobs"]["codex-auto-request"]["steps"][0]["run"]
     import re
