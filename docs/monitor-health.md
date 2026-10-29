@@ -148,13 +148,16 @@ gh issue list -R $R --label monitor-health
 
 Expected on 2026-10-07's state: 5 findings (`daily-pr-audit` and
 `workflow-heartbeat` red until the aaa-internal-dashboard secrets are set,
-`au-group` `smoke-e2e` and `fas-portal` `signin-e2e` red, `dashboard-watchdog`
-disabled until it is re-enabled). Each is a real problem.
+which was done on 2026-10-07; `au-group` `smoke-e2e` and `fas-portal`
+`signin-e2e` red, `dashboard-watchdog` disabled until it is re-enabled).
+Each is a real problem.
 
-Slack (needs Brad; the value is never read by an agent):
-`gh secret set SLACK_DEVOPS_WEBHOOK_URL -R Automation-Architecture/.github`
-with the #dev-ops webhook from 1Password, the same one `aaa-client-dashboard`
-uses. Marker-verify it as in aaa-runbooks
+Slack (agent work, Brad 2026-10-29): the agent pipes the #dev-ops webhook
+from 1Password straight into
+`gh secret set SLACK_DEVOPS_WEBHOOK_URL -R Automation-Architecture/.github`,
+never echoing it. It is the same webhook `aaa-client-dashboard` uses, but it
+has no 1Password item yet: until Brad creates or locates one and stores it
+there, this step waits on that item. Marker-verify it as in aaa-runbooks
 `integrations/slack-incoming-webhooks.md`, then dispatch with
 `heartbeat=true` and read #dev-ops.
 
