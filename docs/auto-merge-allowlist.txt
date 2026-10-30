@@ -43,7 +43,7 @@ aios-cdp
 aios-coffee
 aios-hotdata
 aios-mts-native-variant
-aios-signals
+aios-signals-app
 au-group
 client-registry
 collabworld-outreach

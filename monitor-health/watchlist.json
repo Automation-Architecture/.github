@@ -180,7 +180,7 @@
       "why": "nightly main CI"
     },
     {
-      "repo": "aios-signals",
+      "repo": "aios-signals-app",
       "workflow": "nightly-main.yml",
       "window_hours": 27,
       "min_runs_24h": 0,
@@ -188,7 +188,7 @@
       "why": "nightly main CI"
     },
     {
-      "repo": "aios-second-brain",
+      "repo": "aios-iq-app",
       "workflow": "nightly-main.yml",
       "window_hours": 27,
       "min_runs_24h": 0,

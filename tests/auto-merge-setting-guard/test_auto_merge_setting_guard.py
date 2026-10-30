@@ -34,7 +34,7 @@ EXPECTED_ALLOWLIST = (
     "aaa-hooks", "aaa-intelligence", "aaa-internal-dashboard", "aaa-lead-pipeline",
     "aaa-outreach", "aaa-portfolio", "aaa-pr-bot", "aaa-profit-run-rate", "aaa-rabbit",
     "aaa-runbooks", "aaa-sentry-instrument", "aaa-ux-review", "aaa-watchtower", "aaa-website",
-    "aios-cdp", "aios-coffee", "aios-hotdata", "aios-mts-native-variant", "aios-signals",
+    "aios-cdp", "aios-coffee", "aios-hotdata", "aios-mts-native-variant", "aios-signals-app",
     "au-group", "client-registry", "collabworld-outreach", "fas-portal", "fidelity-dashboard",
     "fidelity-dashboard-qa", "fidelity-qa", "freight-auditor", "heygen-video-automation",
     "ic-linkedin-dashboard", "ic-stripe", "invoice-tracker", "kidneyhood-zendesk-agent",
