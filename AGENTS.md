@@ -1,13 +1,13 @@
 # Shared workflow guidance
 
 Follow the [organization merge policy](https://github.com/Automation-Architecture/aaa-runbooks/blob/main/reference/merge-gate-target-system.md).
-No human approving review is required. Code/workflow changes need completed
-Codex review on the current head, no open P0/P1 finding (unbadged counts as P1),
-and successful CI (`agency-delivery/gate`). P2/P3 receive one fix round, then a
-follow-up for anything left.
-Greptile is optional: invite it with `@greptileai review` when a review is
-wanted; no gate waits on it. Preserve another person's draft/merge hold.
-Use normal squash merge pinned to the verified head; never admin bypass.
+No human approving review is required. The hosted v3 gate accepts the configured
+reviewer selected by label, applies fallback and at most two rounds, and requires
+current-head CI, Linear and risk disclosure. It blocks P0/P1; repository rules
+also require resolved conversations. Reviewer integrations must be available.
+Preserve another person's draft or merge hold. Use normal squash merges pinned
+to verified evidence; never admin bypass. Enrolled tasks have the stricter
+Codex/P2/browser contract below.
 Native auto-merge is allowed on all active repos after GAAA-4198 org protection
 is active. It never overrides a draft or user hold. Risky paths require a useful
 Risk line, not another human approval. Do not add Autopilot-class listeners.
