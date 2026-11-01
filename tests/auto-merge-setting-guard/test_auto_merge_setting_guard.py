@@ -28,19 +28,7 @@ BOT = "github-actions[bot]"
 TITLE = "Native auto-merge setting is out of allowlist policy"
 LABEL = "auto-merge-setting"
 ALLOWLIST_DOC = ROOT / "docs/auto-merge-allowlist.txt"
-EXPECTED_ALLOWLIST = (
-    ".github", "LKID", "aaa-SOP", "aaa-aios", "aaa-automation-inventory", "aaa-bin",
-    "aaa-client-dashboard", "aaa-discovery", "aaa-discovery-template", "aaa-finance-tracker",
-    "aaa-hooks", "aaa-intelligence", "aaa-internal-dashboard", "aaa-lead-pipeline",
-    "aaa-outreach", "aaa-portfolio", "aaa-pr-bot", "aaa-profit-run-rate", "aaa-rabbit",
-    "aaa-runbooks", "aaa-sentry-instrument", "aaa-ux-review", "aaa-watchtower", "aaa-website",
-    "aios-cdp", "aios-coffee", "aios-hotdata", "aios-mts-native-variant", "aios-signals-app",
-    "au-group", "client-registry", "collabworld-outreach", "fas-portal", "fidelity-dashboard",
-    "fidelity-dashboard-qa", "fidelity-qa", "freight-auditor", "heygen-video-automation",
-    "ic-linkedin-dashboard", "ic-stripe", "invoice-tracker", "kidneyhood-zendesk-agent",
-    "new-zealand-shores", "opportunity-builder", "proposal-iq", "ptg-campaign-brief-agent",
-    "ptg-content-generator", "rmbc", "roofdata", "skill-shelf", "vehicle-intelligence-engine",
-)
+EXPECTED_ALLOWLIST = ("~ALL",)
 
 # Stub gh. Keys are the API path without a leading "/" or "repos/" and
 # without the query. "graphql" is served from fx["graphql"]: {cursor: page},
@@ -232,6 +220,10 @@ case("allowlist comments and blanks are ignored", world(quiet_repos() + [repo("k
      allowlist="# heading\n\nkept\n# trailing\n", flagged=[])
 case("archived allowlisted repo off: ignored", world(quiet_repos() + [repo("old", archived=True)]),
      allowlist="old\n", flagged=[], writes=[])
+case("all active repos: off is drift, archived ignored", world([repo(".github", on=True), repo("hot", on=False), repo("old", archived=True)]),
+     allowlist="~ALL\n", flagged=["hot"])
+case("mixed wildcard policy: red", world(), allowlist="~ALL\nhot\n", ok=False, red_at="list", says=("mixed ~ALL",))
+case("duplicate wildcard policy: red", world(), allowlist="~ALL\n~ALL\n", ok=False, red_at="list", says=("duplicate or mixed ~ALL",))
 case("missing allowlist file: red", world(), env={"ALLOWLIST_FILE": "/no/such/allowlist"},
      ok=False, red_at="list", says=("allowlist file missing",))
 case("malformed allowlist line: red", world(), allowlist="acme/too/many/slashes\n",
@@ -372,7 +364,7 @@ def structure_checks(wf):
     if wf["env"].get("ALERT_LABEL") != LABEL or wf["env"].get("ISSUE_TITLE") != TITLE:
         errs.append("ALERT_LABEL / ISSUE_TITLE changed; update the tests deliberately")
     header = WORKFLOW.read_text().split("on:", 1)[0]
-    if "GAAA-3961" not in header or "supersedes 2026-10-05" not in header:
+    if "GAAA-4198" not in header or "supersedes" not in header:
         errs.append("header must say GAAA-3961 allowlist supersedes 2026-10-05 OFF-everywhere")
     if "never changes a repository setting" not in header and "never PAT-writes" not in header:
         if "The guard only reports. It never changes a repository setting." not in header:
@@ -401,8 +393,8 @@ def production_allowlist_checks():
             errs.append(f"missing {missing}")
         if extra:
             errs.append(f"extra {extra}")
-    if len(names) != 51:
-        errs.append(f"expected 51 allowlisted repos, got {len(names)}")
+    if len(names) != 1:
+        errs.append(f"expected one ~ALL policy entry, got {len(names)}")
     if len(names) != len(set(names)):
         errs.append("duplicate names in the production allowlist")
     return errs

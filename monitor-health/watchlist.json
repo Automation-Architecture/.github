@@ -29,14 +29,6 @@
     },
     {
       "repo": ".github",
-      "workflow": "doc-auto-merge-sweep.yml",
-      "window_hours": 2,
-      "min_runs_24h": 40,
-      "owner": "Engineer",
-      "why": "merges approved Markdown-only PRs org-wide (every 10 min)"
-    },
-    {
-      "repo": ".github",
       "workflow": "rollout-monitor.yml",
       "window_hours": 4,
       "min_runs_24h": 16,
@@ -49,7 +41,7 @@
       "window_hours": 27,
       "min_runs_24h": 0,
       "owner": "Engineer",
-      "why": "native auto-merge must stay off org-wide"
+      "why": "reports native auto-merge setting drift against the org-wide protected policy"
     },
     {
       "repo": ".github",

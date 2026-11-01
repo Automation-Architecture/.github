@@ -20,7 +20,7 @@ import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/codex-auto-request.yml"
-DOC_AUTO_MERGE = ROOT / ".github/workflows/doc-auto-merge.yml"
+DOC_AUTO_MERGE = ROOT / "archives/gate-v3-2026-11-01/doc-auto-merge.yml"
 
 REPO = "acme/widget"
 PR = 7
@@ -380,7 +380,7 @@ def check_shape(wf):
         assert f"github.event.action == '{action}'" in env["AFTER_EVENT"], f"AFTER_EVENT must be set for {action}"
     for action in ("opened", "reopened", "synchronize"):
         assert action not in env["AFTER_EVENT"], f"{action} must count evidence for the head whenever made"
-    # Same Markdown-only definition as doc-auto-merge.yml (keep the two in step).
+    # Preserve legacy nudge compatibility; the hosted v3 gate owns docs applicability.
     dam_env = yaml.safe_load(DOC_AUTO_MERGE.read_text())["jobs"]["doc-auto-merge"]["steps"][0]["env"]
     assert env["DOC_ONLY_PATTERN"] == dam_env["DOC_ONLY_PATTERN"], "doc-only pattern drifted from doc-auto-merge.yml"
     assert env["MAX_DOC_FILES"] == dam_env["MAX_FILES"], "doc-only file bound drifted from doc-auto-merge.yml"

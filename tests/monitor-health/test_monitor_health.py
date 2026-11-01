@@ -931,7 +931,7 @@ class WatchList(unittest.TestCase):
             key = (e["repo"], e["workflow"])
             self.assertNotIn(key, seen)
             seen.add(key)
-        self.assertIn((".github", "doc-auto-merge-sweep.yml"), seen)
+        self.assertNotIn((".github", "doc-auto-merge-sweep.yml"), seen)  # retired by Gate v3
         self.assertIn(("aaa-client-dashboard", "sync-linear-data.yml"), seen)
         self.assertNotIn((".github", "monitor-health.yml"), seen)  # cross-watched by the dashboard watchdog
 

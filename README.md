@@ -3,7 +3,7 @@ About the Agency
 
 Shared workflow delivery follows [AGENTS.md](AGENTS.md) and the organization
 merge policy. Native auto-merge is allowlisted in
-[docs/auto-merge-allowlist.txt](docs/auto-merge-allowlist.txt) (GAAA-3961).
+[docs/auto-merge-allowlist.txt](docs/auto-merge-allowlist.txt) (GAAA-4198: all active repos, including future repositories).
 Multi-repo work is a [change-set](docs/multi-repo-change-sets.md). PR labels:
 [docs/pr-factory-labels.md](docs/pr-factory-labels.md). The
 [rollout monitor](docs/rollout-monitor.md) is read-only; canonical differences

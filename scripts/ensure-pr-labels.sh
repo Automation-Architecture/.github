@@ -19,6 +19,10 @@ done
 [ -f "$ALLOWLIST" ] || { echo "missing $ALLOWLIST" >&2; exit 1; }
 
 labels=(
+  "review:codex|5319e7|Select Codex for gate review"
+  "review:claude|5319e7|Select Claude for gate review"
+  "review:greptile|5319e7|Select Greptile for gate review"
+  "review:coderabbit|5319e7|Select CodeRabbit for gate review"
   "auto-merge-ok|0e8a16|Hygiene/fast-track: native auto-merge ok after Codex+gate"
   "do-not-stale|5319e7|Exempt from org PR stale/close"
   "client-bug|d73a4a|Client-facing bug; exempt from stale; auto-merge fast-track"
@@ -31,6 +35,12 @@ while IFS= read -r raw || [ -n "$raw" ]; do
   line="${line%"${line##*[![:space:]]}"}"
   [ -z "$line" ] && continue
   [ "${line:0:1}" = "#" ] && continue
+  if [ "$line" = '~ALL' ]; then
+    listed=$(gh repo list "$ORG" --no-archived --limit 1000 --json nameWithOwner --jq '.[].nameWithOwner')
+    [ -n "$listed" ] || { echo "empty org listing" >&2; exit 1; }
+    while IFS= read -r name; do repos+=("$name"); done <<<"$listed"
+    continue
+  fi
   if [[ "$line" == */* ]]; then
     repos+=("$line")
   else
@@ -57,4 +67,5 @@ for repo in "${repos[@]}"; do
     fi
   done
 done
-exit "$failed"
+if [ "$failed" -gt 0 ]; then exit 1; fi
+exit 0

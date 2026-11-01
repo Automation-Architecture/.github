@@ -1,0 +1,17 @@
+name: Gate v3 policy tests
+on:
+  pull_request:
+    paths:
+      - rulesets/**
+      - tests/gate-v3/**
+      - .github/workflows/**
+      - archives/gate-v3-2026-11-01/**
+permissions:
+  contents: read
+jobs:
+  policy:
+    name: gate v3 policy tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests/gate-v3 -p 'test_*.py'

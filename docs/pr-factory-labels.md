@@ -1,11 +1,12 @@
 # PR-factory labels
 
-GAAA-3961. Allowlisted repos (and any other repo that uses the org stale
+GAAA-4198. All active repos (and any other repo that uses the org stale
 janitor or native auto-merge) should have these labels. They are ordinary
 GitHub labels; creating them does not enable repository settings.
 
 | Label | Purpose |
 |---|---|
+| `review:codex`, `review:claude`, `review:greptile`, `review:coderabbit` | Choose the gate reviewer; availability and fallbacks remain visible. |
 | `auto-merge-ok` | Hygiene / fast-track: native auto-merge may arm after Codex + `agency-delivery/gate` on an [allowlisted](auto-merge-allowlist.txt) repo. |
 | `do-not-stale` | Exempt from [pr-stale.yml](../.github/workflows/pr-stale.yml) (keep open). |
 | `security` | Exempt from stale/close. |

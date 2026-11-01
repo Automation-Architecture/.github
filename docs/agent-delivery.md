@@ -46,8 +46,8 @@ packet revision and current head and requires a user-authenticated GitHub identi
   genuine interruption. Do not ask Brad to repeat routine task authorization.
 - After merge, update Linear and distinguish merged, deployed and verified live.
 
-The hosted gate remains policy v2.17: it accepts one configured reviewer and blocks
-P0/P1. The enrolled-task CLI additionally enforces the stricter Codex, packet freshness,
+The hosted gate is policy v3.0: it enforces Linear, current-head CI, reviewer
+selection/fallback/two rounds and risk disclosure; it blocks P0/P1. The enrolled-task CLI additionally enforces the stricter Codex, packet freshness,
 P2/conversation and browser requirements. A successful hosted check alone never
 satisfies this task-delivery contract.
 
