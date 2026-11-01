@@ -62,10 +62,11 @@ the tracked production policy. No Worker deployment is part of this rollout.
 
 | Repository | Active ruleset | Required checks (producer) |
 | --- | --- | --- |
+| aaa-hooks | 26295192 | agency-delivery/gate (5021608); hook tests, shellcheck, delivery browser (GitHub Actions 15368) |
 | aios-iq-app | 26295079 | agency-delivery/gate (5021608); Typecheck + Test + Build, E2E (GitHub Actions 15368) |
 | aios-cdp | 26295081 | agency-delivery/gate (5021608); Typecheck (all packages), Test aiosiq, Test iq, Build cdp-api, Build cdp-worker (GitHub Actions 15368) |
 
-Both rulesets target the default branch, require review conversation resolution
+All three rulesets target the default branch, require review conversation resolution
 with zero human approving reviews, have no bypass actors and were read back
 through both the ruleset API and effective `rules/branches/main` API. Status checks
 are not strict against base movement; the CLI invalidates its verification when it
@@ -78,6 +79,14 @@ head (base revisions differ and are encoded in the App external IDs):
 | --- | --- | --- |
 | IQ #100 / `9fcff29b6d8a2d7a47e459db3ab1f05df1fde38a` | 124712745696 | 124715203473 |
 | CDP #490 / `1439ea6db31da873416343e32827090ba840ab01` | 124712658964 | 124715181963 |
+
+For aaa-hooks, v2.17 check 124718661205 passed on #80 head
+`7f3c378973ebeb189bb8f83b813e2e9365cbe22c`; check 124720557298 blocked head
+`38029fae87bda5beafd72ec962a7ff7ecbed6741` before fresh review. The headed
+browser check 124720122449 passed from Actions App 15368. This producer/evidence
+inspection preceded ruleset 26295192 activation. The earlier App PASS could coexist
+with P2 findings under v2.17; the new native conversation-resolution rule and
+stricter CLI are both required for this pilot.
 
 The implementation PR is the live delivery pilot; IQ/CDP use the completed GAAA-4552
 pair for evidence replay. Replay is not a second merge or a new frontend feature:
