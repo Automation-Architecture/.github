@@ -37,7 +37,8 @@ packet revision and current head and requires a user-authenticated GitHub identi
   review conversations and outstanding change requests conservatively hold merge.
 - Required CI and the App-owned `agency-delivery/gate` must succeed. Read live branch
   rules; emitting the gate is insufficient. Pin the required gate to App 5021608
-  and require conversation resolution so GitHub blocks open threads at merge time.
+  and require strict up-to-date status checks plus conversation resolution so
+  GitHub blocks stale bases and open threads at merge time.
   Optional pending/red checks also hold. Respect fork/queue limitations and dependency
   order; a merged backend is not evidence of a successful runtime deployment.
 - Respect draft/label/user holds. Twelve automatic continuations or two hours creates
@@ -69,8 +70,10 @@ the tracked production policy. No Worker deployment is part of this rollout.
 All three rulesets target the default branch, require review conversation resolution
 with zero human approving reviews, have no bypass actors and were read back
 through both the ruleset API and effective `rules/branches/main` API. Status checks
-are not strict against base movement; the CLI invalidates its verification when it
-observes a new base and requires reconciliation/reverification/publication.
+are strict against base movement. The CLI invalidates its verification when it
+observes a new base; GitHub also rejects an outdated branch atomically if the base
+moves after that observation. Reconcile, commit, reverify and publish for fresh
+review. The PR REST base SHA can lag the live tip and is not an atomic base lock.
 
 Before activation, real App-owned blocked/clean evidence existed on the same tested
 head (base revisions differ and are encoded in the App external IDs):
