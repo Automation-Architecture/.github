@@ -36,7 +36,8 @@ packet revision and current head and requires a user-authenticated GitHub identi
   the older one-fix-round-and-defer-P2 policy does **not** permit merge. All unresolved
   review conversations and outstanding change requests conservatively hold merge.
 - Required CI and the App-owned `agency-delivery/gate` must succeed. Read live branch
-  rules; emitting the gate is insufficient. Pin the required gate to App 5021608.
+  rules; emitting the gate is insufficient. Pin the required gate to App 5021608
+  and require conversation resolution so GitHub blocks open threads at merge time.
   Optional pending/red checks also hold. Respect fork/queue limitations and dependency
   order; a merged backend is not evidence of a successful runtime deployment.
 - Respect draft/label/user holds. Twelve automatic continuations or two hours creates
@@ -64,7 +65,8 @@ the tracked production policy. No Worker deployment is part of this rollout.
 | aios-iq-app | 26295079 | agency-delivery/gate (5021608); Typecheck + Test + Build, E2E (GitHub Actions 15368) |
 | aios-cdp | 26295081 | agency-delivery/gate (5021608); Typecheck (all packages), Test aiosiq, Test iq, Build cdp-api, Build cdp-worker (GitHub Actions 15368) |
 
-Both rulesets target the default branch, have no bypass actors and were read back
+Both rulesets target the default branch, require review conversation resolution
+with zero human approving reviews, have no bypass actors and were read back
 through both the ruleset API and effective `rules/branches/main` API. Status checks
 are not strict against base movement; the CLI invalidates its verification when it
 observes a new base and requires reconciliation/reverification/publication.
