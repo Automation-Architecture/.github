@@ -8,19 +8,15 @@ follow-up for anything left.
 Greptile is optional: invite it with `@greptileai review` when a review is
 wanted; no gate waits on it. Preserve another person's draft/merge hold.
 Use normal squash merge pinned to the verified head; never admin bypass.
-Native auto-merge is allowed on [allowlisted](docs/auto-merge-allowlist.txt)
-active repos for hygiene, label `auto-merge-ok`, and client-bug fast-track after
-that Codex+gate bar (GAAA-3961). PRs that touch secrets handling, billing,
-destructive operations or a named production risk never auto-merge, even with
-`auto-merge-ok`: Brad says "merge". (Setting secret values from 1Password is
-separate and needs no ask; see the org secrets rule.) Do not add
-Autopilot-class GitHub listeners.
+Native auto-merge is allowed on all active repos after GAAA-4198 org protection
+is active. It never overrides a draft or user hold. Risky paths require a useful
+Risk line, not another human approval. Do not add Autopilot-class listeners.
 Explicitly enrolled coding-agent tasks use the stricter
 [authorized task delivery contract](docs/agent-delivery.md) (GAAA-4596): current-head
 Codex review, zero unresolved P0/P1/P2/conversations, required browser evidence and
 App-pinned branch enforcement. This is a local continuation adapter, not a new
 GitHub listener or a change to the native auto-merge allowlist.
-Markdown-only PRs use the canonical document merger.
+Docs-only PRs use the same App gate and skip review only under its narrow docs rule.
 
 Multi-repo fanouts are [change-sets](docs/multi-repo-change-sets.md): prefer a
 shared `.github` / reusable workflow over N orphan PRs; any fanout needs one
