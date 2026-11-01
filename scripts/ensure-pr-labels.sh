@@ -67,4 +67,5 @@ for repo in "${repos[@]}"; do
     fi
   done
 done
-exit "$failed"
+if [ "$failed" -gt 0 ]; then exit 1; fi
+exit 0
