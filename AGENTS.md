@@ -15,6 +15,11 @@ destructive operations or a named production risk never auto-merge, even with
 `auto-merge-ok`: Brad says "merge". (Setting secret values from 1Password is
 separate and needs no ask; see the org secrets rule.) Do not add
 Autopilot-class GitHub listeners.
+Explicitly enrolled coding-agent tasks use the stricter
+[authorized task delivery contract](docs/agent-delivery.md) (GAAA-4596): current-head
+Codex review, zero unresolved P0/P1/P2/conversations, required browser evidence and
+App-pinned branch enforcement. This is a local continuation adapter, not a new
+GitHub listener or a change to the native auto-merge allowlist.
 Markdown-only PRs use the canonical document merger.
 
 Multi-repo fanouts are [change-sets](docs/multi-repo-change-sets.md): prefer a
