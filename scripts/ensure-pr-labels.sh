@@ -19,13 +19,12 @@ done
 [ -f "$ALLOWLIST" ] || { echo "missing $ALLOWLIST" >&2; exit 1; }
 
 labels=(
-  "review:codex|5319e7|Select Codex for gate review"
-  "review:claude|5319e7|Select Claude for gate review"
-  "review:greptile|5319e7|Select Greptile for gate review"
-  "review:coderabbit|5319e7|Select CodeRabbit for gate review"
-  "auto-merge-ok|0e8a16|Hygiene/fast-track: native auto-merge ok after Codex+gate"
+  # Gate policy v3.1 (2026-11-03): Codex is the only reviewer and merges are done
+  # by hand, so review:claude/greptile/coderabbit and auto-merge-ok are no longer
+  # published. Existing copies are left in place; they have no effect.
+  "review:codex|5319e7|Starts gate review; Codex is the only reviewer"
   "do-not-stale|5319e7|Exempt from org PR stale/close"
-  "client-bug|d73a4a|Client-facing bug; exempt from stale; auto-merge fast-track"
+  "client-bug|d73a4a|Client-facing bug; exempt from stale/close"
   "security|b60205|Security work; exempt from org PR stale/close"
 )
 
