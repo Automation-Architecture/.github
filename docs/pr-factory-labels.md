@@ -1,19 +1,20 @@
 # PR-factory labels
 
-GAAA-4198. All active repos (and any other repo that uses the org stale
-janitor or native auto-merge) should have these labels. They are ordinary
+GAAA-4198, updated for gate policy v3.1 (2026-11-03: Codex only, merges by hand).
+All active repos (and any other repo that uses the org stale janitor) should have
+these labels. They are ordinary
 GitHub labels; creating them does not enable repository settings.
 
 | Label | Purpose |
 |---|---|
-| `review:codex`, `review:claude`, `review:greptile`, `review:coderabbit` | Choose the gate reviewer; availability and fallbacks remain visible. |
-| `auto-merge-ok` | Hygiene / fast-track: native auto-merge may arm after Codex + `agency-delivery/gate` on an [allowlisted](auto-merge-allowlist.txt) repo. |
+| `review:codex` | Starts the gate's review. Codex is the only reviewer, with no fallback; `review:claude`, `review:greptile` and `review:coderabbit` no longer choose a reviewer. |
+| `auto-merge-ok` | Retired: native auto-merge is not used (merges are done by hand), so this label has no effect. |
 | `do-not-stale` | Exempt from [pr-stale.yml](../.github/workflows/pr-stale.yml) (keep open). |
 | `security` | Exempt from stale/close. |
 | `client-bug` | Client-facing bug; **exempt** from stale/close while labeled (not a longer window). A client bug may wait on the customer; auto-closing it would drop paid work. Remove the label when the wait is over. |
 
-`client-bug` is also the fast-track label in [AGENTS.md](../AGENTS.md): on an
-allowlisted repo, after Codex + gate, native auto-merge may proceed.
+`client-bug` no longer fast-tracks a merge: every PR is merged by hand once Codex
+and `agency-delivery/gate` pass.
 
 ## Create on allowlisted repos
 
