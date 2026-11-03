@@ -22,9 +22,10 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(rules['required_status_checks']['required_status_checks'],[{'context':'agency-delivery/gate','integration_id':5021608}])
 
     def test_256_label_failures_remain_nonzero(self):
+        # 64 repos x 4 labels (v3.1 publishes review:codex, do-not-stale, client-bug, security).
         with tempfile.TemporaryDirectory() as tmp:
             stub=Path(tmp)/'gh'
-            stub.write_text('#!/usr/bin/env python3\nimport sys\nif sys.argv[1:3]==["repo","list"]:\n print("\\n".join("acme/repo"+str(i) for i in range(32)))\nelse: sys.exit(1)\n')
+            stub.write_text('#!/usr/bin/env python3\nimport sys\nif sys.argv[1:3]==["repo","list"]:\n print("\\n".join("acme/repo"+str(i) for i in range(64)))\nelse: sys.exit(1)\n')
             stub.chmod(0o755)
             env={**os.environ,'PATH':tmp+os.pathsep+os.environ['PATH'],'ORG':'acme'}
             result=subprocess.run(['bash',str(ROOT/'scripts/ensure-pr-labels.sh'),'--apply'],env=env,capture_output=True,text=True)

@@ -28,9 +28,9 @@ scripts/ensure-pr-labels.sh --apply
 Or one repo:
 
 ```bash
-gh label create auto-merge-ok --repo Automation-Architecture/<repo> --color 0e8a16 --description "Hygiene/fast-track: native auto-merge ok after Codex+gate" --force
+gh label create review:codex --repo Automation-Architecture/<repo> --color 5319e7 --description "Starts gate review; Codex is the only reviewer" --force
 gh label create do-not-stale --repo Automation-Architecture/<repo> --color 5319e7 --description "Exempt from org PR stale/close" --force
-gh label create client-bug --repo Automation-Architecture/<repo> --color d73a4a --description "Client-facing bug; exempt from stale; auto-merge fast-track" --force
+gh label create client-bug --repo Automation-Architecture/<repo> --color d73a4a --description "Client-facing bug; exempt from stale/close" --force
 gh label create security --repo Automation-Architecture/<repo> --color b60205 --description "Security work; exempt from org PR stale/close" --force
 ```
 
