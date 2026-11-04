@@ -11,7 +11,12 @@ Preserve another person's draft or merge hold. Use normal squash merges pinned
 to verified evidence; never admin bypass. Enrolled tasks have the stricter
 Codex/P2/browser contract below.
 Merges are done by hand (CEO, 2026-11-03): native auto-merge is not used on any
-repo, and the gate blocks an armed one with `AUTO_MERGE_ENABLED`. Risky paths require a useful
+repo, and the gate blocks an armed one with `AUTO_MERGE_ENABLED`. Only the PR's
+owner merges it: every PR carries an `Owner:` line (the session that opened it,
+from `aaa-owner`), and a passing gate is not permission to merge someone else's
+PR. Merge with `aaa-merge <number>`, never a raw `gh pr merge`: every agent
+merges as the same GitHub user, so the wrapper's owner check is the only one,
+and it refuses (exit 5) when the line names another session. Risky paths require a useful
 Risk line, not another human approval. Do not add Autopilot-class listeners.
 Explicitly enrolled coding-agent tasks use the stricter
 [authorized task delivery contract](docs/agent-delivery.md) (GAAA-4596): current-head
