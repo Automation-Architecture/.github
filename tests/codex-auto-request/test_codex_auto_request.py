@@ -385,7 +385,7 @@ def check_shape(wf):
     assert env["DOC_ONLY_PATTERN"] == dam_env["DOC_ONLY_PATTERN"], "doc-only pattern drifted from doc-auto-merge.yml"
     assert env["MAX_DOC_FILES"] == dam_env["MAX_FILES"], "doc-only file bound drifted from doc-auto-merge.yml"
     # The hold label is review-verdict.yml's, and the job condition names the same one.
-    rv_env = yaml.safe_load((ROOT / ".github/workflows/review-verdict.yml").read_text())["jobs"]["publish"]["steps"][0]["env"]
+    rv_env = yaml.safe_load((ROOT / "archives/gate-v3-2026-11-01/review-verdict.yml").read_text())["jobs"]["publish"]["steps"][0]["env"]
     assert env["HOLD_LABEL"] == rv_env["HOLD_LABEL"] == dam_env["HOLD_LABEL"], "hold label drifted from review-verdict.yml"
     assert f"github.event.label.name == '{env['HOLD_LABEL']}'" in job["if"], "job condition must name the hold label"
     assert "labeled" not in group.replace("github.event.action", ""), "a labeled run gets its own group"

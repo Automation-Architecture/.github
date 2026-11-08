@@ -1,0 +1,1317 @@
+name: Review verdict
+
+# CANONICAL COPY (Automation-Architecture/.github). Edit here, never in a repo.
+# Promoted from the aaa-client-dashboard advisory pilot (AAA-730) per the ADR
+# "the merge gate consumes a verdict we own" (aaa-runbooks
+# reference/pr-review-verdict-adr.md, AAA-728).
+#
+# Publishes one check-run named `review/verdict` on the PR head. The
+# `aaa-merge-gates` org ruleset requires it (source: GitHub Actions) on the
+# repos it targets; GitHub then enforces it at merge time, with native
+# auto-merge doing the merging.
+#
+# POLICY (Brad, 2026-09-29): Codex is the one required reviewer. Greptile is
+# outside the merge policy: nothing here reads it, so it can neither satisfy
+# nor block the verdict. No human approval is evidence or is required.
+#
+# DOCUMENTATION-ONLY EXEMPTION (Brad, 2026-09-28; .mdx excluded 2026-09-29):
+#   no review is required when EVERY changed file, and the previous name of
+#   every renamed file, ends in .md or .markdown (case-sensitive, any path;
+#   CLAUDE.md, AGENTS.md, .claude/** and .github/** Markdown included by
+#   decision; .mdx carries JSX and is reviewed like code). The file list is
+#   read from an immutable base/head compare and must hold exactly `changed_files`
+#   entries, fewer than 300; unreadable, short, empty or oversized lists refuse. Not
+#   applied to a draft, to a PR with the `no-auto-merge` hold label, or to a
+#   fork's branch; those need Codex like any other. It is checked BEFORE the
+#   Codex P0/P1 findings block: a documentation-only PR needs no review, so Codex
+#   findings on it do not hold it. A retarget fires `edited`, a label change
+#   `labeled`/`unlabeled`; both re-evaluate. doc-auto-merge.yml does the merge.
+#
+# THRESHOLD (Brad, 2026-09-29): pass when Codex has reviewed the current head
+# and no P0/P1 Codex finding is open. P2/P3 findings never fail it.
+#
+# Evidence counted for every other PR (Codex only; nothing else; no
+# reaction except Codex's own 👍 inside evidence 1b):
+#   1. Codex's clean result for this head: an ISSUE comment on this PR,
+#      authored by the chatgpt-codex-connector App itself (never a human
+#      quoting it), never edited, opening "Codex Review: Didn't find any major
+#      issues" and naming exactly one "Reviewed commit" that is a 10+ hex
+#      prefix of this head (full rules at evidence_from_codex_comment);
+#   1b. Codex's clean result in its current form (from 2026-09-29 Codex often
+#      posts no clean comment): its "Codex Review Summary" issue comment, last
+#      edited only by the Codex App, whose every table row is Completed on a
+#      7+ hex prefix of this head (and of no other commit the PR carried), PLUS
+#      Codex's 👍 reaction on the PR created after that completion, and no
+#      Codex inline comment, and no Codex review that carries findings (not
+#      pending, not a skip notice), on this head (full rules at
+#      evidence_from_codex_summary). The 👍 is the one reaction that counts:
+#      only the Codex App can make it, and Codex makes it only when every
+#      review finished with no findings;
+#   2. a Codex review object whose commit_id is this head, not dismissed, not
+#      a skip notice, not notice-only (an empty body whose inline comments are
+#      all replies or notices: Codex's "create an environment" reply under a
+#      thread, .github#73), submitted after the latest retarget or head
+#      force-push. Codex posts one to carry findings; the rule below decides
+#      whether they block.
+# CODEX P0/P1 FINDINGS BLOCK: the verdict fails, whatever else exists, when
+#   - an unresolved, not-outdated review thread started by Codex has severity
+#     P0 or P1, read from the badge Codex puts in the body
+#     (`![P1 Badge](...)`). A Codex thread with no readable P2/P3 badge counts
+#     as P1 (fail closed). Threads by anyone else never block; or
+#   - a Codex review object on this head has no inline comments left. Codex
+#     posts a review object only to carry findings (143 of 143 checked), so
+#     none left means they were deleted and their severity is unreadable
+#     (Codex P1 on aios-coffee#122).
+# Resolving a P0/P1 thread fires no event this workflow can listen to
+# (pull_request_review_thread is not an Actions trigger), so re-run the
+# verdict after resolving one: `gh workflow run review-verdict.yml -f
+# pr_number=<n> -f head_sha=<sha>`, or push.
+# RESIDUAL, accepted: a writer who deletes only the P0/P1 inline comment of a
+# Codex review, leaving a P2, leaves nothing to read. It needs write access.
+# No review object, check-run or approval from anyone else (Greptile, a human,
+# another bot) is evidence. A Greptile check or review, passing or failing, is
+# ignored. (Until 2026-09-29 a Greptile check or review passed the verdict on
+# its own, even over an open Codex finding: Codex P1 on .github#53.)
+# The author of the last push is never evidence for that head. Skip notices
+# never count.
+#
+# RESIDUAL, accepted (evidence 1): a clean Codex comment names the head
+# it reviewed but not the base, and it is bound to the base only by time
+# (posted after the latest retarget). If the author retargets the PR while a
+# Codex review is running, the clean comment lands after the retarget and is
+# accepted for a diff Codex never reviewed (Codex P1 on aaa-client-dashboard#254).
+# Exploiting it needs write access and a retarget inside the few minutes a
+# review runs; nothing in the comment or the API records when Codex started.
+# (The 10-hex prefix collision this note used to describe is closed:
+# .github#48.)
+#
+# RESIDUAL, accepted (evidence 1): a replaced head's history is listed
+# against the CURRENT base. If a Codex review of A is running, the base then
+# moves to contain A, and the PR reaches a precomputed head B sharing A's
+# 10-hex prefix (by force-push, or by fast-forward so A drops out of the PR's
+# commit list), A's late clean comment passes B. Every step must hold at once
+# (Codex P1 on .github#50 and opportunity-builder#178).
+#
+# RESIDUAL, accepted: a review on a fork or Dependabot PR runs with a
+# READ-ONLY token, so `publish` skips it. If Codex submits a findings review
+# on such a head AFTER a clean pass there was published, nothing re-runs and
+# the pass stands until the next push, edit, Codex comment or manual
+# dispatch (Codex P1 on .github#55). A workflow_run relay would close it but
+# must live in a second workflow file: this one cannot listen to itself.
+#
+# ── Three things changed from the advisory pilot, all load-bearing ─────────
+# 1. NO EVIDENCE IS `action_required`, NEVER `neutral`. GitHub treats neutral,
+#    skipped and success as passing a required check; the pilot's neutral
+#    "No trusted evidence" would have let an unreviewed PR through.
+# 2. `pull_request_target`, not `pull_request`, so this file and its script
+#    come from the DEFAULT BRANCH, not the PR. Safe because nothing here checks
+#    out or executes PR code: it only reads the API. Do not add a checkout of
+#    the PR head to this workflow.
+# 3. The script is inline, so there is one file to roll out and no script a PR
+#    could swap under a trusted workflow.
+#
+# ── What this does NOT defend against, and what does ─────────────────────
+# `pull_request_review` runs the workflow from the PR's merge ref, and every
+# workflow posts checks as the same GitHub Actions app, so a PR that edits
+# `.github/workflows/` can publish its own `review/verdict`. A dedicated App
+# does not change that: a same-repo PR's workflows can read its key from the
+# repo secrets. The ruleset's `dev-ops` approval on `.github/**` used to cover
+# this; it was removed on 2026-09-29 (no human approval anywhere), so the gap
+# is accepted, not closed. Codex still reviews such a PR (rulesets/README.md).
+#
+# Triggers:
+#   pull_request_target — PR opened/pushed/edited/labelled; waits up to
+#                         WAIT_SECONDS for the reviewer (not on edited,
+#                         labeled or unlabeled), exiting early once evidence
+#                         appears. A documentation-only PR has evidence on the
+#                         first pass; the hold label switches it off and on.
+#   pull_request_review — a review landed or was dismissed (a Codex review on
+#                         the head revokes a pass); re-evaluate immediately.
+#   issue_comment       — Codex created/edited/deleted a PR comment. The event
+#                         carries no head SHA, so it cannot join the per-head
+#                         concurrency group and NEVER publishes. Its `relay`
+#                         job reads the current head and dispatches this
+#                         workflow (workflow_dispatch, pr_number + head_sha),
+#                         which evaluates and publishes like any other run.
+#                         GITHUB_TOKEN may trigger workflow_dispatch (the
+#                         documented exception to its no-recursion rule).
+#   (no workflow_run: GitHub rejects the whole file with "Workflow 'Review
+#   verdict' cannot listen to itself", which stopped every verdict on
+#   2026-09-29. See the fork-review RESIDUAL above.)
+#   push                — this file changed on the default branch. The
+#                         `sweep` job dispatches a re-evaluation for every open
+#                         PR's head, so a verdict published under an older
+#                         policy (e.g. a Greptile-only `success`) does not
+#                         outlive the policy (Codex P1 on .github#55).
+#   workflow_dispatch   — re-evaluate one PR: pr_number AND its head_sha.
+# A new head always gets a new check. Re-runs POST a fresh completed run of
+# the same name; the latest one is what GitHub uses. Each run carries an
+# external_id naming its PR (`<owner/repo>#<pr>:<base>:<head>:review-verdict`),
+# so a consumer can keep two PRs at one head apart (doc-auto-merge.yml does).
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, dismissed]
+  issue_comment:
+    types: [created, edited, deleted]
+  push:
+    paths: [.github/workflows/review-verdict.yml]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: PR number to evaluate
+        required: true
+        type: string
+      head_sha:
+        description: Full head SHA of that PR (joins that commit's concurrency group; a run for a superseded SHA publishes nothing useful)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: read
+  issues: read
+
+concurrency:
+  # INVARIANT: only a run that will publish may enter the shared group. Every
+  # such run re-evaluates from scratch, so whatever it cancels is replaced by
+  # a fresh verdict. A run the job `if` skips (a read-only review on a
+  # fork/Dependabot PR, any issue_comment or push, which only
+  # relay) gets a
+  # throwaway group, because
+  # workflow-level concurrency is applied BEFORE the job `if`: in the shared
+  # group it could cancel a publisher, notably a dismissal re-evaluation, and
+  # publish nothing, leaving a stale `success` as the latest check.
+  # The first operand below MUST equal the job `if` exactly. Change both.
+  #
+  # Shared key = the PR number AND the head SHA, and a run publishes only that
+  # SHA, bound to that PR (see load_pr and the external_id), so key and
+  # publish target always agree. The PR number is part of it because each
+  # verdict is bound to one PR: with the head alone, PR B's publisher would
+  # cancel PR A's at a shared commit and never replace A's verdict, leaving
+  # A's stale success (Codex P1 on .github#76). Evidence for a head is
+  # not monotonic (a dismissed review revokes it), which is why publishers are
+  # serialized with cancel-in-progress rather than allowed to overlap.
+  #
+  # History: .github#35 keyed on the event name (fail-open on dismissal);
+  # #36 round 1 re-read the current head in an old run (published outside its
+  # group); round 2 let skipped check_runs cancel publishers. All Codex finds.
+  #
+  # workflow_dispatch must name the head SHA (input `head_sha`), so a manual
+  # run joins that commit's group and is pinned to it like every other run
+  # (Codex on opportunity-builder#165 / aaa-client-dashboard#243: keyed by PR
+  # number it could publish a stale `success` after a dismissal).
+  group: review-verdict-${{ github.repository }}-${{ (github.event_name != 'issue_comment' && github.event_name != 'push' && (github.event_name != 'pull_request_review' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]'))) && format('{0}-{1}', github.event.pull_request.number || github.event.inputs.pr_number, github.event.pull_request.head.sha || github.event.inputs.head_sha) || format('skipped-{0}', github.run_id) }}
+  cancel-in-progress: true
+
+jobs:
+  # issue_comment only. Codex posts its clean pass as an issue comment, which
+  # carries no head SHA, so this job never evaluates or publishes: it reads
+  # the PR's current head and hands off to a workflow_dispatch run, which
+  # joins that head's concurrency group like every other publisher. Filtered
+  # on the comment's AUTHOR, so a human quoting Codex never triggers it, while
+  # anyone's edit or deletion of a Codex comment does (both can revoke
+  # evidence). No checkout, and no event text is interpolated into the script.
+  relay:
+    if: >
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.comment.user.login == 'chatgpt-codex-connector[bot]'
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Dispatch review/verdict for the PR's current head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh api "/repos/$REPO/pulls/$PR_NUMBER")
+          state=$(echo "$pr_json" | jq -r '.state // empty')
+          head=$(echo "$pr_json" | jq -r '.head.sha // empty')
+          if [ "$state" != "open" ]; then
+            echo "#$PR_NUMBER is ${state:-unreadable}; nothing to re-evaluate."
+            exit 0
+          fi
+          if ! [[ "$head" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not read a head SHA for #$PR_NUMBER."
+            exit 1
+          fi
+          # GITHUB_WORKFLOW_REF = owner/repo/.github/workflows/<file>@<ref>
+          wf="${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
+          wf="${wf%@*}"
+          echo "Dispatching $wf on $DEFAULT_BRANCH for #$PR_NUMBER at ${head:0:7}"
+          gh workflow run "$wf" --repo "$REPO" --ref "$DEFAULT_BRANCH" \
+            -f pr_number="$PR_NUMBER" -f head_sha="$head"
+
+  # push only: this file changed on the default branch. Re-evaluate every
+  # open PR's current head under the new rules. Pushes to other branches
+  # (including PR branches) are ignored.
+  sweep:
+    if: >
+      github.event_name == 'push' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Dispatch review/verdict for every open PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # GITHUB_WORKFLOW_REF = owner/repo/.github/workflows/<file>@<ref>
+          wf="${GITHUB_WORKFLOW_REF#*/.github/workflows/}"
+          wf="${wf%@*}"
+          gh api --paginate "/repos/$REPO/pulls?state=open&per_page=100" \
+            --jq '.[] | "\(.number) \(.head.sha)"' |
+          while read -r pr head; do
+            echo "Dispatching $wf on $DEFAULT_BRANCH for #$pr at ${head:0:7}"
+            gh workflow run "$wf" --repo "$REPO" --ref "$DEFAULT_BRANCH" \
+              -f pr_number="$pr" -f head_sha="$head"
+          done
+
+  publish:
+    # pull_request_review on a fork or Dependabot PR gets a READ-ONLY token, so
+    # it cannot publish; skip it rather than fail. Those PRs get their verdict
+    # from the pull_request_target poll (up to WAIT_SECONDS) or a
+    # workflow_dispatch (the Codex comment relay). Never a pass: a skipped run
+    # publishes nothing, and the head keeps its action_required verdict until
+    # then.
+    if: >
+      github.event_name != 'issue_comment' &&
+      github.event_name != 'push' &&
+      (github.event_name != 'pull_request_review' ||
+       (github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login != 'dependabot[bot]'))
+    runs-on: ubuntu-24.04  # GAAA-3975: pinned until Ubuntu 26.04 is verified
+    steps:
+      # No checkout: this job reads the GitHub API only. Keep it that way;
+      # under pull_request_target a checkout of the PR head would run
+      # untrusted code with a write token.
+      - name: Evaluate and publish review/verdict
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.inputs.pr_number || '' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.inputs.head_sha || '' }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # The one reviewer whose output is evidence (its clean comment) and
+          # whose findings veto. The App slug is checked on every comment.
+          CODEX_BOT: "chatgpt-codex-connector[bot]"
+          CODEX_APP: "chatgpt-codex-connector"
+          # The documentation-only exemption. Same values as doc-auto-merge.yml.
+          DOC_ONLY_PATTERN: '\.(md|markdown)\z'
+          HOLD_LABEL: "no-auto-merge"
+          # Codex notices that are status, not a review: generic skip wording,
+          # plus the texts Codex really posts (case-insensitive): "You have
+          # reached your Codex usage limits for code reviews" (fas-portal#519),
+          # "To use Codex here, create an environment for this repo" and "To use
+          # Codex here, create a Codex account..." (.github#71, aaa-runbooks#165).
+          # The shell default below repeats it; keep the two equal (tested).
+          REVIEW_SKIP_PATTERN: "review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit|reached your codex usage limits?|to use codex here"
+          # Codex lands a few minutes after a push. Other events evaluate once.
+          WAIT_SECONDS: ${{ github.event_name == 'pull_request_target' && '600' || '0' }}
+          # Codex's 👍 lands a few seconds after its summary edit relays here.
+          REACTION_GRACE_SECONDS: "90"
+          PUBLISH: "1"
+        run: |
+          # review/verdict adapter (AAA-728 / AAA-730), canonical copy.
+          #
+          # Reads reviewer output for one PR at one head and publishes a check-run named
+          # `review/verdict` on that head. The `aaa-merge-gates` org ruleset requires it
+          # on the repos it targets. The adapter judges no code; Codex is the
+          # reviewer.
+          #
+          # Evidence (nothing else counts; no reaction but Codex's own 👍 in the
+          # summary form): a clean Codex issue comment naming the head as its
+          # reviewed commit, or Codex's review summary Completed on the head
+          # with its 👍. Any Codex
+          # finding on the head (inline comment or review object) fails the
+          # verdict. Greptile, humans and other bots are never read.
+          #
+          # Fails closed: no evidence means no successful verdict. A vendor renaming a
+          # check or rewording a comment can cost a verdict; it can never buy one.
+          set -euo pipefail
+
+          REPO="${REPO:?REPO is required}"
+          EVENT="${EVENT:-workflow_dispatch}"
+          PR_NUMBER="${PR_NUMBER:-}"
+          HEAD_SHA_HINT="${HEAD_SHA:-}"
+          PR_ACTION="${PR_ACTION:-}"
+          PUBLISH="${PUBLISH:-1}"
+          WAIT_SECONDS="${WAIT_SECONDS:-0}"
+          REACTION_GRACE_SECONDS="${REACTION_GRACE_SECONDS:-90}"
+          CODEX_BOT="${CODEX_BOT:-chatgpt-codex-connector[bot]}"
+          CODEX_APP="${CODEX_APP:-chatgpt-codex-connector}"
+          # \z, not $: jq's $ also matches before a TRAILING newline, and a
+          # filename is a byte string, so anchor at the absolute end.
+          DOC_ONLY_PATTERN="${DOC_ONLY_PATTERN:-\.(md|markdown)\z}"
+          HOLD_LABEL="${HOLD_LABEL:-no-auto-merge}"
+          # Same value as the step env above (AAA-711: skip notices are status,
+          # not a verdict). auto-merge.yml, its old partner, was retired (#65).
+          REVIEW_SKIP_PATTERN="${REVIEW_SKIP_PATTERN:-review (was )?skipped|skipping (this )?review|could not (complete|finish|review)|unable to review|rate.?limit|quota exceeded|spend limit|reached your codex usage limits?|to use codex here}"
+          # The ONE rule for "this Codex review object carries no findings": a
+          # pending review, or a skip notice (REVIEW_SKIP_PATTERN). A jq prelude
+          # every Codex review check uses, so the findings block, evidence 1b and
+          # evidence 2 cannot drift apart (Codex P1 on aios-coffee#137: 1b used
+          # to reject a clean retry over an earlier skip notice on the head).
+          # Call as `carries_no_findings($skip)` on a review object. It decides
+          # nothing about identity, head or dismissal; each caller does that.
+          # A NOTICE-ONLY review carries none either (.github#73): an empty body
+          # whose inline comments (attached as ._comments by load_codex_findings,
+          # for Codex reviews on this head) are all replies to existing threads
+          # or skip notices. Replying to a Codex thread makes Codex post "To use
+          # Codex here, create an environment for this repo" as exactly such a
+          # review, with commit_id = the current head (.github#71 at 17ae535:
+          # 10 of them); it is not a review of the head. Fails closed: comments
+          # never read, or none at all, is not notice-only.
+          # shellcheck disable=SC2016 # $skip is a jq variable, not shell
+          CODEX_REVIEW_JQ='def notice_only($skip): ((.body // "") | test("\\A\\s*\\z"))
+            and ((._comments | type) == "array") and ((._comments | length) > 0)
+            and all(._comments[]; .in_reply_to_id != null or ((.body // "") | test($skip; "i")));
+          def carries_no_findings($skip): .state == "PENDING" or ((.body // "") | test($skip; "i")) or notice_only($skip);'
+
+          CHECK_NAME="review/verdict"
+
+          HEAD_SHA=""
+          SUPERSEDED=0
+          BASE_REF=""
+          BASE_SHA=""
+          PR_CREATED=""
+          PR_STATE=""
+          EVIDENCE=""
+          MISSING_REASONS=()
+          # 1 = the verdict fails for this head: Codex has findings on it, or
+          # they could not be read. Nothing overrides it.
+          CODEX_BLOCKED=0
+          # 1 = the Codex summary shows this head clean in every way except the
+          # 👍, which trails the edit by seconds and fires no event; the main
+          # loop then polls for up to REACTION_GRACE_SECONDS.
+          AWAIT_REACTION=0
+          PR_JSON=""
+          # Documentation-only file-list result for this run's head: "" = not
+          # yet read, "doc" = every file is Markdown, anything else = why not.
+          DOC_FILES_RESULT=""
+          DOC_FILES_COUNT=""
+          # NEVER "neutral": GitHub counts neutral, skipped and success as passing a
+          # required check, so a neutral "no evidence" verdict would let an unreviewed
+          # PR through the ruleset. action_required is completed but not passing.
+          CONCLUSION="action_required"
+          TITLE="Waiting for a clean Codex review"
+
+          fail_closed_reason() {
+            MISSING_REASONS+=("$1")
+          }
+
+          require_config() {
+            if [ -z "${CODEX_BOT// /}" ] || [ -z "${CODEX_APP// /}" ] \
+               || [ -z "${REVIEW_SKIP_PATTERN// /}" ]; then
+              echo "::error::CODEX_BOT / CODEX_APP / REVIEW_SKIP_PATTERN is empty — refusing a successful verdict."
+              fail_closed_reason "adapter configuration is empty, so no verdict can be issued"
+              return 1
+            fi
+            return 0
+          }
+
+          # Resolve the PR this run is about. pull_request_target / pull_request_review /
+          # workflow_dispatch bind by construction and always set PR_NUMBER. The
+          # lookup below is a fail-closed fallback for a run without one: it
+          # refuses when two open PRs share the head (the leak AAA-711 recorded).
+          resolve_pr() {
+            if [ -n "$PR_NUMBER" ]; then
+              return 0
+            fi
+            if [ -z "$HEAD_SHA_HINT" ]; then
+              fail_closed_reason "no pull request number and no head SHA were provided"
+              return 1
+            fi
+            local associated
+            if ! associated=$(gh api --paginate "/repos/$REPO/commits/$HEAD_SHA_HINT/pulls" --jq '.[]' | jq -s '.'); then
+              fail_closed_reason "could not list pull requests for head $HEAD_SHA_HINT"
+              return 1
+            fi
+            local open_at_head
+            open_at_head=$(echo "$associated" | jq --arg sha "$HEAD_SHA_HINT" \
+              '[.[] | select(.state == "open" and .head.sha == $sha)]')
+            local n
+            n=$(echo "$open_at_head" | jq 'length')
+            if [ "$n" -eq 1 ]; then
+              PR_NUMBER=$(echo "$open_at_head" | jq -r '.[0].number')
+              return 0
+            fi
+            if [ "$n" -eq 0 ]; then
+              fail_closed_reason "no open pull request currently has head $HEAD_SHA_HINT"
+              HEAD_SHA="$HEAD_SHA_HINT"
+              return 1
+            fi
+            local listed
+            listed=$(echo "$open_at_head" | jq -r '[.[].number] | map("#\(.)") | join(", ")')
+            fail_closed_reason "head $HEAD_SHA_HINT is in multiple open PRs ($listed), so a check on this commit cannot be attributed to one of them"
+            HEAD_SHA="$HEAD_SHA_HINT"
+            return 1
+          }
+
+          load_pr() {
+            local pr_json
+            if ! pr_json=$(gh api "/repos/$REPO/pulls/$PR_NUMBER"); then
+              fail_closed_reason "could not read pull request #$PR_NUMBER"
+              return 1
+            fi
+            HEAD_SHA=$(echo "$pr_json" | jq -r '.head.sha // empty')
+            BASE_REF=$(echo "$pr_json" | jq -r '.base.ref // empty')
+            BASE_SHA=$(echo "$pr_json" | jq -r '.base.sha // empty')
+            PR_CREATED=$(echo "$pr_json" | jq -r '.created_at // empty')
+            PR_STATE=$(echo "$pr_json" | jq -r '.state // empty')
+            PR_NODE=$(echo "$pr_json" | jq -r '.node_id // empty')
+            PR_COMMIT_COUNT=$(echo "$pr_json" | jq -r '.commits // empty')
+            PR_JSON="$pr_json"
+            if [ -z "$HEAD_SHA" ] || [ "$HEAD_SHA" = "null" ] \
+               || [ -z "$BASE_REF" ] || [ -z "$BASE_SHA" ] || [ -z "$PR_CREATED" ]; then
+              fail_closed_reason "pull request #$PR_NUMBER is missing head SHA, base ref, base SHA, or created_at"
+              return 1
+            fi
+            # A run evaluates and publishes ONLY the commit it was triggered for,
+            # which is the commit its concurrency group is keyed on. If the PR has
+            # moved on, the newer head belongs to a newer run in its own group; this
+            # run must not evaluate or publish there (Codex on .github#36: an old
+            # poll re-reading the current head published outside that head's group).
+            # It publishes action_required on its own, now-superseded commit, which
+            # no longer decides anything, and stops polling.
+            if [ -n "$HEAD_SHA_HINT" ] && [ "$HEAD_SHA" != "$HEAD_SHA_HINT" ]; then
+              fail_closed_reason "this run was triggered for ${HEAD_SHA_HINT:0:7}, but the PR head is now ${HEAD_SHA:0:7}; the newer head is evaluated by its own run"
+              HEAD_SHA="$HEAD_SHA_HINT"
+              SUPERSEDED=1
+              return 1
+            fi
+            return 0
+          }
+
+          # GitHub users who produced the head commit. A fixer (or anyone) is not
+          # trusted evidence for a head they just pushed — independence is load-bearing.
+          last_push_logins_json() {
+            local commit
+            if ! commit=$(gh api "/repos/$REPO/commits/$HEAD_SHA"); then
+              return 1
+            fi
+            echo "$commit" | jq '[.author.login // empty, .committer.login // empty] | map(select(length > 0)) | unique'
+          }
+
+          # Gate the whole verdict on open P0/P1 Codex findings (see the header).
+          # Sets CODEX_BLOCKED=1 on a blocking finding or on anything unreadable,
+          # and CODEX_REVIEWS (REST reviews) for evidence 2.
+          load_codex_findings() {
+            CODEX_BLOCKED=0
+            CODEX_REVIEWS="[]"
+            local reviews ids id cm
+            if ! reviews=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews" --jq '.[]' | jq -s '.'); then
+              CODEX_BLOCKED=1
+              fail_closed_reason "could not read reviews for #$PR_NUMBER, so Codex findings cannot be ruled out"
+              return 0
+            fi
+            # Attach its inline comments (._comments: in_reply_to_id + body) to
+            # every Codex review on this head that is neither pending nor a skip
+            # notice by its body, so carries_no_findings can tell a notice-only
+            # review (a reply under a thread) from a review of the head. Matched
+            # on the login alone, like evidence 1b. Unreadable fails closed.
+            if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" '
+                  .[] | select(.user.login == $c and .commit_id == $sha and .state != "PENDING"
+                               and (((.body // "") | test($skip; "i")) | not)) | .id'); then
+              CODEX_BLOCKED=1
+              fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
+              return 0
+            fi
+            for id in $ids; do
+              if ! [[ "$id" =~ ^[0-9]+$ ]] \
+                 || ! cm=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/reviews/$id/comments" --jq '.[] | {in_reply_to_id, body}' | jq -s '.') \
+                 || ! reviews=$(echo "$reviews" | jq --argjson id "$id" --argjson cm "$cm" 'map(if .id == $id then ._comments = $cm else . end)'); then
+                CODEX_BLOCKED=1
+                fail_closed_reason "could not read the findings of Codex review $id"
+                return 0
+              fi
+            done
+            CODEX_REVIEWS="$reviews"
+            # A Codex review object on this head with no inline comments left:
+            # its findings were deleted, so their severity is unreadable.
+            # A skip notice (rate or usage limit), a notice-only review or a
+            # pending review carries no findings, so it proves no deletion.
+            if ! ids=$(echo "$reviews" | jq -r --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" \
+                  "$CODEX_REVIEW_JQ"'.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
+                                and (carries_no_findings($skip) | not) and ((._comments // []) | length) == 0) | .id'); then
+              CODEX_BLOCKED=1
+              fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
+              return 0
+            fi
+            for id in $ids; do
+              CODEX_BLOCKED=1
+              fail_closed_reason "Codex review $id on this head has no inline findings left (deleted), so their severity cannot be read; push a fix and get a new Codex review"
+              return 0
+            done
+            # Unresolved, not-outdated Codex threads of severity P0/P1 (or no
+            # readable severity), paged 100 at a time.
+            if [ -z "$PR_NODE" ]; then
+              CODEX_BLOCKED=1
+              fail_closed_reason "pull request #$PR_NUMBER has no node_id, so its review threads cannot be read"
+              return 0
+            fi
+            local after="" page=0 page_json blocking total=0
+            local -a after_arg
+            while :; do
+              page=$((page + 1))
+              if [ "$page" -gt 50 ]; then
+                CODEX_BLOCKED=1
+                fail_closed_reason "#$PR_NUMBER has over 5000 review threads"
+                return 0
+              fi
+              if [ -n "$after" ]; then after_arg=(-f after="$after"); else after_arg=(-F after=null); fi
+              # shellcheck disable=SC2016 # $id/$after are GraphQL variables, not shell
+              if ! page_json=$(gh api graphql -f id="$PR_NODE" "${after_arg[@]}" -f query='
+                  query($id: ID!, $after: String) { node(id: $id) { ... on PullRequest {
+                    reviewThreads(first: 100, after: $after) {
+                      pageInfo { hasNextPage endCursor }
+                      nodes { isResolved isOutdated
+                        comments(first: 1) { nodes { author { __typename login } path body } } } } } } }') \
+                 || ! echo "$page_json" | jq -e '(.data.node.reviewThreads.nodes | type == "array")
+                        and (.data.node.reviewThreads.pageInfo.hasNextPage | type == "boolean")' >/dev/null 2>&1; then
+                CODEX_BLOCKED=1
+                fail_closed_reason "could not read the review threads of #$PR_NUMBER, so Codex findings cannot be ruled out"
+                return 0
+              fi
+              if ! blocking=$(echo "$page_json" | jq --arg u "$CODEX_BOT" '
+                  def sev: ((.comments.nodes[0].body // "") | [scan("!\\[P([0-3]) Badge\\]") | .[0]] | first) // "?";
+                  [.data.node.reviewThreads.nodes[] | (.comments.nodes[0] // {}) as $c
+                   | select(.isResolved == false and .isOutdated == false
+                            and ($c.author.__typename // "") == "Bot"
+                            and (($c.author.login // "") == $u or (($c.author.login // "") + "[bot]") == $u)
+                            and (sev | IN("2", "3") | not))] | length'); then
+                CODEX_BLOCKED=1
+                fail_closed_reason "could not evaluate the review threads of #$PR_NUMBER"
+                return 0
+              fi
+              total=$((total + blocking))
+              [ "$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.hasNextPage')" = "true" ] || break
+              after=$(echo "$page_json" | jq -r '.data.node.reviewThreads.pageInfo.endCursor // empty')
+              if [ -z "$after" ]; then
+                CODEX_BLOCKED=1
+                fail_closed_reason "review threads of #$PR_NUMBER report another page but no cursor"
+                return 0
+              fi
+            done
+            if [ "$total" -gt 0 ]; then
+              CODEX_BLOCKED=1
+              fail_closed_reason "${total} unresolved P0/P1 Codex finding(s) (or findings with no readable severity) still apply; fix them or resolve the thread(s), then re-run the verdict"
+            fi
+            return 0
+          }
+
+          # The latest retarget or head force-push, as TIMELINE (raw GraphQL)
+          # and CUTOFF (ISO time, empty if none). Returns 1 when unreadable.
+          load_cutoff() {
+            if [ -z "$PR_NODE" ]; then
+              fail_closed_reason "pull request #$PR_NUMBER has no node_id, so its retarget and force-push history cannot be read"
+              return 1
+            fi
+            # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
+            if ! TIMELINE=$(gh api graphql -f id="$PR_NODE" -f query='
+                query($id: ID!) { node(id: $id) { ... on PullRequest {
+                  timelineItems(last: 100, itemTypes: [BASE_REF_CHANGED_EVENT, HEAD_REF_FORCE_PUSHED_EVENT]) {
+                    pageInfo { hasPreviousPage }
+                    nodes {
+                      ... on BaseRefChangedEvent { createdAt }
+                      ... on HeadRefForcePushedEvent { createdAt beforeCommit { oid } } } } } } }'); then
+              fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
+              return 1
+            fi
+            if ! CUTOFF=$(echo "$TIMELINE" | jq -er '
+                .data.node.timelineItems
+                | if .pageInfo.hasPreviousPage != false then error("more than 100 events") else .nodes end
+                | if type != "array" then error("no timeline")
+                  else (map(.createdAt // error("event without createdAt")) | max // "") end'); then
+              fail_closed_reason "could not read the retarget and head force-push history of #$PR_NUMBER"
+              return 1
+            fi
+            return 0
+          }
+
+          # Every commit this PR has carried: its current commit list, plus each
+          # head a force-push replaced and that head's history past the base.
+          # Sets CARRIED_SHAS (JSON array). Needs load_cutoff's TIMELINE. Used
+          # to show that a short commit prefix in Codex output names only this
+          # head (Greptile P1 on aios-coffee#122, Codex P1 on
+          # opportunity-builder#178). Returns 1, with a reason, when unreadable.
+          load_carried_shas() {
+            # The list endpoint stops at 250, so a longer PR refuses.
+            if ! [[ "$PR_COMMIT_COUNT" =~ ^[0-9]+$ ]] || [ "$PR_COMMIT_COUNT" -gt 250 ]; then
+              fail_closed_reason "#$PR_NUMBER has ${PR_COMMIT_COUNT:-an unknown number of} commits, too many to show a short commit prefix names only this head"
+              return 1
+            fi
+            local pr_shas
+            if ! pr_shas=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/commits" --jq '.[]' | jq -s 'map(.sha)'); then
+              fail_closed_reason "could not list the commits of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$pr_shas" | jq 'length')" -ne "$PR_COMMIT_COUNT" ]; then
+              fail_closed_reason "the commit list of #$PR_NUMBER is incomplete, so a short commit prefix cannot be shown to name only this head"
+              return 1
+            fi
+            # Add every head a force-push replaced, and its history past the base.
+            local replaced oid history
+            if ! replaced=$(echo "$TIMELINE" | jq -r '
+                [.data.node.timelineItems.nodes[] | select(has("beforeCommit"))
+                  | (.beforeCommit.oid // error("force-push without a before commit"))] | unique | .[]'); then
+              fail_closed_reason "a head force-push on #$PR_NUMBER does not record the commit it replaced"
+              return 1
+            fi
+            for oid in $replaced; do
+              # Paged: one response lists at most 250 commits (Greptile P1 on
+              # aios-coffee#122); every page repeats total_commits.
+              if ! history=$(gh api --paginate "/repos/$REPO/compare/$BASE_SHA...$oid?per_page=100" \
+                  | jq -es --arg oid "$oid" '([.[].commits[].sha] | unique) as $s
+                      | if ($s | length) == .[0].total_commits
+                        then [$oid] + $s else error("incomplete") end'); then
+                fail_closed_reason "could not list the full history of ${oid:0:10}, a head replaced by a force-push, so a short commit prefix cannot be shown to name only this head"
+                return 1
+              fi
+              pr_shas=$(jq -n --argjson a "$pr_shas" --argjson b "$history" '$a + $b | unique')
+            done
+            CARRIED_SHAS="$pr_shas"
+            return 0
+          }
+
+          # Evidence 2: a Codex review object on this head (see the header).
+          evidence_from_codex_review() {
+            if [ "$CODEX_BLOCKED" = "1" ]; then
+              return 1
+            fi
+            local candidates
+            if ! candidates=$(echo "$CODEX_REVIEWS" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" "$CODEX_REVIEW_JQ"'
+                [.[] | select(.user.login == $c and .user.type == "Bot" and .commit_id == $sha
+                              and .state != "DISMISSED"
+                              and (carries_no_findings($skip) | not))
+                     | {submitted_at}]'); then
+              fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+              fail_closed_reason "no Codex review object on this head"
+              return 1
+            fi
+            local pushers
+            if ! pushers=$(last_push_logins_json); then
+              fail_closed_reason "could not read the author of head $HEAD_SHA"
+              return 1
+            fi
+            if echo "$pushers" | jq -e --arg c "$CODEX_BOT" 'index($c)' >/dev/null; then
+              fail_closed_reason "the author of the last push is ${CODEX_BOT}, who is not trusted evidence for this head"
+              return 1
+            fi
+            load_cutoff || return 1
+            if [ -n "$CUTOFF" ]; then
+              if ! candidates=$(echo "$candidates" | jq --arg cut "$CUTOFF" '
+                  def parse: sub("\\.[0-9]+";"") | sub("\\+00:00$";"Z") | fromdateiso8601;
+                  ($cut | parse) as $c | map(select(((.submitted_at // "") | parse) > $c))'); then
+                fail_closed_reason "could not compare Codex review times with the retarget and head force-push history"
+                return 1
+              fi
+              if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+                fail_closed_reason "every Codex review of this head predates the latest retarget or head force-push (${CUTOFF})"
+                return 1
+              fi
+            fi
+            EVIDENCE="a Codex review of this head (commit_id ${HEAD_SHA:0:10}) by ${CODEX_BOT}, submitted after the latest retarget or head force-push, with no unresolved P0/P1 Codex finding; P2/P3 findings do not block"
+            return 0
+          }
+
+          # The only evidence: Codex's clean pass, which Codex posts as an ISSUE comment,
+          # not a review object. Every test below must hold; any doubt refuses.
+          #  - author is the Codex App's bot account (a [bot] login cannot belong
+          #    to a person) AND the comment was posted via the Codex App;
+          #  - body OPENS with the clean-result sentence, so a quote inside a
+          #    longer comment never matches, and does not match REVIEW_SKIP_PATTERN;
+          #  - exactly one "Reviewed commit" SHA, 10-40 hex, a prefix of this head;
+          #  - never edited (a writer can edit another user's comment), read from
+          #    GraphQL lastEditedAt. An edit fires issue_comment `edited`, so a
+          #    pass already published is re-evaluated. Minimising (hiding) is
+          #    deliberately NOT a revocation: it fires no event, so the rule could
+          #    not be enforced after a pass was published (Codex P1 on
+          #    aaa-client-dashboard#252), and hiding a clean bot comment asserts
+          #    nothing about the code. Revoke a pass by pushing, or by deleting the
+          #    comment (issue_comment `deleted` re-evaluates);
+          #  - Codex is not an author of the head commit;
+          #  - posted AFTER the PR's latest retarget and head force-push, so a
+          #    pass on the same head against another base, or on a head a
+          #    force-push replaced, never carries over (Codex P1 on
+          #    aios-coffee#122). Read from the typed GraphQL timeline. Both events
+          #    re-run this workflow (`edited`, `synchronize`). A base force-push
+          #    does not, so, like a base advance, it is left to the Base-sha the
+          #    verdict records rather than a rule no run could enforce after a
+          #    pass was published (Codex P1 on .github#48);
+          #  - no OTHER commit this PR has ever carried starts with the Reviewed
+          #    commit prefix (Greptile P1 on aios-coffee#122). A 10-hex collision
+          #    is a cheap birthday search for whoever pushes both commits. Every
+          #    earlier head is either still in the PR's commit list (fast-forward)
+          #    or in the history of a head a force-push replaced, which the
+          #    timeline records by SHA. The time rule alone does not cover the
+          #    latter: a review of head A can still be running when a colliding
+          #    head B is force-pushed, and its comment then lands after the push
+          #    (Codex P1 on opportunity-builder#178).
+          evidence_from_codex_comment() {
+            if [ "$CODEX_BLOCKED" = "1" ]; then
+              return 1
+            fi
+            local comments candidates n
+            if ! comments=$(gh api --paginate "/repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[]' | jq -s '.'); then
+              fail_closed_reason "could not read issue comments for #$PR_NUMBER"
+              return 1
+            fi
+            if ! candidates=$(echo "$comments" | jq --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
+                  --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" '
+              def reviewed: [scan("\\*\\*Reviewed commit:\\*\\* `([0-9a-f]{10,40})`") | .[0]];
+              [.[]
+                | select(
+                    .user.login == $bot and .user.type == "Bot"
+                    and (.performed_via_github_app.slug // "") == $app
+                    and ((.body // "") | test("\\ACodex Review: Didn.t find any major issues"))
+                    and (((.body // "") | test($skip; "i")) | not)
+                    and ((.body // "") | reviewed | length == 1)
+                    and ((.body // "") | reviewed | .[0] as $s | $sha | startswith($s))
+                  )
+                | {node_id, created_at, reviewed: ((.body // "") | reviewed | .[0])}
+              ] | sort_by(.created_at) | reverse'); then
+              fail_closed_reason "could not evaluate Codex comments for #$PR_NUMBER"
+              return 1
+            fi
+            n=$(echo "$candidates" | jq 'length')
+            if [ "$n" -eq 0 ]; then
+              fail_closed_reason "no clean Codex result names this head as its reviewed commit"
+              return 1
+            fi
+
+            local pushers
+            if ! pushers=$(last_push_logins_json); then
+              fail_closed_reason "could not read the author of head $HEAD_SHA"
+              return 1
+            fi
+            if echo "$pushers" | jq -e --arg c "$CODEX_BOT" 'index($c)' >/dev/null; then
+              fail_closed_reason "the author of the last push is ${CODEX_BOT}, who is not trusted evidence for this head"
+              return 1
+            fi
+
+            # Bind to this base and this line of heads: only comments posted after
+            # the latest retarget or head force-push count.
+            load_cutoff || return 1
+            local cutoff="$CUTOFF"
+            if [ -n "$cutoff" ]; then
+              # Strictly after: a comment in the same second as the event refuses.
+              if ! candidates=$(echo "$candidates" | jq --arg cut "$cutoff" '
+                  def parse: sub("\\.[0-9]+";"") | sub("\\+00:00$";"Z") | fromdateiso8601;
+                  ($cut | parse) as $c | map(select((.created_at | parse) > $c))'); then
+                fail_closed_reason "could not compare Codex comment times with the retarget and head force-push history"
+                return 1
+              fi
+              if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+                fail_closed_reason "every clean Codex comment naming this head predates the latest retarget or head force-push (${cutoff}), so it may cover a different diff"
+                return 1
+              fi
+            fi
+
+            # A Reviewed commit prefix must name only this head among the
+            # commits this PR has carried.
+            load_carried_shas || return 1
+            local pr_shas="$CARRIED_SHAS"
+            if ! candidates=$(echo "$candidates" | jq --argjson shas "$pr_shas" --arg sha "$HEAD_SHA" '
+                map(.reviewed as $r | select([$shas[] | select(. != $sha and startswith($r))] | length == 0))'); then
+              fail_closed_reason "could not check Codex Reviewed commit prefixes against the commits of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+              fail_closed_reason "the Reviewed commit prefix in every clean Codex comment also matches another commit this PR has carried, so it does not identify this head"
+              return 1
+            fi
+
+            local node meta ok
+            for node in $(echo "$candidates" | jq -r '.[].node_id'); do
+              # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
+              if ! meta=$(gh api graphql -f id="$node" -f query='
+                  query($id: ID!) { node(id: $id) { ... on IssueComment {
+                    lastEditedAt author { login } } } }'); then
+                continue
+              fi
+              ok=$(echo "$meta" | jq -r --arg app "$CODEX_APP" '
+                .data.node as $c
+                | if $c == null then "no"
+                  elif ($c.author.login // "") != $app then "no"
+                  elif $c.lastEditedAt != null then "no"
+                  else "yes" end')
+              if [ "$ok" = "yes" ]; then
+                EVIDENCE="a clean Codex result for this head: an unedited issue comment by ${CODEX_BOT} (posted via the ${CODEX_APP} app) whose Reviewed commit is a prefix of ${HEAD_SHA:0:10} and of no other commit this PR has carried, posted after the latest retarget or head force-push, and no unresolved P0/P1 Codex finding"
+                return 0
+              fi
+            done
+            fail_closed_reason "clean Codex comment(s) name this head but were edited or unreadable, so they do not count"
+            return 1
+          }
+
+          # Evidence 1b: Codex's clean pass in its CURRENT form (observed from
+          # 2026-09-29): Codex no longer always posts the "Didn't find any major
+          # issues" comment. It keeps one live "Codex Review Summary" issue
+          # comment whose table row turns to Completed with the reviewed short
+          # SHA, and reacts 👍 on the PR when every review finished with no
+          # findings (its own text: "reacts with 👍 once all reviews finish with
+          # no findings"). Survey of 120 org PRs, 2026-10-01: 106 of 106
+          # Completed-on-head rows with no Codex review on the head carried a
+          # Codex 👍 created after the head was pushed; 10 of 10 with a findings
+          # review on the head had none. Every test below must hold:
+          #  - the comment is by the Codex App's bot account, posted via the
+          #    App, and OPENS with Codex's summary marker;
+          #  - its CURRENT text is Codex's own: never edited, or last edited by
+          #    the Codex App (GraphQL editor and newest userContentEdit). The
+          #    table is edited by design (Running -> Completed), so "never
+          #    edited" cannot apply; a writer's edit makes them the editor and
+          #    refuses;
+          #  - the table has at least one review row and EVERY row is
+          #    "✅ **Completed** <time>" naming exactly one commit, a 7-40 hex
+          #    prefix of this head and of no other commit this PR has carried;
+          #  - the 👍 (+1) reaction on the PR by the Codex bot exists, created at
+          #    or after the row's completion second. A reaction cannot be made
+          #    in another account's name, so this is the part no writer can
+          #    forge; it is also Codex's only "no findings" signal in this form
+          #    (Completed alone also follows a findings review);
+          #  - no Codex inline comment and no Codex review object that carries
+          #    findings on this head: those are judged by evidence 2 and the
+          #    P0/P1 block instead, never by the summary row. A pending review or
+          #    a skip notice carries none (carries_no_findings) and is ignored;
+          #  - Codex is not an author of the head commit;
+          #  - the row's completion time and the 👍 are both after the latest
+          #    retarget or head force-push.
+          # The 👍 can trail the "Completed" edit by a few seconds and fires no
+          # event, so evaluate_once sets AWAIT_REACTION when it alone is
+          # missing and the main loop polls for up to REACTION_GRACE_SECONDS.
+          # RESIDUAL, accepted: the row's prefix is 7 hex, not 10, so the
+          # base-moves-to-contain-the-reviewed-commit residual above needs a
+          # cheaper (28-bit) precomputed collision. Every other step is
+          # unchanged.
+          evidence_from_codex_summary() {
+            if [ "$CODEX_BLOCKED" = "1" ]; then
+              return 1
+            fi
+            local comments candidates n
+            if ! comments=$(gh api --paginate "/repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[]' | jq -s '.'); then
+              fail_closed_reason "could not read issue comments for #$PR_NUMBER"
+              return 1
+            fi
+            # Per comment: the review rows of its table, each parsed strictly.
+            # A row that does not parse yields null, which refuses the comment.
+            if ! candidates=$(echo "$comments" | jq --arg bot "$CODEX_BOT" --arg app "$CODEX_APP" \
+                  --arg sha "$HEAD_SHA" '
+              def rows: [split("\n")[] | select(startswith("|"))] | .[2:]
+                | map(capture("\\A\\| [^|]+ \\| ✅ \\*\\*Completed\\*\\* <relative-time datetime=\"(?<at>[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\\.[0-9]+)?Z\">[^|<]*</relative-time> \\| `(?<sha>[0-9a-f]{7,40})` \\| [^|]+ \\|\\z") // null);
+              [.[]
+                | select(
+                    .user.login == $bot and .user.type == "Bot"
+                    and (.performed_via_github_app.slug // "") == $app
+                    and ((.body // "") | test("\\A<!-- codex-pull-request-review-summary -->\n")))
+                | ((.body // "") | rows) as $r
+                | select(($r | length) > 0 and all($r[]; . != null and (.sha as $s | $sha | startswith($s))))
+                | {node_id, shas: ($r | map(.sha) | unique), completed: ($r | map(.at + "Z") | max)}
+              ]'); then
+              fail_closed_reason "could not evaluate the Codex review summary for #$PR_NUMBER"
+              return 1
+            fi
+            n=$(echo "$candidates" | jq 'length')
+            if [ "$n" -eq 0 ]; then
+              fail_closed_reason "no Codex review summary shows a Completed review of this head"
+              return 1
+            fi
+
+            # Findings on this head go to evidence 2 and the P0/P1 block. A Codex
+            # review object that carries no findings (pending, or a skip notice
+            # such as a usage limit; carries_no_findings, the rule
+            # load_codex_findings uses) is not one: an earlier attempt that
+            # produced nothing must not veto the clean retry (Codex P1 on
+            # aios-coffee#137). Matched on the login alone, never the type, so
+            # a type change can only send more reviews down this refusal. A
+            # DISMISSED review that carries findings still refuses: dismissal
+            # revokes a review as evidence (evidence 2), it does not turn its
+            # findings into a clean pass.
+            local findings_review
+            if ! findings_review=$(echo "$CODEX_REVIEWS" | jq --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" --arg skip "$REVIEW_SKIP_PATTERN" "$CODEX_REVIEW_JQ"'
+                any(.[]; .user.login == $c and .commit_id == $sha and (carries_no_findings($skip) | not))'); then
+              fail_closed_reason "could not evaluate Codex's reviews for #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$findings_review" != "false" ]; then
+              fail_closed_reason "Codex posted a review on this head, so its summary row is not a clean pass"
+              return 1
+            fi
+            local inline
+            if ! inline=$(gh api --paginate "/repos/$REPO/pulls/$PR_NUMBER/comments" --jq '.[]' | jq -s --arg c "$CODEX_BOT" --arg sha "$HEAD_SHA" '
+                [.[] | select(.user.login == $c and ((.original_commit_id // "") == $sha or (.commit_id // "") == $sha and (.original_commit_id // "") == ""))] | length'); then
+              fail_closed_reason "could not read the inline comments of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$inline" != "0" ]; then
+              fail_closed_reason "Codex left inline comment(s) on this head, so its summary row is not a clean pass"
+              return 1
+            fi
+
+            local pushers
+            if ! pushers=$(last_push_logins_json); then
+              fail_closed_reason "could not read the author of head $HEAD_SHA"
+              return 1
+            fi
+            if echo "$pushers" | jq -e --arg c "$CODEX_BOT" 'index($c)' >/dev/null; then
+              fail_closed_reason "the author of the last push is ${CODEX_BOT}, who is not trusted evidence for this head"
+              return 1
+            fi
+
+            load_cutoff || return 1
+            local cutoff="$CUTOFF"
+            local parse='def parse: sub("\\.[0-9]+";"") | sub("\\+00:00$";"Z") | fromdateiso8601;'
+            if [ -n "$cutoff" ]; then
+              if ! candidates=$(echo "$candidates" | jq --arg cut "$cutoff" "$parse"'
+                  ($cut | parse) as $c | map(select((.completed | parse) > $c))'); then
+                fail_closed_reason "could not compare the Codex summary time with the retarget and head force-push history"
+                return 1
+              fi
+              if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+                fail_closed_reason "the Codex review summary for this head completed before the latest retarget or head force-push (${cutoff}), so it may cover a different diff"
+                return 1
+              fi
+            fi
+
+            load_carried_shas || return 1
+            if ! candidates=$(echo "$candidates" | jq --argjson shas "$CARRIED_SHAS" --arg sha "$HEAD_SHA" '
+                map(select(all(.shas[]; . as $r | [$shas[] | select(. != $sha and startswith($r))] | length == 0)))'); then
+              fail_closed_reason "could not check the Codex summary commit prefix against the commits of #$PR_NUMBER"
+              return 1
+            fi
+            if [ "$(echo "$candidates" | jq 'length')" -eq 0 ]; then
+              fail_closed_reason "the commit prefix in the Codex review summary also matches another commit this PR has carried, so it does not identify this head"
+              return 1
+            fi
+
+            # Matched on the login alone: the reactions API reports the Codex
+            # bot as type "User" (checked 2026-10-01 on opportunity-builder#193),
+            # unlike the comments and reviews APIs. A "[bot]" login is still
+            # unforgeable: only a GitHub App account can carry that suffix.
+            local reactions
+            if ! reactions=$(gh api --paginate "/repos/$REPO/issues/$PR_NUMBER/reactions?content=%2B1&per_page=100" --jq '.[]' | jq -s --arg c "$CODEX_BOT" '
+                [.[] | select(.user.login == $c and .content == "+1") | .created_at]'); then
+              fail_closed_reason "could not read the reactions on #$PR_NUMBER"
+              return 1
+            fi
+
+            local node meta ok completed
+            for node in $(echo "$candidates" | jq -r '.[].node_id'); do
+              # shellcheck disable=SC2016 # $id is a GraphQL variable, not shell
+              if ! meta=$(gh api graphql -f id="$node" -f query='
+                  query($id: ID!) { node(id: $id) { ... on IssueComment {
+                    lastEditedAt author { login } editor { login }
+                    userContentEdits(first: 1) { nodes { editor { login } } } } } }'); then
+                continue
+              fi
+              ok=$(echo "$meta" | jq -r --arg app "$CODEX_APP" '
+                .data.node as $c
+                | if $c == null then "no"
+                  elif ($c.author.login // "") != $app then "no"
+                  elif $c.lastEditedAt == null then "yes"
+                  elif ($c.editor.login // "") != $app then "no"
+                  elif (($c.userContentEdits.nodes // []) | length) == 0 then "no"
+                  elif ($c.userContentEdits.nodes[0].editor.login // "") != $app then "no"
+                  else "yes" end')
+              if [ "$ok" != "yes" ]; then
+                continue
+              fi
+              completed=$(echo "$candidates" | jq -r --arg node "$node" '.[] | select(.node_id == $node) | .completed')
+              if ! echo "$reactions" | jq -e --arg fin "$completed" --arg cut "$cutoff" "$parse"'
+                  ($fin | parse) as $d
+                  | any(.[]; (parse) as $t | $t >= $d and ($cut == "" or $t > ($cut | parse)))' >/dev/null; then
+                AWAIT_REACTION=1
+                fail_closed_reason "the Codex review summary shows this head Completed, but Codex has not reacted 👍 (no findings) since it completed"
+                return 1
+              fi
+              EVIDENCE="a clean Codex result for this head: the Codex review summary (by ${CODEX_BOT}, last edited by the ${CODEX_APP} app) shows every review Completed on ${HEAD_SHA:0:7}, a prefix of no other commit this PR has carried, Codex reacted 👍 (no findings) after it completed, Codex left no review or inline comment on this head, all after the latest retarget or head force-push, and no unresolved P0/P1 Codex finding"
+              return 0
+            done
+            fail_closed_reason "the Codex review summary naming this head was last edited by someone other than Codex, or is unreadable, so it does not count"
+            return 1
+          }
+
+          # Evidence 0: the documentation-only exemption (Brad, 2026-09-28). A PR
+          # whose every changed file is Markdown needs no review. Fails closed:
+          # any doubt about the file list refuses the exemption, and the PR then
+          # needs a clean Codex pass like any other.
+          #  - the file list comes from an immutable base/head compare, never
+          #    the PR's live head. Compare returns at most 300 files, so 300 or
+          #    more refuses. The count must equal `changed_files`;
+          #  - every filename AND every previous_filename (renames) must end in
+          #    .md or .markdown; a rename from app.py to app.md is code
+          #    leaving the tree;
+          #  - not a draft; no HOLD_LABEL; head branch in this repository (a
+          #    fork's PR is never exempt).
+          # A live /pulls/N/files read can follow a different head from the one
+          # load_pr captured, then publish a false success on the old head.
+          # The pinned compare closes that race; a retarget fires `edited`.
+          evidence_from_doc_only() {
+            local files verdict draft held head_repo
+            if [ -z "$DOC_FILES_RESULT" ]; then
+              local changed
+              changed=$(echo "$PR_JSON" | jq -r '.changed_files // empty')
+              if ! [[ "$changed" =~ ^[0-9]+$ ]]; then
+                DOC_FILES_RESULT="the pull request does not report how many files it changes"
+              elif [ "$changed" -eq 0 ]; then
+                DOC_FILES_RESULT="the pull request changes no files"
+              elif [ "$changed" -ge 300 ]; then
+                DOC_FILES_RESULT="the pull request changes ${changed} files, at or past the 300 the compare can return, so it cannot be shown to be all Markdown"
+              elif ! files=$(gh api "/repos/$REPO/compare/$BASE_SHA...$HEAD_SHA"); then
+                DOC_FILES_RESULT="could not read the changed files for pinned base/head of #$PR_NUMBER"
+              elif ! verdict=$(echo "$files" | jq -r --argjson n "$changed" --arg pat "$DOC_ONLY_PATTERN" --arg base "$BASE_SHA" '
+                  # The compare URL already pins the head SHA. Its commits list
+                  # may be only the first page, so its last item need not be HEAD.
+                  if .base_commit.sha != $base
+                    then "the compare does not identify the captured base"
+                  elif (.files | type) != "array" then "the changed-file list is not a list"
+                  elif (.files | length) != $n then "the changed-file list holds \(.files | length) of \($n) files, so it is incomplete"
+                  elif any(.files[]; (.filename | type) != "string" or .filename == "") then "a changed file has no name"
+                  else
+                    [.files[] | .filename, (.previous_filename // empty)]
+                    | map(select(type != "string" or (test($pat) | not)))
+                    | if length == 0 then "doc"
+                      else "\(length) changed path(s) are not Markdown, e.g. \(.[0] | tostring | .[0:120])" end
+                  end'); then
+                DOC_FILES_RESULT="could not classify the changed files of #$PR_NUMBER"
+              else
+                DOC_FILES_RESULT="$verdict"
+                DOC_FILES_COUNT="$changed"
+              fi
+            fi
+            if [ "$DOC_FILES_RESULT" != "doc" ]; then
+              fail_closed_reason "not documentation-only: ${DOC_FILES_RESULT}"
+              return 1
+            fi
+            draft=$(echo "$PR_JSON" | jq -r 'if .draft == false then "no" else "yes" end')
+            held=$(echo "$PR_JSON" | jq -r --arg l "$HOLD_LABEL" '
+              if (.labels | type) != "array" then "unreadable"
+              elif any(.labels[]; .name == $l) then "yes" else "no" end')
+            head_repo=$(echo "$PR_JSON" | jq -r '.head.repo.full_name // empty')
+            if [ "$draft" != "no" ]; then
+              fail_closed_reason "documentation-only, but a draft never takes the documentation-only exemption"
+              return 1
+            fi
+            if [ "$held" != "no" ]; then
+              fail_closed_reason "documentation-only, but the ${HOLD_LABEL} label is on it (or its labels could not be read), which switches the exemption off"
+              return 1
+            fi
+            if [ "$head_repo" != "$REPO" ]; then
+              fail_closed_reason "documentation-only, but the branch comes from ${head_repo:-an unreadable repository}, not ${REPO}; a fork's PR is never exempt"
+              return 1
+            fi
+            EVIDENCE="documentation-only PR: no review required by policy (Brad, 2026-09-28). All ${DOC_FILES_COUNT} changed files, and the previous name of every renamed one, are Markdown (.md, .markdown; not .mdx); the list was read from pinned base ${BASE_SHA:0:7} and head ${HEAD_SHA:0:7}; not a draft; no ${HOLD_LABEL} label; same-repository branch"
+            return 0
+          }
+
+          evaluate_once() {
+            EVIDENCE=""
+            MISSING_REASONS=()
+            CONCLUSION="action_required"
+            TITLE="Waiting for a clean Codex review"
+            CODEX_BLOCKED=0
+            AWAIT_REACTION=0
+
+            # Identity first so a fail-closed verdict can still land on the head SHA.
+            if ! resolve_pr; then
+              return 0
+            fi
+            if ! load_pr; then
+              return 0
+            fi
+
+            require_config || true
+            if [ ${#MISSING_REASONS[@]} -gt 0 ]; then
+              return 0
+            fi
+
+            if [ "$PR_STATE" != "open" ]; then
+              if [ "$PUBLISH" = "1" ]; then
+                fail_closed_reason "pull request #$PR_NUMBER is $PR_STATE"
+                return 0
+              fi
+              echo "::notice::#$PR_NUMBER is $PR_STATE — evaluating anyway because PUBLISH=0."
+            fi
+
+            # A documentation-only PR needs no review (Brad, 2026-09-28).
+            if evidence_from_doc_only; then
+              CONCLUSION="success"
+              TITLE="Documentation only: no review required"
+              return 0
+            fi
+            # Codex is the one reviewer. An open P0/P1 Codex finding fails the
+            # verdict; only Codex's review of this head can pass it. Greptile,
+            # humans and other bots are not read at all.
+            load_codex_findings
+            if [ "$CODEX_BLOCKED" = "1" ]; then
+              TITLE="Open P0/P1 Codex findings"
+              return 0
+            fi
+            if evidence_from_codex_comment; then
+              CONCLUSION="success"
+              TITLE="Reviewed by Codex"
+              return 0
+            fi
+            if evidence_from_codex_summary; then
+              CONCLUSION="success"
+              TITLE="Reviewed by Codex"
+              return 0
+            fi
+            if evidence_from_codex_review; then
+              CONCLUSION="success"
+              TITLE="Reviewed by Codex"
+              return 0
+            fi
+            fail_closed_reason "only Codex's review of this head counts; Greptile, human approvals and any reaction but Codex's own 👍 on a Completed summary are not evidence"
+            return 0
+          }
+
+          build_summary() {
+            local evidence_text missing_text
+            if [ -n "$EVIDENCE" ]; then
+              evidence_text="$EVIDENCE"
+            else
+              if [ ${#MISSING_REASONS[@]} -eq 0 ]; then
+                missing_text="no clean Codex pass on this head was found"
+              else
+                missing_text=$(printf '%s; ' "${MISSING_REASONS[@]}" | sed 's/; $//')
+              fi
+              evidence_text="no successful verdict. ${missing_text}"
+            fi
+
+            cat <<EOF
+          \`review/verdict\` (AAA-728). Required by the \`aaa-merge-gates\` ruleset on the repos it targets.
+
+          - **PR:** #${PR_NUMBER:-unknown}
+          - **Base-ref:** ${BASE_REF:-unknown}
+          - **Base-sha:** ${BASE_SHA:-unknown}
+          - **Head-sha:** ${HEAD_SHA:-unknown}
+          - **Evidence:** ${evidence_text}
+
+          PR: ${PR_NUMBER:-}
+          Base-ref: ${BASE_REF:-}
+          Base-sha: ${BASE_SHA:-}
+          Head-sha: ${HEAD_SHA:-}
+          Evidence: ${evidence_text}
+          EOF
+          }
+
+          publish_check() {
+            local summary title conclusion sha
+            sha="${HEAD_SHA:-$HEAD_SHA_HINT}"
+            if [ -z "$sha" ] || [ "$sha" = "null" ]; then
+              echo "::error::No head SHA to publish $CHECK_NAME on."
+              return 1
+            fi
+            summary=$(build_summary)
+            title="$TITLE"
+            conclusion="$CONCLUSION"
+            if [ ${#title} -gt 240 ]; then
+              title="${title:0:237}..."
+            fi
+
+            echo "Publishing $CHECK_NAME on ${sha:0:7} conclusion=$conclusion"
+            echo "$summary"
+
+            if [ "$PUBLISH" != "1" ]; then
+              echo "PUBLISH=0 — not writing a check-run."
+              return 0
+            fi
+
+            # Bound to its PR by external_id, in the delivery gate's candidate-key
+            # form `<owner/repo>#<pr>:<base sha>:<head sha>:<tag>`: two open PRs at
+            # one head commit each get their own review/verdict, and
+            # doc-auto-merge.yml ignores a run that names another PR (Codex on
+            # aios-coffee#135, discussion_r4159188087). With no PR number (a
+            # failed lookup) the run stays unbound, and it is never a success.
+            # external_id is opaque to rulesets: GitHub enforces the newest run
+            # of this name on the commit, so doc-auto-merge.yml also waits while
+            # that newest run is another PR's and has not passed (.github#76).
+            local payload external_id=""
+            if [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]; then
+              external_id="${REPO}#${PR_NUMBER}:${BASE_SHA:-unknown}:${sha}:review-verdict"
+            fi
+            payload=$(jq -n \
+              --arg name "$CHECK_NAME" \
+              --arg external_id "$external_id" \
+              --arg sha "$sha" \
+              --arg conclusion "$conclusion" \
+              --arg title "$title" \
+              --arg summary "$summary" \
+              --arg details "${DETAILS_URL:-https://github.com/$REPO/pull/${PR_NUMBER:-}}" \
+              '{
+                name: $name,
+                head_sha: $sha,
+                status: "completed",
+                conclusion: $conclusion,
+                details_url: $details,
+                output: { title: $title, summary: $summary }
+              } + (if $external_id == "" then {} else {external_id: $external_id} end)')
+            echo "$payload" | gh api -X POST "/repos/$REPO/check-runs" --input - >/dev/null
+          }
+
+          # On pull_request_target we may arrive before Codex has posted. Wait (and exit
+          # early once evidence appears) so a verdict lands within a minute of the
+          # reviewer finishing even before this workflow exists on the default
+          # branch (the issue_comment relay and pull_request_review triggers run
+          # from there).
+          # No wait on edited / labeled / unlabeled: nothing a reviewer does follows
+          # from them, and Codex's later comment re-evaluates via the relay.
+          if [ "$WAIT_SECONDS" -gt 0 ] && [ "$EVENT" = "pull_request_target" ] \
+             && [ "$PR_ACTION" != "edited" ] && [ "$PR_ACTION" != "labeled" ] && [ "$PR_ACTION" != "unlabeled" ]; then
+            :
+          else
+            WAIT_SECONDS=0
+          fi
+
+          deadline=$((SECONDS + WAIT_SECONDS))
+          # The grace window starts when the reviewer wait ends, not when the
+          # run starts: with a 600 s wait, a window counted from the start had
+          # already closed by the time it applied (opportunity-builder#195).
+          reaction_deadline=$((deadline + REACTION_GRACE_SECONDS))
+          while true; do
+            evaluate_once
+            if [ -n "$EVIDENCE" ] || [ "$SUPERSEDED" = "1" ]; then
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              # Past the reviewer wait, keep polling only while the 👍 alone is
+              # missing, and only within its grace window.
+              if [ "$AWAIT_REACTION" != "1" ] || [ "$SECONDS" -ge "$reaction_deadline" ]; then
+                break
+              fi
+              echo "Codex summary shows this head Completed; waiting up to ${REACTION_GRACE_SECONDS}s for its 👍."
+              sleep 10
+              continue
+            fi
+            printf 'No evidence yet; waiting for a clean Codex result on this head, up to %ss.\n' \
+              "$WAIT_SECONDS"
+            sleep 20
+          done
+
+          publish_check
+          if [ -n "$EVIDENCE" ]; then
+            printf 'Verdict: success — %s\n' "$EVIDENCE"
+          else
+            missing_text="${MISSING_REASONS[*]}"
+            printf 'Verdict: no successful verdict — %s\n' "${missing_text:-nothing recorded}"
+          fi
