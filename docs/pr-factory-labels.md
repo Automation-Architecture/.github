@@ -11,11 +11,11 @@ GitHub labels; creating them does not enable repository settings.
 | `auto-merge-ok` | Retired: native auto-merge is not used (merges are done by hand), so this label has no effect. |
 | `do-not-stale` | Exempt from [pr-stale.yml](../.github/workflows/pr-stale.yml) (keep open). |
 | `security` | Exempt from stale/close. |
-| `client-bug` | GitHub PR label for a fix to a **bug a client reported** (a Linear `type: bug` card in the Client projects lane, team GPM, with a `Reported by: <client>` line). **Exempt** from stale/close while labeled (not a longer window). The fix may wait on the customer; auto-closing it would drop paid work. Remove the label when the wait is over. This is not the Linear `type` label. |
+| `client-bug` | GitHub PR label for a fix to a **bug a client reported** (which cards count: [software lifecycle](https://github.com/Automation-Architecture/aaa-SOP/blob/main/software-lifecycle.md)). **Exempt** from stale/close while labeled (not a longer window). The fix may wait on the customer; auto-closing it would drop paid work. Remove the label when the wait is over. This is not the Linear `type` label. |
 
 The `client-bug` PR label does not fast-track a merge: every PR is merged by hand
-once Codex and `agency-delivery/gate` pass. The client fast lane in aaa-SOP applies
-to a bug a client reported (see aaa-runbooks `reference/software-lifecycle.md`),
+once Codex and `agency-delivery/gate` pass. The client fast lane is defined in aaa-SOP
+[software lifecycle](https://github.com/Automation-Architecture/aaa-SOP/blob/main/software-lifecycle.md) and applies
 whatever labels the PR carries.
 
 ## Create on allowlisted repos
