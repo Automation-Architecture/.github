@@ -18,8 +18,10 @@ hosted repair service. One-time native `/hooks` trust is required; do not bypass
 This path uses a normal expected-head squash merge after fresh evidence checks. It
 does not enable GitHub native auto-merge, change its allowlist, create a new GitHub
 listener, or revive PR Autopilot. The existing ready/open Codex integration and central
-review request sweep remain in place. A fallback request is deduplicated by published
-packet revision and current head and requires a user-authenticated GitHub identity.
+review request sweep remain in place. A Codex re-request (when Codex's own
+auto-review did not fire) is deduplicated by published packet revision and current
+head and requires a user-authenticated GitHub identity. It asks Codex again; there
+is no fallback to another reviewer.
 
 ## Readiness contract
 
@@ -46,8 +48,10 @@ packet revision and current head and requires a user-authenticated GitHub identi
   genuine interruption. Do not ask Brad to repeat routine task authorization.
 - After merge, update Linear and distinguish merged, deployed and verified live.
 
-The hosted gate is policy v3.0: it enforces Linear, current-head CI, reviewer
-selection/fallback/two rounds and risk disclosure; it blocks P0/P1. The enrolled-task CLI additionally enforces the stricter Codex, packet freshness,
+The hosted gate is policy v3.1 (live 2026-11-03): it enforces Linear, current-head
+CI, Codex-only review (`review:codex`, no fallback, two rounds) and risk disclosure;
+it blocks P0/P1 and an armed native auto-merge. If Codex is unavailable it blocks with
+`REVIEWERS_EXHAUSTED`; remove and re-add `review:codex` to try again. The enrolled-task CLI additionally enforces the stricter Codex, packet freshness,
 P2/conversation and browser requirements. A successful hosted check alone never
 satisfies this task-delivery contract.
 

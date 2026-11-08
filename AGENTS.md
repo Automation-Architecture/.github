@@ -1,15 +1,22 @@
 # Shared workflow guidance
 
 Follow the [organization merge policy](https://github.com/Automation-Architecture/aaa-runbooks/blob/main/reference/merge-gate-target-system.md).
-No human approving review is required. The hosted v3 gate accepts the configured
-reviewer selected by label, applies fallback and at most two rounds, and requires
-current-head CI, Linear and risk disclosure. It blocks P0/P1; repository rules
-also require resolved conversations. Reviewer integrations must be available.
+No human approving review is required. The hosted gate (policy v3.1, live
+2026-11-03) asks Codex only, started by the `review:codex` label, with no fallback
+and at most two rounds, and requires current-head CI, Linear and risk disclosure.
+It blocks P0/P1; repository rules also require resolved conversations and a branch
+up to date with its base. If Codex is unavailable the gate blocks with
+`REVIEWERS_EXHAUSTED` until the label is re-added.
 Preserve another person's draft or merge hold. Use normal squash merges pinned
 to verified evidence; never admin bypass. Enrolled tasks have the stricter
 Codex/P2/browser contract below.
-Native auto-merge is allowed on all active repos after GAAA-4198 org protection
-is active. It never overrides a draft or user hold. Risky paths require a useful
+Merges are done by hand (CEO, 2026-11-03): native auto-merge is not used on any
+repo, and the gate blocks an armed one with `AUTO_MERGE_ENABLED`. Only the PR's
+owner merges it: every PR carries an `Owner:` line (the session that opened it,
+from `aaa-owner`), and a passing gate is not permission to merge someone else's
+PR. Merge with `aaa-merge <number>`, never a raw `gh pr merge`: every agent
+merges as the same GitHub user, so the wrapper's owner check is the only one,
+and it refuses (exit 5) when the line names another session. Risky paths require a useful
 Risk line, not another human approval. Do not add Autopilot-class listeners.
 Explicitly enrolled coding-agent tasks use the stricter
 [authorized task delivery contract](docs/agent-delivery.md) (GAAA-4596): current-head
