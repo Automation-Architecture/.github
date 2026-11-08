@@ -11,10 +11,11 @@ GitHub labels; creating them does not enable repository settings.
 | `auto-merge-ok` | Retired: native auto-merge is not used (merges are done by hand), so this label has no effect. |
 | `do-not-stale` | Exempt from [pr-stale.yml](../.github/workflows/pr-stale.yml) (keep open). |
 | `security` | Exempt from stale/close. |
-| `client-bug` | Client-facing bug; **exempt** from stale/close while labeled (not a longer window). A client bug may wait on the customer; auto-closing it would drop paid work. Remove the label when the wait is over. |
+| `client-bug` | GitHub PR label for a fix to a **bug card in the Client projects lane** (Linear team GPM). **Exempt** from stale/close while labeled (not a longer window). The fix may wait on the customer; auto-closing it would drop paid work. Remove the label when the wait is over. This is not the Linear `type` label. |
 
-`client-bug` no longer fast-tracks a merge: every PR is merged by hand once Codex
-and `agency-delivery/gate` pass.
+The `client-bug` PR label does not fast-track a merge: every PR is merged by hand
+once Codex and `agency-delivery/gate` pass. The client fast lane in aaa-SOP applies
+to a bug card in the Client projects lane, whatever labels the PR carries.
 
 ## Create on allowlisted repos
 
@@ -30,7 +31,7 @@ Or one repo:
 ```bash
 gh label create review:codex --repo Automation-Architecture/<repo> --color 5319e7 --description "Starts gate review; Codex is the only reviewer" --force
 gh label create do-not-stale --repo Automation-Architecture/<repo> --color 5319e7 --description "Exempt from org PR stale/close" --force
-gh label create client-bug --repo Automation-Architecture/<repo> --color d73a4a --description "Client-facing bug; exempt from stale/close" --force
+gh label create client-bug --repo Automation-Architecture/<repo> --color d73a4a --description "Fix for a Client projects lane (GPM) bug; exempt from stale/close" --force
 gh label create security --repo Automation-Architecture/<repo> --color b60205 --description "Security work; exempt from org PR stale/close" --force
 ```
 
