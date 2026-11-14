@@ -1,0 +1,33 @@
+name: Retired review verdict guard
+
+# Keep this pull-request workflow until the hosted Gate can safely stop
+# requiring base-branch CI when the last workflow is deleted in a PR.
+# The review/verdict producer and its evidence tests are retired; this check
+# ensures they do not reappear while letting the Gate observe CI on this head.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/review-verdict.yml
+      - .github/workflows/review-verdict-tests.yml
+      - tests/review-verdict/test_evidence.py
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/review-verdict.yml
+      - .github/workflows/review-verdict-tests.yml
+      - tests/review-verdict/test_evidence.py
+
+permissions:
+  contents: read
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Confirm retired verdict code stays absent
+        run: |
+          test ! -e .github/workflows/review-verdict.yml
+          test ! -e tests/review-verdict/test_evidence.py
