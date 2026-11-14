@@ -11,7 +11,6 @@ from urllib.parse import quote, urlparse
 PATTERNS = {
     "feat/dashboard-sync-workflow": ".github/workflows/dashboard-sync.yml",
     "feat/sentry-release-workflow": ".github/workflows/sentry-release.yml",
-    "feat/review-verdict-workflow": ".github/workflows/review-verdict.yml",
 }
 ROOT = Path(__file__).resolve().parents[1]
 
