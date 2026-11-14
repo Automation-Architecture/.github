@@ -24,7 +24,7 @@ labels=(
   # published. Existing copies are left in place; they have no effect.
   "review:codex|5319e7|Starts gate review; Codex is the only reviewer"
   "do-not-stale|5319e7|Exempt from org PR stale/close"
-  "client-bug|d73a4a|Client-facing bug; exempt from stale/close"
+  "client-bug|d73a4a|Fix for a client-reported bug; exempt from stale/close"
   "security|b60205|Security work; exempt from org PR stale/close"
 )
 
