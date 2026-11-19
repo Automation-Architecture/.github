@@ -18,11 +18,10 @@ PR. Merge with `aaa-merge <number>`, never a raw `gh pr merge`: every agent
 merges as the same GitHub user, so the wrapper's owner check is the only one,
 and it refuses (exit 5) when the line names another session. Risky paths require a useful
 Risk line, not another human approval. Do not add Autopilot-class listeners.
-Explicitly enrolled coding-agent tasks use the stricter
-[authorized task delivery contract](docs/agent-delivery.md) (GAAA-4596): current-head
-Codex review, zero unresolved P0/P1/P2/conversations, required browser evidence and
-App-pinned branch enforcement. This is a local continuation adapter, not a new
-GitHub listener or a change to the native auto-merge allowlist.
+Enrolled coding-agent tasks follow the same rules as all other work (Brad,
+2026-11-19: one standard); see [authorized task delivery](docs/agent-delivery.md)
+(GAAA-4596). Its delivery CLI is a local continuation adapter for the Builder, not a
+new GitHub listener or a change to the native auto-merge allowlist.
 Docs-only PRs use the same App gate and skip review only under its narrow docs rule.
 
 Multi-repo fanouts are [change-sets](docs/multi-repo-change-sets.md): prefer a
