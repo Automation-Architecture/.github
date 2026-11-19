@@ -23,7 +23,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/codex-review-sweep.yml"
 EVENT_WORKFLOW = ROOT / ".github/workflows/codex-auto-request.yml"
 DOC_AUTO_MERGE = ROOT / "archives/gate-v3-2026-11-01/doc-auto-merge.yml"
-REVIEW_VERDICT = ROOT / ".github/workflows/review-verdict.yml"
+REVIEW_VERDICT = ROOT / "archives/gate-v3-2026-11-01/review-verdict.yml"
 
 ORG = "acme"
 CODEX = "chatgpt-codex-connector[bot]"
